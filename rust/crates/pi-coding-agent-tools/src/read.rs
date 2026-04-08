@@ -147,7 +147,7 @@ fn execute_read(
     })
 }
 
-fn detect_supported_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
+pub fn detect_supported_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         return Some("image/jpeg");
     }

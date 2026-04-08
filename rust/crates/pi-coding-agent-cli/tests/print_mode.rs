@@ -1,0 +1,206 @@
+use pi_ai::{
+    FauxContentBlock, FauxModelDefinition, FauxResponse, RegisterFauxProviderOptions,
+    StreamOptions, register_faux_provider,
+};
+use pi_coding_agent_cli::{PrintModeOptions, PrintOutputMode, run_print_mode};
+use pi_coding_agent_core::{
+    CodingAgentCore, CodingAgentCoreOptions, MemoryAuthStorage, SessionBootstrapOptions,
+    create_coding_agent_core,
+};
+use pi_events::{StopReason, UserContent};
+use serde_json::Value;
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::PathBuf,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+fn unique_temp_dir(prefix: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("pi-coding-agent-cli-{prefix}-{unique}"));
+    fs::create_dir_all(&path).unwrap();
+    path
+}
+
+fn create_core(
+    provider: &str,
+    model_id: &str,
+    responses: Vec<FauxResponse>,
+    cwd: Option<PathBuf>,
+) -> (CodingAgentCore, pi_ai::FauxRegistration) {
+    let faux = register_faux_provider(RegisterFauxProviderOptions {
+        provider: provider.into(),
+        models: vec![FauxModelDefinition {
+            id: model_id.into(),
+            name: Some(model_id.into()),
+            reasoning: true,
+        }],
+        ..RegisterFauxProviderOptions::default()
+    });
+    faux.set_responses(responses);
+    let model = faux.get_model(Some(model_id)).unwrap();
+    let auth = Arc::new(MemoryAuthStorage::with_api_keys([(
+        model.provider.clone(),
+        "test-token",
+    )]));
+
+    let created = create_coding_agent_core(CodingAgentCoreOptions {
+        auth_source: auth,
+        built_in_models: vec![model],
+        models_json_path: None,
+        cwd,
+        tools: None,
+        system_prompt: String::new(),
+        bootstrap: SessionBootstrapOptions::default(),
+        stream_options: StreamOptions::default(),
+    })
+    .unwrap();
+
+    (created.core, faux)
+}
+
+#[tokio::test]
+async fn print_mode_writes_final_text_blocks_with_newlines() {
+    let (core, faux) = create_core(
+        "print-mode-faux",
+        "print-mode-faux-1",
+        vec![FauxResponse {
+            content: vec![
+                FauxContentBlock::Text(String::from("hello")),
+                FauxContentBlock::Text(String::from("world")),
+            ],
+            stop_reason: StopReason::Stop,
+            error_message: None,
+        }],
+        None,
+    );
+
+    let result = run_print_mode(
+        &core,
+        PrintModeOptions {
+            mode: PrintOutputMode::Text,
+            initial_message: Some(String::from("Say hello")),
+            ..PrintModeOptions::default()
+        },
+    )
+    .await;
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout, "hello\nworld\n");
+    assert!(result.stderr.is_empty());
+
+    faux.unregister();
+}
+
+#[tokio::test]
+async fn print_mode_serializes_agent_events_in_json_mode() {
+    let temp_dir = unique_temp_dir("json-mode");
+    let (core, faux) = create_core(
+        "json-mode-faux",
+        "json-mode-faux-1",
+        vec![
+            FauxResponse {
+                content: vec![FauxContentBlock::ToolCall {
+                    id: String::from("tool-1"),
+                    name: String::from("write"),
+                    arguments: BTreeMap::from([
+                        (
+                            String::from("path"),
+                            Value::String(String::from("notes.txt")),
+                        ),
+                        (
+                            String::from("content"),
+                            Value::String(String::from("hello")),
+                        ),
+                    ]),
+                }],
+                stop_reason: StopReason::ToolUse,
+                error_message: None,
+            },
+            FauxResponse::text("done"),
+        ],
+        Some(temp_dir.clone()),
+    );
+
+    let result = run_print_mode(
+        &core,
+        PrintModeOptions {
+            mode: PrintOutputMode::Json,
+            messages: vec![String::from("create file")],
+            ..PrintModeOptions::default()
+        },
+    )
+    .await;
+
+    assert_eq!(result.exit_code, 0);
+    assert!(result.stderr.is_empty());
+    assert_eq!(
+        fs::read_to_string(temp_dir.join("notes.txt")).unwrap(),
+        "hello"
+    );
+
+    let events = result
+        .stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let event_types = events
+        .iter()
+        .map(|event| event["type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(event_types.first().copied(), Some("agent_start"));
+    assert!(event_types.contains(&"tool_execution_start"));
+    assert!(event_types.contains(&"tool_execution_end"));
+    assert_eq!(event_types.last().copied(), Some("agent_end"));
+
+    let tool_end = events
+        .iter()
+        .find(|event| event["type"] == "tool_execution_end")
+        .unwrap();
+    assert_eq!(tool_end["toolName"], Value::String(String::from("write")));
+    assert_eq!(
+        tool_end["result"]["content"],
+        serde_json::to_value(vec![UserContent::Text {
+            text: String::from("Successfully wrote 5 bytes to notes.txt"),
+        }])
+        .unwrap()
+    );
+
+    faux.unregister();
+}
+
+#[tokio::test]
+async fn print_mode_returns_non_zero_for_assistant_errors() {
+    let (core, faux) = create_core(
+        "error-mode-faux",
+        "error-mode-faux-1",
+        vec![FauxResponse {
+            content: Vec::new(),
+            stop_reason: StopReason::Error,
+            error_message: Some(String::from("provider failure")),
+        }],
+        None,
+    );
+
+    let result = run_print_mode(
+        &core,
+        PrintModeOptions {
+            mode: PrintOutputMode::Text,
+            initial_message: Some(String::from("Hi")),
+            ..PrintModeOptions::default()
+        },
+    )
+    .await;
+
+    assert_eq!(result.exit_code, 1);
+    assert!(result.stdout.is_empty());
+    assert_eq!(result.stderr, "provider failure\n");
+
+    faux.unregister();
+}

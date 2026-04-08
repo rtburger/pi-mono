@@ -1,12 +1,32 @@
 # packages/coding-agent migration inventory
 
-Status: milestone 7 model/bootstrap/runtime/message-conversion slices plus default read/bash/edit/write tool wiring in `rust/crates/pi-coding-agent-core` and `rust/crates/pi-coding-agent-tools`
-Target crates: `rust/crates/pi-coding-agent-core`, `rust/crates/pi-coding-agent-tools`, later `rust/crates/pi-coding-agent-cli`, and `rust/crates/pi-coding-agent-tui`
+Status: milestone 10 adds Rust `pi-ai` built-in model catalog sourcing from TypeScript `models.generated.ts`, broadens env API-key lookup coverage, and wires `rust/apps/pi` to use `pi_ai::built_in_models()` instead of an empty catalog.
+Target crates: `rust/crates/pi-coding-agent-core`, `rust/crates/pi-coding-agent-tools`, `rust/crates/pi-coding-agent-cli`, and later `rust/crates/pi-coding-agent-tui`
 
 ## 1. Files analyzed
 
-TypeScript files read in full for the current coding-agent-core slices:
+TypeScript files read in full for the current CLI runner slice:
 - `packages/coding-agent/README.md`
+- `packages/coding-agent/src/main.ts`
+- `packages/coding-agent/src/cli.ts`
+- `packages/coding-agent/src/config.ts`
+- `packages/coding-agent/src/cli/args.ts`
+- `packages/coding-agent/src/cli/initial-message.ts`
+- `packages/coding-agent/src/cli/file-processor.ts`
+- `packages/coding-agent/src/cli/list-models.ts`
+- `packages/coding-agent/src/modes/print-mode.ts`
+- `packages/coding-agent/src/core/output-guard.ts`
+- `packages/coding-agent/src/core/tools/path-utils.ts`
+- `packages/coding-agent/src/core/tools/read.ts`
+- `packages/coding-agent/test/args.test.ts`
+- `packages/coding-agent/test/initial-message.test.ts`
+- `packages/coding-agent/test/print-mode.test.ts`
+- `packages/coding-agent/test/path-utils.test.ts`
+- `packages/coding-agent/test/tools.test.ts`
+- `packages/coding-agent/test/stdout-cleanliness.test.ts`
+- `packages/coding-agent/test/image-processing.test.ts`
+
+Previously analyzed TypeScript files still relevant to this slice:
 - `packages/coding-agent/src/core/model-resolver.ts`
 - `packages/coding-agent/src/core/model-registry.ts`
 - `packages/coding-agent/src/core/auth-storage.ts`
@@ -17,50 +37,53 @@ TypeScript files read in full for the current coding-agent-core slices:
 - `packages/coding-agent/src/core/agent-session-services.ts`
 - `packages/coding-agent/src/core/messages.ts`
 - `packages/coding-agent/src/core/tools/index.ts`
-- `packages/coding-agent/src/core/tools/read.ts`
 - `packages/coding-agent/src/core/tools/write.ts`
 - `packages/coding-agent/src/core/tools/bash.ts`
 - `packages/coding-agent/src/core/tools/edit.ts`
 - `packages/coding-agent/src/core/tools/edit-diff.ts`
 - `packages/coding-agent/src/core/tools/truncate.ts`
-- `packages/coding-agent/src/core/tools/path-utils.ts`
 - `packages/coding-agent/src/core/bash-executor.ts`
 - `packages/coding-agent/src/core/exec.ts`
-- `packages/coding-agent/src/core/output-guard.ts`
-- `packages/coding-agent/src/main.ts`
-- `packages/coding-agent/src/cli/args.ts`
 - `packages/coding-agent/test/model-resolver.test.ts`
 - `packages/coding-agent/test/model-registry.test.ts`
 - `packages/coding-agent/test/auth-storage.test.ts`
-- `packages/coding-agent/test/args.test.ts`
 
 Rust files reviewed before and during implementation:
 - `rust/Cargo.toml`
+- `rust/Cargo.lock`
+- `rust/apps/pi/Cargo.toml`
+- `rust/apps/pi/src/main.rs`
+- `rust/crates/pi-coding-agent-cli/Cargo.toml`
+- `rust/crates/pi-coding-agent-cli/src/lib.rs`
+- `rust/crates/pi-coding-agent-cli/src/args.rs`
+- `rust/crates/pi-coding-agent-cli/src/initial_message.rs`
+- `rust/crates/pi-coding-agent-cli/src/print_mode.rs`
 - `rust/crates/pi-coding-agent-core/Cargo.toml`
 - `rust/crates/pi-coding-agent-core/src/lib.rs`
+- `rust/crates/pi-coding-agent-core/src/auth.rs`
+- `rust/crates/pi-coding-agent-core/src/bootstrap.rs`
+- `rust/crates/pi-coding-agent-core/src/model_registry.rs`
+- `rust/crates/pi-coding-agent-core/src/model_resolver.rs`
 - `rust/crates/pi-coding-agent-core/src/runtime.rs`
+- `rust/crates/pi-coding-agent-core/tests/bootstrap.rs`
 - `rust/crates/pi-coding-agent-core/tests/runtime.rs`
 - `rust/crates/pi-coding-agent-tools/Cargo.toml`
 - `rust/crates/pi-coding-agent-tools/src/lib.rs`
 - `rust/crates/pi-coding-agent-tools/src/path_utils.rs`
-- `rust/crates/pi-coding-agent-tools/src/truncate.rs`
 - `rust/crates/pi-coding-agent-tools/src/read.rs`
-- `rust/crates/pi-coding-agent-tools/src/bash.rs`
-- `rust/crates/pi-coding-agent-tools/src/edit.rs`
-- `rust/crates/pi-coding-agent-tools/src/write.rs`
-- `rust/crates/pi-coding-agent-tools/tests/read_write.rs`
-- `rust/crates/pi-coding-agent-tools/tests/bash_edit.rs`
+- `rust/crates/pi-agent/Cargo.toml`
+- `rust/crates/pi-agent/src/lib.rs`
 - `rust/crates/pi-agent/src/agent.rs`
-- `rust/crates/pi-agent/src/error.rs`
 - `rust/crates/pi-agent/src/loop.rs`
 - `rust/crates/pi-agent/src/message.rs`
 - `rust/crates/pi-agent/src/state.rs`
 - `rust/crates/pi-agent/src/tool.rs`
 - `rust/crates/pi-ai/src/lib.rs`
 - `rust/crates/pi-events/src/lib.rs`
-- `migration/packages/agent.md`
+- `migration/packages/coding-agent.md`
+- `migration/notes/coding-agent-next-prompt.md`
 
-Note: this inventory is still intentionally partial. It covers coding-agent core startup/model/bootstrap/runtime/message-conversion behavior, not the full package, session manager, tools, CLI, or TUI.
+Note: this inventory is still intentionally partial. It now covers coding-agent model/bootstrap/runtime/message-conversion/default-tool slices, the Rust print-mode CLI library slice, and the first top-level non-interactive runner, but not the full TS package, session manager, resource loader, extensions, or TUI.
 
 ## 2. Behavior inventory summary
 
@@ -76,7 +99,7 @@ Observed TypeScript behavior now covered by Rust slices:
 - `models.json` loading for coding-agent registry state
 - provider-level baseUrl overrides for built-in models
 - custom-model merge/replace semantics by `provider + id`
-- per-model overrides for built-in models (current Rust slice: name/reasoning/input/contextWindow/maxTokens)
+- per-model overrides for built-in models (name/reasoning/input/contextWindow/maxTokens)
 - request-time provider/model header resolution
 - request-time provider API-key resolution from literal values, env vars, and shell commands
 - `getAvailable()` using configured-auth presence without executing command-backed keys
@@ -100,7 +123,7 @@ Observed TypeScript behavior now covered by Rust slices:
   - `branchSummary`
   - `compactionSummary`
 - `bashExecution.excludeFromContext` filtering during conversion to provider context
-- end-to-end runtime installation of the coding-agent-specific `convert_to_llm` hook, so custom `pi-agent::AgentMessage::Custom` entries now reach the provider as user-context messages instead of being dropped
+- end-to-end runtime installation of the coding-agent-specific `convert_to_llm` hook, so custom `pi-agent::AgentMessage::Custom` entries reach the provider as user-context messages instead of being dropped
 - initial Rust tool implementations for:
   - `read`
   - `bash`
@@ -110,17 +133,34 @@ Observed TypeScript behavior now covered by Rust slices:
 - end-to-end tool-call execution through `pi-agent` + `pi-ai` faux provider for:
   - the `write` tool
   - the `edit` tool (including legacy `oldText` / `newText` argument preparation)
+- first Rust CLI-side non-interactive behaviors from `packages/coding-agent/src/cli/args.ts`, `cli/initial-message.ts`, and `modes/print-mode.ts`:
+  - parse core print-mode flags and diagnostics (`--print`, `--mode`, `--provider`, `--model`, `--api-key`, `--system-prompt`, `--append-system-prompt`, `--thinking`, `@file`, message args, unknown long flags)
+  - preserve TS warning/error semantics for invalid thinking levels, unknown tools, and unknown short flags
+  - resolve app mode the same way as TS (`rpc` > `json` > print when `-p` or stdin is piped > interactive)
+  - merge stdin text, file text, and the first CLI message into one initial prompt while shifting the remaining messages forward
+  - preserve file-image passthrough in the initial-message builder result
+  - run print mode directly against `pi-coding-agent-core::CodingAgentCore`
+  - in text mode, emit only final assistant text blocks, each newline-terminated
+  - in text mode, treat assistant `error` / `aborted` stop reasons as exit code `1` with stderr fallback text
+  - in json mode, serialize buffered `pi-agent` event sequences as newline-delimited JSON without requiring session-manager wiring
+- newly covered top-level non-interactive runner behaviors:
+  - parse argv, normalize piped stdin the TS way (`trim()` + drop empty input), and feed the result into initial-message assembly
+  - basic `@file` preprocessing for text files and supported images before print-mode execution
+  - CLI `--api-key` runtime override applied to the resolved request provider before streaming
+  - non-interactive error rendering for parse diagnostics, bootstrap diagnostics, unsupported flags, and no-model startup
+  - minimal `--help` and `--version` handling in the Rust CLI path
+  - minimal `rust/apps/pi` entrypoint that forwards argv/stdin/stdout/stderr into the Rust runner
+- newly covered AI/catalog behaviors now consumed by coding-agent:
+  - Rust `pi-ai` built-in model catalog parsed directly from TypeScript `packages/ai/src/models.generated.ts`
+  - Rust `rust/apps/pi` now injects `pi_ai::built_in_models()` into the coding-agent runtime path instead of an empty catalog
+  - broader env API-key lookup coverage now feeds coding-agent model availability checks through `EnvAuthSource`
 
 Still deferred:
-- dynamic provider registration/unregistration
-- OAuth refresh/login behavior
-- auth.json persistence/locking
-- compat/cost metadata parity
-- `resolveModelScope()` glob expansion
-- built-in model catalog sourcing from Rust `pi-ai`
+- session-manager/settings-manager/resource-loader integration
+- extension lifecycle and session headers in JSON mode
 - `blockImages` filtering wrapper from `packages/coding-agent/src/core/sdk.ts`
-- session-manager/settings-manager/resource-loader integration beyond bootstrap selection
-- CLI and TUI layers
+- CLI list-models output and export mode
+- interactive mode and TUI layers
 
 ## 3. Compatibility notes and edge cases
 
@@ -140,18 +180,29 @@ Confirmed from TypeScript code/tests and preserved in Rust where implemented:
 - `custom` messages with string content become a single user text block; `custom` messages with block arrays preserve text/image blocks unchanged
 - `branchSummary` and `compactionSummary` use the exact TS summary wrapper strings now exported from Rust
 - unknown custom roles are filtered out of provider context, matching the TS behavior of dropping unsupported message types from conversion
-- runtime streaming now mirrors the TS `streamFn` seam conceptually: model/auth selection lives in coding-agent core, while actual provider streaming stays in `pi-ai`
+- CLI initial-message building preserves the TS mutation behavior of consuming only the first message into `initialMessage`
+- text print mode writes only assistant text blocks and ignores non-text assistant content, matching TS `runPrintMode()`
+- text print mode uses `assistant.errorMessage ?? "Request <stopReason>"` behavior for assistant `error` / `aborted` messages
+- top-level stdin handling now mirrors TS `readPipedStdin()` by trimming trailing/leading whitespace and treating empty stdin as absent
+- text `@file` arguments are embedded with the same `<file name="...">...</file>` envelope shape as TS
 
 Current compatibility deviations:
-- Rust custom-message transport uses typed payload structs serialized into `pi-agent::CustomAgentMessage` payloads rather than a TS-style declaration-merging type system
+- Rust json print mode still emits serialized `pi-agent` events only; it does not include TS session-manager JSON headers or extension/session wrapper events
+- Rust json print mode buffers lines until the run completes instead of writing directly to stdout as events arrive
+- Rust help text is currently a short migration-oriented help block, not TS full help output
+- the Rust runner explicitly rejects unsupported flags (`--models`, session flags, resource flags, `--list-models`, `--export`) instead of partially emulating TS behavior
+- Rust `@file` image preprocessing currently attaches supported images without TS auto-resize and without dimension-note text
+- Rust `@file` preprocessing currently uses magic-byte image detection but does not yet port the full TS image-resize pipeline
+- `rust/apps/pi` now uses the Rust `pi-ai` built-in catalog, but that catalog is still a migration-time parse of the TS generated source rather than a Rust-native generated artifact
+- app-side auth coverage is broader now, but it still does not reach full TS parity for every provider/auth mode (for example OAuth-backed flows and some cloud-specific credential chains remain incomplete)
+- CLI `--api-key` override is currently wired for explicit `--model` flows only; TS `--models` scoped-model interactions remain deferred with the rest of model-scope support
 - malformed payloads for recognized custom roles are currently skipped during conversion rather than surfaced as explicit diagnostics
 - the TS `blockImages` wrapper is not yet ported into the runtime path because settings-manager wiring is still deferred
 - image auto-resize parity from TS `read.ts` is not yet ported; Rust currently returns supported images as-is
-- macOS filename fallback parity is partial; Rust currently handles Unicode-space normalization, `@` stripping, `~` expansion, and one curly-quote / AM-PM variant, but not full NFD retry behavior
+- macOS filename fallback parity is partial; Rust currently handles Unicode-space normalization, `@` stripping, `~` expansion, and a curly-quote / AM-PM variant, but not full TS NFD retry behavior in the Rust path-utils slice
 - write/edit file-mutation queue semantics are not yet ported; current Rust write/edit execution is direct
 - bash output updates are not streamed incrementally through `AgentToolUpdateCallback` yet; Rust currently returns finalized command output only
-- edit tool details do not yet include TS-style rendered unified diff metadata
-- Rust registry still operates over injected built-in `Vec<Model>` snapshots rather than a Rust-side `pi-ai` built-in model catalog
+- edit tool details do not yet include full TS-style rendered unified diff metadata
 - Rust does not yet carry TS `compat` and `cost` metadata through registry state
 - Rust does not yet port TS dynamic provider registration, OAuth provider integration, or auth.json persistence/locking
 - shell command execution currently uses platform shell invocation without TS-style timeout handling
@@ -229,8 +280,6 @@ Implemented in `pi-coding-agent-core`:
   - `create_custom_message()`
   - `create_branch_summary_message()`
   - `create_compaction_summary_message()`
-- design choice:
-  - use strongly typed Rust payload structs serialized into `pi-agent::AgentMessage::Custom` payload JSON, then decode them back during LLM conversion
 
 ### Initial tool slice (`pi-coding-agent-tools`)
 - `truncate.rs`
@@ -247,6 +296,7 @@ Implemented in `pi-coding-agent-core`:
 - `read.rs`
   - `read_tool_definition()`
   - `create_read_tool()`
+  - `detect_supported_image_mime_type()`
 - `bash.rs`
   - `bash_tool_definition()`
   - `create_bash_tool()`
@@ -259,6 +309,7 @@ Implemented in `pi-coding-agent-core`:
 - `lib.rs`
   - `create_read_write_tools()`
   - `create_coding_tools()`
+  - re-exports for `resolve_read_path()` / `resolve_to_cwd()` and image detection helpers used by the CLI slice
 
 ### Minimal runtime slice
 - `runtime.rs`
@@ -277,22 +328,54 @@ Implemented in `pi-coding-agent-core`:
   - `continue_turn()`
   - `abort()`
   - `wait_for_idle()`
-- runtime integration:
-  - installs `convert_to_llm()` on the embedded `pi-agent::Agent`, so custom coding-agent messages now participate in provider context generation automatically
-  - accepts optional `cwd` and explicit `tools`
-  - defaults to `pi-coding-agent-tools::create_coding_tools(cwd)` when tools are not provided
 
-Design choices for these milestones:
-- reuse `pi_agent::ThinkingLevel` for agent parity
-- reuse `pi_events::Model` rather than inventing a second model type for the current slice
-- keep auth persistence/OAuth out of scope for now behind `AuthSource`
-- keep registry side-effect-free apart from explicit disk reads and shell/env resolution
-- keep CLI/process exits out of core; warnings/errors return as diagnostics
-- make bootstrap pure and non-interactive so later CLI/runtime layers can call it directly
-- make runtime reuse `pi-agent::Agent` directly instead of building a parallel state machine in coding-agent core
-- keep custom message support minimal and local to coding-agent-core instead of widening `pi-agent` with coding-agent-specific roles
-- put initial filesystem/shell tools in `pi-coding-agent-tools` rather than bloating core with file IO logic
-- keep the first tool slice intentionally focused on the default coding tools only, not the optional read-only set
+### CLI library slices (`pi-coding-agent-cli`)
+- `args.rs`
+  - `Mode`
+  - `PrintOutputMode`
+  - `AppMode`
+  - `DiagnosticKind`
+  - `Diagnostic`
+  - `ToolName`
+  - `ListModels`
+  - `UnknownFlagValue`
+  - `Args`
+  - `is_valid_thinking_level()`
+  - `parse_thinking_level()`
+  - `parse_args()`
+  - `resolve_app_mode()`
+  - `to_print_output_mode()`
+- `initial_message.rs`
+  - `InitialMessageResult`
+  - `build_initial_message()`
+- `print_mode.rs`
+  - `PrintModeOptions`
+  - `PrintModeRunResult`
+  - `run_print_mode()`
+- new modules in this milestone:
+  - `auth.rs`
+    - `OverlayAuthSource`
+    - `EnvAuthSource`
+  - `file_processor.rs`
+    - `ProcessedFiles`
+    - `process_file_arguments()`
+  - `runner.rs`
+    - `RunCommandOptions`
+    - `RunCommandResult`
+    - `run_command()`
+- design choices:
+  - keep the Rust CLI session-manager-free and TUI-free for now
+  - make the runner reuse `create_coding_agent_core()` directly instead of introducing a second orchestration stack
+  - keep unsupported flags explicit rather than silently ignoring them
+  - reuse tool/path helper code from `pi-coding-agent-tools` instead of duplicating path resolution or image signature logic again
+  - keep stdout/stderr buffered in the library so tests can assert exact behavior without running a subprocess
+
+### Minimal binary scaffold (`rust/apps/pi`)
+- `src/main.rs`
+  - forwards argv/stdin into `run_command()`
+  - writes buffered stdout/stderr and returns `ExitCode`
+  - resolves `PI_CODING_AGENT_DIR` / default `~/.pi/agent/models.json`
+- current design intentionally keeps the app thin and lets `pi-coding-agent-cli` own non-interactive behavior
 
 ## 5. Validation plan / test coverage
 
@@ -328,15 +411,6 @@ Rust regression coverage now mirrors TypeScript behavior for:
   - prompt-time auth resolution failure materializing as assistant error message
   - no-model startup failure path
   - custom coding-agent messages affecting provider prompt context through the installed conversion hook
-- coding-agent message conversion for:
-  - bash execution text formatting
-  - `excludeFromContext` skipping
-  - custom string payloads
-  - custom text/image block payloads
-  - branch summary wrappers
-  - compaction summary wrappers
-  - unknown custom-role filtering
-- runtime creation and prompt flow for:
   - successful default read/bash/edit/write tool registration
   - end-to-end `write` tool execution through a faux-provider tool-call turn
   - end-to-end `edit` tool execution through a faux-provider tool-call turn
@@ -352,29 +426,45 @@ Rust regression coverage now mirrors TypeScript behavior for:
   - edit multi-replacement application
   - edit duplicate-match detection
   - edit legacy argument preparation
+- CLI slice coverage for:
+  - print-mode flag parsing
+  - tool/unknown-flag/thinking diagnostics
+  - `--list-models` optional search parsing
+  - app-mode resolution parity
+  - initial-message merge/mutation behavior
+  - text-mode final assistant rendering
+  - json-mode agent-event serialization through tool execution
+  - assistant-error exit code handling in text mode
+- new runner coverage in this milestone for:
+  - `--api-key` runtime override reaching the provider stream options
+  - merged stdin + `@file` text + `@file` image + first-message prompt construction through the full runner path
+  - interactive-mode rejection in the current Rust app slice
+  - top-level `--api-key` usage error when no explicit model is supplied
 
 Deferred to later milestones:
-- full auth storage port (`auth.json`, runtime overrides, persistence, locking, OAuth refresh)
+- full auth storage port (`auth.json`, runtime overrides beyond in-memory/env tests, persistence, locking, OAuth refresh)
 - dynamic provider lifecycle APIs
 - model compat/cost metadata behavior
 - scope globbing and settings/session wiring
 - `blockImages` filtering parity
-- CLI behavior and TUI rendering/state tests
+- full help/list-models/export/session CLI behavior
+- TUI rendering/state tests
 
 ## 6. Known risks / open questions
 
-- Rust still lacks a built-in model catalog sourced from `packages/ai`; callers currently inject built-in models
-- `pi_events::Model` is narrower than TS `Model<Api>` and will likely need widening or side metadata for compat/cost-sensitive behavior
-- the current `AuthSource` seam is intentionally minimal and may need reshaping when auth.json/OAuth support is ported
-- `resolveModelScope()` glob semantics remain unported, so model cycling/config scope is still incomplete
-- `blockImages` remains separate from the current runtime path until settings-manager state exists in Rust
-- runtime currently exposes `pi-agent::Agent` directly; later milestones need to decide whether to keep that as the primary core API or wrap it in a coding-agent-specific session/runtime facade
+- built-in catalog sourcing now exists, but it is implemented by parsing the TS generated source at runtime, which is acceptable for migration but not the likely final form
+- `EnvAuthSource` coverage is broader now, but it still trails TS for full provider/auth parity
+- the current runner rejects many flags explicitly; that keeps behavior honest, but it means the Rust binary is still far from TS CLI surface parity
+- JSON print mode will need reshaping once session-manager/runtime wrapper events are ported, otherwise downstream consumers may bind to the temporary agent-event schema
+- the current `@file` path only ports basic text/image preprocessing; TS image resizing, dimension notes, and some path-resolution edge cases still need work
+- top-level help/version are now wired, but help text is intentionally minimal and not yet a TS-compatible snapshot
+- runtime currently exposes `pi-agent::Agent` directly; later milestones still need to decide whether to keep that as the primary core API or wrap it in a coding-agent-specific session/runtime facade
 - bash execution currently favors simple finalized output parity over TS-style live partial updates and shell backend customization hooks
 - edit replacement logic now covers uniqueness/overlap/legacy args, but diff-detail parity remains incomplete
 
 ## 7. Recommended next step
 
-Move to the next non-interactive coding-agent layer:
-- start the `pi-coding-agent-cli` print-mode slice on top of the current core + default tools
-- keep it session-manager-free and TUI-free for now
-- only revisit the `blockImages` wrapper from `sdk.ts` if the CLI path immediately needs attachment filtering
+Stay in `packages/coding-agent`, `rust/crates/pi-coding-agent-cli`, `rust/crates/pi-coding-agent-core`, and `rust/crates/pi-ai`:
+- port `--list-models` on top of the new Rust-backed catalog and current registry/auth path
+- then continue filling in provider/auth parity gaps that still affect model availability and startup selection
+- keep session-manager and TUI work deferred until the non-interactive CLI surface is broader

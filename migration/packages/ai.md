@@ -1,6 +1,6 @@
 # packages/ai migration inventory
 
-Status: milestone 6 scaffold + faux provider slice + OpenAI Responses streaming/replay + tool-definition slice
+Status: milestone 7 scaffold + faux provider slice + OpenAI Responses streaming/replay + tool-definition slice + built-in model catalog parsing from TypeScript `models.generated.ts`
 Target crate: `rust/crates/pi-ai`
 
 ## 1. Files analyzed
@@ -77,6 +77,10 @@ Observed env/config semantics in TS:
 - OAuth-backed providers: anthropic, github-copilot, google-gemini-cli, google-antigravity, openai-codex
 
 Current Rust slice preserves:
+- built-in model catalog loading directly from TypeScript `packages/ai/src/models.generated.ts`
+- provider/model lookup helpers (`get_model`, `get_models`, `get_providers`)
+- `supports_xhigh()` and `models_are_equal()` behavior from `packages/ai/src/models.ts`
+- broader env API-key lookup coverage across the static provider env vars currently implemented in TS `env-api-keys.ts`
 - `session_id`
 - `cache_retention`
 - explicit `api_key`
@@ -129,6 +133,7 @@ Phase 1 compatibility target is intentionally narrow:
 - preserve faux-provider queue semantics
 - preserve usage estimation and prompt-cache simulation from the TS faux provider
 - preserve abort behavior and terminal error-message encoding
+- preserve the built-in model catalog and the small model-helper surface needed by coding-agent startup (`get_model`, `get_models`, `get_providers`, `supports_xhigh`, `models_are_equal`)
 
 Deferred from phase 1:
 - real HTTP providers
@@ -158,7 +163,8 @@ Public API goals for `pi-ai`:
 
 Known risks:
 - current Rust slice uses a minimal subset of the TS type system
-- no real provider normalization yet
+- built-in catalog currently parses the TypeScript-generated source at runtime via embedded source text rather than using a Rust-native generated catalog step
+- no real provider normalization yet beyond the current OpenAI Responses slice
 - prompt cache and serialization logic covers only first-slice faux behavior
 - TS uses some behaviors based on JavaScript dynamic flexibility that will need more explicit Rust enums/traits later
 
@@ -269,7 +275,7 @@ Covered stream/request semantics in Rust tests:
 ## 12. Unknowns requiring validation
 
 - exact provider selection/order after the OpenAI Responses payload slice
-- whether Rust-side model metadata should be generated from TS `models.generated.ts` or from shared external source during migration
+- whether the temporary runtime parsing of TS `models.generated.ts` should later become a checked-in Rust-generated artifact or a build-time generation step
 - how much of TS `SimpleStreamOptions` reasoning normalization should live in `pi-ai` vs provider-specific modules
 - whether faux provider should remain in `pi-ai` or move to `pi-test-harness` after the first provider lands
 - whether to continue AI with validation/tool execution plumbing for agent support or switch to Anthropic for a second end-to-end provider

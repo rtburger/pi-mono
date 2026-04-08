@@ -7,7 +7,8 @@ mod write;
 
 pub use bash::{bash_tool_definition, create_bash_tool};
 pub use edit::{create_edit_tool, edit_tool_definition};
-pub use read::{create_read_tool, read_tool_definition};
+pub use path_utils::{resolve_read_path, resolve_to_cwd};
+pub use read::{create_read_tool, detect_supported_image_mime_type, read_tool_definition};
 pub use truncate::{
     DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, TruncationOptions, TruncationResult, format_size,
     truncate_head, truncate_tail,

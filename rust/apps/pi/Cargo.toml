@@ -5,3 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+pi-ai = { path = "../../crates/pi-ai" }
+pi-coding-agent-cli = { path = "../../crates/pi-coding-agent-cli" }
+tokio.workspace = true
