@@ -1,6 +1,6 @@
 # packages/ai migration inventory
 
-Status: milestone 4 scaffold + faux provider slice + OpenAI Responses incremental streaming + signature replay slice
+Status: milestone 5 scaffold + faux provider slice + OpenAI Responses streaming/replay + Copilot header slice
 Target crate: `rust/crates/pi-ai`
 
 ## 1. Files analyzed
@@ -206,15 +206,17 @@ Current Rust provider slice implements deterministic request-building coverage f
 
 Deferred OpenAI Responses work:
 - redacted reasoning parity and explicit encrypted-content replay rules
-- Copilot-specific headers and auth behavior
+- broader Copilot auth parity beyond current bearer/env/header slice
 - model-catalog integration for the runtime provider
 - broader parity for provider-specific runtime options beyond the current minimal passthrough
 - live aborted-stream usage/accounting parity where upstream reports usage before termination
 
 Current Rust runtime provider path also includes:
 - lazy built-in registration of the minimal `openai-responses` provider on first dispatch
-- API key resolution from explicit stream options or `OPENAI_API_KEY`
+- API key resolution from explicit stream options or provider env vars (`OPENAI_API_KEY`, Copilot token env fallbacks)
 - passthrough of `max_tokens`, `temperature`, `reasoning_effort`, `reasoning_summary`, `session_id`, and `cache_retention`
+- request-header merging via runtime options
+- GitHub Copilot dynamic request headers (`X-Initiator`, `Openai-Intent`, `Copilot-Vision-Request`)
 - immediate abort handling before HTTP send and while awaiting streamed body chunks
 
 Current Rust transport-adjacent coverage now includes:
@@ -259,6 +261,7 @@ Covered stream/request semantics in Rust tests:
 - synthetic tool-result insertion for orphaned tool calls
 - same-provider different-model `fc_*` item-id elision
 - cross-model thinking-to-text conversion for replay
+- GitHub Copilot dynamic headers and runtime header override precedence
 
 ## 12. Unknowns requiring validation
 
@@ -266,4 +269,4 @@ Covered stream/request semantics in Rust tests:
 - whether Rust-side model metadata should be generated from TS `models.generated.ts` or from shared external source during migration
 - how much of TS `SimpleStreamOptions` reasoning normalization should live in `pi-ai` vs provider-specific modules
 - whether faux provider should remain in `pi-ai` or move to `pi-test-harness` after the first provider lands
-- whether to continue OpenAI Responses next with redacted reasoning/auth parity or switch to Anthropic for a second end-to-end provider
+- whether to continue OpenAI Responses next with redacted reasoning + abort-usage parity or switch to Anthropic for a second end-to-end provider

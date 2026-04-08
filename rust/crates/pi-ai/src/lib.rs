@@ -34,6 +34,7 @@ pub struct StreamOptions {
     pub session_id: Option<String>,
     pub cache_retention: CacheRetention,
     pub api_key: Option<String>,
+    pub headers: BTreeMap<String, String>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
     pub reasoning_effort: Option<String>,
@@ -80,6 +81,10 @@ pub fn unregister_provider(api: &str) {
 pub fn get_env_api_key(provider: &str) -> Option<String> {
     match provider {
         "openai" => std::env::var("OPENAI_API_KEY").ok(),
+        "github-copilot" => std::env::var("COPILOT_GITHUB_TOKEN")
+            .ok()
+            .or_else(|| std::env::var("GH_TOKEN").ok())
+            .or_else(|| std::env::var("GITHUB_TOKEN").ok()),
         _ => None,
     }
 }

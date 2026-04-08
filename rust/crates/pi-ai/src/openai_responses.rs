@@ -1221,6 +1221,16 @@ pub fn stream_openai_responses_http(
     api_key: String,
     signal: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> AssistantEventStream {
+    stream_openai_responses_http_with_headers(model, params, api_key, signal, BTreeMap::new())
+}
+
+pub fn stream_openai_responses_http_with_headers(
+    model: Model,
+    params: OpenAiResponsesRequestParams,
+    api_key: String,
+    signal: Option<tokio::sync::watch::Receiver<bool>>,
+    request_headers: BTreeMap<String, String>,
+) -> AssistantEventStream {
     Box::pin(stream! {
         let mut signal = signal;
         let mut state = OpenAiResponsesStreamState::new(&model);
@@ -1230,12 +1240,14 @@ pub fn stream_openai_responses_http(
             return;
         }
 
-        let send_future = reqwest::Client::new()
+        let mut request_builder = reqwest::Client::new()
             .post(format!("{}/responses", model.base_url.trim_end_matches('/')))
             .bearer_auth(api_key)
-            .header("accept", "text/event-stream")
-            .json(&params)
-            .send();
+            .header("accept", "text/event-stream");
+        for (name, value) in &request_headers {
+            request_builder = request_builder.header(name, value);
+        }
+        let send_future = request_builder.json(&params).send();
         tokio::pin!(send_future);
 
         let mut response = if let Some(signal) = signal.as_mut() {
@@ -1565,6 +1577,7 @@ impl AiProvider for OpenAiResponsesProvider {
                 }),
             },
         );
+        let request_headers = build_runtime_request_headers(&model, &context, &options.headers);
 
         let api_key = options
             .api_key
@@ -1572,9 +1585,13 @@ impl AiProvider for OpenAiResponsesProvider {
             .or_else(|| crate::get_env_api_key(&model.provider));
 
         match api_key {
-            Some(api_key) => {
-                stream_openai_responses_http(model, params, api_key, options.signal.clone())
-            }
+            Some(api_key) => stream_openai_responses_http_with_headers(
+                model,
+                params,
+                api_key,
+                options.signal.clone(),
+                request_headers,
+            ),
             None => Box::pin(stream! {
                 yield Ok(AssistantEvent::Error {
                     reason: StopReason::Error,
@@ -1587,6 +1604,50 @@ impl AiProvider for OpenAiResponsesProvider {
 
 pub fn register_openai_responses_provider() {
     register_provider("openai-responses", Arc::new(OpenAiResponsesProvider));
+}
+
+fn build_runtime_request_headers(
+    model: &Model,
+    context: &Context,
+    option_headers: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut headers = BTreeMap::new();
+
+    if model.provider == "github-copilot" {
+        headers.extend(build_copilot_dynamic_headers(&context.messages));
+    }
+
+    headers.extend(option_headers.clone());
+    headers
+}
+
+fn build_copilot_dynamic_headers(messages: &[Message]) -> BTreeMap<String, String> {
+    let mut headers = BTreeMap::from([
+        ("X-Initiator".to_string(), infer_copilot_initiator(messages).to_string()),
+        ("Openai-Intent".to_string(), "conversation-edits".to_string()),
+    ]);
+
+    if has_copilot_vision_input(messages) {
+        headers.insert("Copilot-Vision-Request".to_string(), "true".to_string());
+    }
+
+    headers
+}
+
+fn infer_copilot_initiator(messages: &[Message]) -> &'static str {
+    match messages.last() {
+        Some(Message::User { .. }) | None => "user",
+        _ => "agent",
+    }
+}
+
+fn has_copilot_vision_input(messages: &[Message]) -> bool {
+    messages.iter().any(|message| match message {
+        Message::User { content, .. } | Message::ToolResult { content, .. } => content
+            .iter()
+            .any(|part| matches!(part, UserContent::Image { .. })),
+        Message::Assistant { .. } => false,
+    })
 }
 
 fn now_ms() -> u64 {
