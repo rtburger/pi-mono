@@ -1,0 +1,30 @@
+[workspace]
+members = [
+  "crates/pi-core",
+  "crates/pi-config",
+  "crates/pi-events",
+  "crates/pi-test-harness",
+  "crates/pi-ai",
+  "crates/pi-agent",
+  "crates/pi-tui",
+  "crates/pi-coding-agent-core",
+  "crates/pi-coding-agent-tools",
+  "crates/pi-coding-agent-cli",
+  "crates/pi-coding-agent-tui",
+  "apps/pi",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+async-stream = "0.3"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+tokio-stream = "0.1"

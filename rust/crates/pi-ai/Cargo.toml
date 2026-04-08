@@ -1,0 +1,17 @@
+[package]
+name = "pi-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-stream.workspace = true
+futures.workspace = true
+pi-events = { path = "../pi-events" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }

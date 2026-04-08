@@ -1,0 +1,7 @@
+[
+  "response.created",
+  "response.output_item.added",
+  "response.output_text.delta",
+  "response.output_item.done",
+  "response.completed"
+]

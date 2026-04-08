@@ -1,0 +1,7 @@
+{
+  "model": "gpt-5-mini",
+  "stream": true,
+  "store": false,
+  "has_reasoning": false,
+  "first_role": "developer"
+}
