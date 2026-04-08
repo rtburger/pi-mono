@@ -120,7 +120,10 @@ pub struct AfterToolCallResult {
 
 enum ToolExecutionProgress {
     Update(AgentToolResult),
-    Complete { result: AgentToolResult, is_error: bool },
+    Complete {
+        result: AgentToolResult,
+        is_error: bool,
+    },
 }
 
 pub trait AssistantStreamer: Send + Sync {

@@ -7,7 +7,12 @@ pub type ToolFuture = Pin<Box<dyn Future<Output = Result<AgentToolResult, AgentT
 pub type AgentToolUpdateCallback = Arc<dyn Fn(AgentToolResult) + Send + Sync>;
 
 type ToolExecutor = Arc<
-    dyn Fn(String, Value, Option<watch::Receiver<bool>>, Option<AgentToolUpdateCallback>) -> ToolFuture
+    dyn Fn(
+            String,
+            Value,
+            Option<watch::Receiver<bool>>,
+            Option<AgentToolUpdateCallback>,
+        ) -> ToolFuture
         + Send
         + Sync,
 >;
@@ -87,7 +92,8 @@ impl AgentTool {
         args: Value,
         signal: Option<watch::Receiver<bool>>,
     ) -> Result<AgentToolResult, AgentToolError> {
-        self.execute_with_updates(tool_call_id, args, signal, None).await
+        self.execute_with_updates(tool_call_id, args, signal, None)
+            .await
     }
 
     pub async fn execute_with_updates(

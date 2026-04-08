@@ -604,7 +604,10 @@ async fn emits_tool_execution_update_events_before_completion() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(tool_event_sequence, vec!["start", "update", "update", "end"]);
+    assert_eq!(
+        tool_event_sequence,
+        vec!["start", "update", "update", "end"]
+    );
 }
 
 #[tokio::test]
