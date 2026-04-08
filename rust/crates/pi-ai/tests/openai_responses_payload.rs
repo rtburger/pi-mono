@@ -112,6 +112,204 @@ fn converts_foreign_assistant_tool_call_to_function_call() {
 }
 
 #[test]
+fn inserts_synthetic_tool_result_for_orphaned_tool_call() {
+    let context = Context {
+        system_prompt: None,
+        messages: vec![
+            Message::User {
+                content: vec![UserContent::Text {
+                    text: "Use the tool first.".into(),
+                }],
+                timestamp: 1,
+            },
+            Message::Assistant {
+                content: vec![AssistantContent::ToolCall {
+                    id: "call_123|fc_123".into(),
+                    name: "calculate".into(),
+                    arguments: tool_call_arguments(&[("expression", json!("25 * 18"))]),
+                }],
+                api: "openai-responses".into(),
+                provider: "openai".into(),
+                model: "gpt-5-mini".into(),
+                response_id: None,
+                usage: usage(),
+                stop_reason: StopReason::ToolUse,
+                error_message: None,
+                timestamp: 2,
+            },
+            Message::User {
+                content: vec![UserContent::Text {
+                    text: "Never mind, what is 2 + 2?".into(),
+                }],
+                timestamp: 3,
+            },
+        ],
+    };
+
+    let items = convert_openai_responses_messages(
+        &model("openai", "gpt-5-mini"),
+        &context,
+        &["openai", "openai-codex", "opencode"],
+        OpenAiResponsesConvertOptions {
+            include_system_prompt: false,
+        },
+    );
+
+    assert!(matches!(items[0], ResponsesInputItem::Message { .. }));
+    assert!(matches!(items[1], ResponsesInputItem::FunctionCall { .. }));
+    match &items[2] {
+        ResponsesInputItem::FunctionCallOutput { call_id, output } => {
+            assert_eq!(call_id, "call_123");
+            assert_eq!(output, &ResponsesFunctionCallOutput::Text("No result provided".into()));
+        }
+        other => panic!("expected synthetic function_call_output, got {other:?}"),
+    }
+    match &items[3] {
+        ResponsesInputItem::Message { role, .. } => assert_eq!(role, "user"),
+        other => panic!("expected follow-up user message, got {other:?}"),
+    }
+}
+
+#[test]
+fn skips_aborted_assistant_messages_during_replay() {
+    let context = Context {
+        system_prompt: None,
+        messages: vec![
+            Message::User {
+                content: vec![UserContent::Text {
+                    text: "first".into(),
+                }],
+                timestamp: 1,
+            },
+            Message::Assistant {
+                content: vec![AssistantContent::Thinking {
+                    thinking: "internal reasoning".into(),
+                }],
+                api: "openai-responses".into(),
+                provider: "openai".into(),
+                model: "gpt-5-mini".into(),
+                response_id: None,
+                usage: usage(),
+                stop_reason: StopReason::Aborted,
+                error_message: Some("Request was aborted".into()),
+                timestamp: 2,
+            },
+            Message::User {
+                content: vec![UserContent::Text {
+                    text: "second".into(),
+                }],
+                timestamp: 3,
+            },
+        ],
+    };
+
+    let items = convert_openai_responses_messages(
+        &model("openai", "gpt-5-mini"),
+        &context,
+        &["openai", "openai-codex", "opencode"],
+        OpenAiResponsesConvertOptions {
+            include_system_prompt: false,
+        },
+    );
+
+    assert_eq!(items.len(), 2);
+    for item in items {
+        match item {
+            ResponsesInputItem::Message { role, .. } => assert_eq!(role, "user"),
+            other => panic!("expected only user messages after filtering, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn omits_fc_item_id_for_same_provider_different_model_handoff() {
+    let context = Context {
+        system_prompt: None,
+        messages: vec![Message::Assistant {
+            content: vec![AssistantContent::ToolCall {
+                id: "call_123|fc_123".into(),
+                name: "edit".into(),
+                arguments: tool_call_arguments(&[("path", json!("src/main.rs"))]),
+            }],
+            api: "openai-responses".into(),
+            provider: "openai".into(),
+            model: "gpt-5-mini".into(),
+            response_id: None,
+            usage: usage(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 1,
+        }],
+    };
+
+    let items = convert_openai_responses_messages(
+        &model("openai", "gpt-5.2-codex"),
+        &context,
+        &["openai", "openai-codex", "opencode"],
+        OpenAiResponsesConvertOptions {
+            include_system_prompt: false,
+        },
+    );
+
+    match items.first().unwrap() {
+        ResponsesInputItem::FunctionCall { id, call_id, .. } => {
+            assert_eq!(call_id, "call_123");
+            assert!(id.is_none());
+        }
+        other => panic!("expected function_call, got {other:?}"),
+    }
+}
+
+#[test]
+fn converts_different_model_thinking_to_assistant_output_text() {
+    let context = Context {
+        system_prompt: None,
+        messages: vec![Message::Assistant {
+            content: vec![AssistantContent::Thinking {
+                thinking: "Let me think about this...".into(),
+            }],
+            api: "openai-responses".into(),
+            provider: "github-copilot".into(),
+            model: "gpt-5-mini".into(),
+            response_id: None,
+            usage: usage(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 1,
+        }],
+    };
+
+    let items = convert_openai_responses_messages(
+        &model("openai", "gpt-5.2-codex"),
+        &context,
+        &["openai", "openai-codex", "opencode"],
+        OpenAiResponsesConvertOptions {
+            include_system_prompt: false,
+        },
+    );
+
+    match items.first().unwrap() {
+        ResponsesInputItem::Message {
+            role,
+            content,
+            status,
+            ..
+        } => {
+            assert_eq!(role, "assistant");
+            assert_eq!(status.as_deref(), Some("completed"));
+            assert_eq!(
+                content,
+                &vec![pi_ai::openai_responses::ResponsesContentPart::OutputText {
+                    text: "Let me think about this...".into(),
+                    annotations: Vec::new(),
+                }]
+            );
+        }
+        other => panic!("expected assistant message, got {other:?}"),
+    }
+}
+
+#[test]
 fn keeps_tool_result_images_inside_function_call_output() {
     let expected: Value = serde_json::from_str(
         &fs::read_to_string(
@@ -192,6 +390,7 @@ fn keeps_tool_result_images_inside_function_call_output() {
                             pi_ai::openai_responses::ResponsesContentPart::InputImage {
                                 ..
                             } => "input_image",
+                            other => panic!("unexpected content part: {other:?}"),
                         })
                         .collect::<Vec<_>>();
                     let expected_types = expected["output_types"]

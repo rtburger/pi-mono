@@ -1,6 +1,6 @@
 # packages/ai migration inventory
 
-Status: milestone 2 scaffold + faux provider slice + OpenAI Responses payload-conversion slice
+Status: milestone 3 scaffold + faux provider slice + OpenAI Responses incremental streaming slice
 Target crate: `rust/crates/pi-ai`
 
 ## 1. Files analyzed
@@ -178,12 +178,16 @@ Files read fully for the first real-provider slice:
 - `packages/ai/test/openai-responses-reasoning-replay-e2e.test.ts`
 - `packages/ai/test/openai-responses-tool-result-images.test.ts`
 
-Observed OpenAI Responses behaviors relevant to the first Rust provider slice:
+Observed OpenAI Responses behaviors relevant to the first real-provider slices:
 - payload-building is split from stream processing
 - system prompt becomes `developer` role for reasoning-capable models, else `system`
-- assistant text history is replayed as `message` items
+- assistant text history is replayed as completed assistant `message` items with output-text content
 - assistant tool calls are replayed as `function_call` items
+- orphaned tool calls are backfilled with synthetic error tool results before replay continues
+- errored/aborted assistant turns are skipped during replay
 - foreign tool call item IDs are normalized into bounded `fc_<hash>` form for OpenAI-safe replay
+- same-provider different-model handoff omits `fc_*` item IDs to avoid OpenAI pairing validation failures
+- cross-model thinking is converted to plain assistant text when signatures are not reusable
 - tool results with images stay nested inside `function_call_output.output` rather than being emitted as separate user messages
 - same-provider / same-model replay preserves more metadata; cross-model/cross-provider replay drops or rewrites some data
 - Copilot OpenAI Responses should omit `reasoning` payload when not requested
@@ -197,44 +201,57 @@ Current Rust provider slice implements deterministic request-building coverage f
 - OpenAI prompt-cache parameter shaping for `sessionId` + long retention
 
 Deferred OpenAI Responses work:
-- incremental HTTP body chunk parsing instead of whole-body collection
-- reasoning block replay/signature handling
+- same-model reasoning replay/signature handling (`thinkingSignature`, text signatures, redacted reasoning)
 - Copilot-specific headers and auth behavior
 - model-catalog integration for the runtime provider
 - broader parity for provider-specific runtime options beyond the current minimal passthrough
+- live aborted-stream usage/accounting parity where upstream reports usage before termination
 
 Current Rust runtime provider path also includes:
 - lazy built-in registration of the minimal `openai-responses` provider on first dispatch
 - API key resolution from explicit stream options or `OPENAI_API_KEY`
 - passthrough of `max_tokens`, `temperature`, `reasoning_effort`, `reasoning_summary`, `session_id`, and `cache_retention`
-- immediate abort handling before HTTP send and while awaiting response/body completion
+- immediate abort handling before HTTP send and while awaiting streamed body chunks
 
 Current Rust transport-adjacent coverage now includes:
 - SSE `data:` frame parsing from raw text
+- incremental SSE frame assembly across arbitrary HTTP chunk boundaries
 - `[DONE]` handling
 - invalid-JSON SSE failure detection
 - direct text-to-event-stream bridging for deterministic tests
-- minimal live HTTP POST -> SSE text -> normalized event stream flow using `reqwest`
+- live HTTP POST -> `reqwest` body chunk stream -> normalized event stream flow
 - HTTP failure mapping to terminal assistant error events
 - provider-registry dispatch for a minimal `openai-responses` runtime path
+- abort handling while waiting for the next HTTP body chunk
 
 Current Rust streaming coverage now includes deterministic parsing for:
 - `response.created`
 - `response.output_item.added`
+- `response.reasoning_summary_part.added`
+- `response.reasoning_summary_text.delta`
+- `response.reasoning_summary_part.done`
 - `response.output_text.delta`
+- `response.refusal.delta`
 - `response.function_call_arguments.delta`
 - `response.output_item.done`
 - `response.completed`
 - `response.failed`
 - `error`
 
-Covered stream semantics in Rust tests:
+Covered stream/request semantics in Rust tests:
 - text start/delta/end event order
 - tool call start/delta/end event order
+- reasoning start/delta/end event order
 - `response.completed` stop-reason mapping to `stop` / `toolUse`
 - `response.failed` to terminal assistant error event
 - response-id capture on created/failed responses
 - partial usage extraction on terminal error events
+- incremental HTTP chunk parsing across split SSE frames
+- abort while waiting for the next streamed body chunk
+- replay filtering of aborted assistant turns
+- synthetic tool-result insertion for orphaned tool calls
+- same-provider different-model `fc_*` item-id elision
+- cross-model thinking-to-text conversion for replay
 
 ## 12. Unknowns requiring validation
 
@@ -242,4 +259,4 @@ Covered stream semantics in Rust tests:
 - whether Rust-side model metadata should be generated from TS `models.generated.ts` or from shared external source during migration
 - how much of TS `SimpleStreamOptions` reasoning normalization should live in `pi-ai` vs provider-specific modules
 - whether faux provider should remain in `pi-ai` or move to `pi-test-harness` after the first provider lands
-- whether to continue OpenAI Responses next with full SSE parsing or switch to Anthropic for a simpler end-to-end provider path
+- whether to continue OpenAI Responses next with same-model reasoning signature replay or switch to Anthropic for a second end-to-end provider

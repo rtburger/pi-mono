@@ -1,6 +1,5 @@
 use crate::{AiProvider, AssistantEventStream, StreamOptions, register_provider};
 use async_stream::stream;
-use futures::StreamExt;
 use pi_events::{
     AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason, Usage,
     UserContent,
@@ -66,6 +65,12 @@ pub enum ResponsesInputItem {
     Message {
         role: String,
         content: Vec<ResponsesContentPart>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
     },
     FunctionCall {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,6 +90,11 @@ pub enum ResponsesInputItem {
 pub enum ResponsesContentPart {
     InputText { text: String },
     InputImage { detail: String, image_url: String },
+    OutputText {
+        text: String,
+        annotations: Vec<Value>,
+    },
+    Refusal { refusal: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -164,6 +174,11 @@ pub fn convert_openai_responses_messages(
         .iter()
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
+    let transformed_messages = transform_messages_for_openai_responses(
+        model,
+        &context.messages,
+        allowed_tool_call_providers.contains(model.provider.as_str()),
+    );
 
     if options.include_system_prompt
         && let Some(system_prompt) = &context.system_prompt
@@ -177,10 +192,13 @@ pub fn convert_openai_responses_messages(
             content: vec![ResponsesContentPart::InputText {
                 text: sanitize_surrogates(system_prompt),
             }],
+            status: None,
+            id: None,
+            phase: None,
         });
     }
 
-    for message in &context.messages {
+    for (message_index, message) in transformed_messages.iter().enumerate() {
         match message {
             Message::User { content, .. } => {
                 let content = convert_user_content(content, model);
@@ -188,6 +206,9 @@ pub fn convert_openai_responses_messages(
                     items.push(ResponsesInputItem::Message {
                         role: "user".into(),
                         content,
+                        status: None,
+                        id: None,
+                        phase: None,
                     });
                 }
             }
@@ -195,16 +216,24 @@ pub fn convert_openai_responses_messages(
                 content,
                 provider,
                 api,
+                model: source_model,
                 ..
             } => {
+                let is_same_provider_and_api = provider == &model.provider && api == &model.api;
+                let is_different_model = is_same_provider_and_api && source_model != &model.id;
+
                 for block in content {
                     match block {
                         AssistantContent::Text { text } => {
                             items.push(ResponsesInputItem::Message {
                                 role: "assistant".into(),
-                                content: vec![ResponsesContentPart::InputText {
+                                content: vec![ResponsesContentPart::OutputText {
                                     text: sanitize_surrogates(text),
+                                    annotations: Vec::new(),
                                 }],
+                                status: Some("completed".into()),
+                                id: Some(format!("msg_{message_index}")),
+                                phase: None,
                             });
                         }
                         AssistantContent::Thinking { .. } => {}
@@ -214,29 +243,21 @@ pub fn convert_openai_responses_messages(
                             arguments,
                         } => {
                             let (call_id, item_id) = split_tool_call_id(id);
-                            let normalized = normalize_tool_call_id(
-                                id,
-                                provider != &model.provider || api != &model.api,
-                                allowed_tool_call_providers.contains(model.provider.as_str()),
-                            );
-                            let (normalized_call_id, normalized_item_id) =
-                                split_tool_call_id(&normalized);
+                            let item_id = if is_different_model
+                                && item_id.is_some_and(|item_id| item_id.starts_with("fc_"))
+                            {
+                                None
+                            } else {
+                                item_id.map(ToOwned::to_owned)
+                            };
+
                             items.push(ResponsesInputItem::FunctionCall {
-                                id: if provider == &model.provider && api == &model.api {
-                                    Some(
-                                        normalized_item_id.map(ToOwned::to_owned).unwrap_or_else(
-                                            || item_id.unwrap_or_default().to_string(),
-                                        ),
-                                    )
-                                } else {
-                                    normalized_item_id.map(ToOwned::to_owned)
-                                },
-                                call_id: normalized_call_id.to_string(),
+                                id: item_id,
+                                call_id: call_id.to_string(),
                                 name: name.clone(),
                                 arguments: serde_json::to_string(arguments)
                                     .unwrap_or_else(|_| "{}".into()),
                             });
-                            let _ = call_id;
                         }
                     }
                 }
@@ -293,6 +314,178 @@ pub fn convert_openai_responses_messages(
     }
 
     items
+}
+
+fn transform_messages_for_openai_responses(
+    model: &Model,
+    messages: &[Message],
+    target_provider_supports_openai_tool_ids: bool,
+) -> Vec<Message> {
+    let mut tool_call_id_map = std::collections::BTreeMap::<String, String>::new();
+    let mut transformed = Vec::new();
+
+    for message in messages.iter().cloned() {
+        match message {
+            user_message @ Message::User { .. } => transformed.push(user_message),
+            Message::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                is_error,
+                timestamp,
+            } => {
+                let normalized_tool_call_id = tool_call_id_map
+                    .get(&tool_call_id)
+                    .cloned()
+                    .unwrap_or(tool_call_id);
+                transformed.push(Message::ToolResult {
+                    tool_call_id: normalized_tool_call_id,
+                    tool_name,
+                    content,
+                    is_error,
+                    timestamp,
+                });
+            }
+            Message::Assistant {
+                content,
+                api,
+                provider,
+                model: source_model,
+                response_id,
+                usage,
+                stop_reason,
+                error_message,
+                timestamp,
+            } => {
+                let is_same_model = provider == model.provider.as_str()
+                    && api == model.api.as_str()
+                    && source_model == model.id.as_str();
+                let mut transformed_content = Vec::new();
+
+                for block in content {
+                    match block {
+                        AssistantContent::Text { text } => {
+                            transformed_content.push(AssistantContent::Text { text });
+                        }
+                        AssistantContent::Thinking { thinking } => {
+                            if is_same_model {
+                                transformed_content.push(AssistantContent::Thinking { thinking });
+                            } else if !thinking.trim().is_empty() {
+                                transformed_content.push(AssistantContent::Text { text: thinking });
+                            }
+                        }
+                        AssistantContent::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        } => {
+                            let normalized_id = if is_same_model {
+                                id.clone()
+                            } else {
+                                normalize_tool_call_id(
+                                    &id,
+                                    provider != model.provider.as_str() || api != model.api.as_str(),
+                                    target_provider_supports_openai_tool_ids,
+                                )
+                            };
+                            if normalized_id != id {
+                                tool_call_id_map.insert(id.clone(), normalized_id.clone());
+                            }
+                            transformed_content.push(AssistantContent::ToolCall {
+                                id: normalized_id,
+                                name,
+                                arguments,
+                            });
+                        }
+                    }
+                }
+
+                transformed.push(Message::Assistant {
+                    content: transformed_content,
+                    api,
+                    provider,
+                    model: source_model,
+                    response_id,
+                    usage,
+                    stop_reason,
+                    error_message,
+                    timestamp,
+                });
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    let mut pending_tool_calls = Vec::<(String, String)>::new();
+    let mut existing_tool_result_ids = std::collections::BTreeSet::<String>::new();
+
+    for message in transformed {
+        match &message {
+            Message::Assistant {
+                content,
+                stop_reason,
+                ..
+            } => {
+                flush_orphaned_tool_calls(
+                    &mut result,
+                    &mut pending_tool_calls,
+                    &mut existing_tool_result_ids,
+                );
+
+                if matches!(stop_reason, StopReason::Error | StopReason::Aborted) {
+                    continue;
+                }
+
+                pending_tool_calls = content
+                    .iter()
+                    .filter_map(|block| match block {
+                        AssistantContent::ToolCall { id, name, .. } => {
+                            Some((id.clone(), name.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                existing_tool_result_ids.clear();
+                result.push(message);
+            }
+            Message::ToolResult { tool_call_id, .. } => {
+                existing_tool_result_ids.insert(tool_call_id.clone());
+                result.push(message);
+            }
+            Message::User { .. } => {
+                flush_orphaned_tool_calls(
+                    &mut result,
+                    &mut pending_tool_calls,
+                    &mut existing_tool_result_ids,
+                );
+                result.push(message);
+            }
+        }
+    }
+
+    result
+}
+
+fn flush_orphaned_tool_calls(
+    result: &mut Vec<Message>,
+    pending_tool_calls: &mut Vec<(String, String)>,
+    existing_tool_result_ids: &mut std::collections::BTreeSet<String>,
+) {
+    for (tool_call_id, tool_name) in pending_tool_calls.iter() {
+        if !existing_tool_result_ids.contains(tool_call_id) {
+            result.push(Message::ToolResult {
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                content: vec![UserContent::Text {
+                    text: "No result provided".into(),
+                }],
+                is_error: true,
+                timestamp: now_ms(),
+            });
+        }
+    }
+    pending_tool_calls.clear();
+    existing_tool_result_ids.clear();
 }
 
 fn convert_user_content(content: &[UserContent], model: &Model) -> Vec<ResponsesContentPart> {
@@ -397,29 +590,90 @@ pub struct OpenAiResponsesStreamEnvelope {
     pub data: serde_json::Map<String, Value>,
 }
 
-pub fn parse_openai_responses_sse_text(
-    payload: &str,
-) -> Result<Vec<OpenAiResponsesStreamEnvelope>, crate::AiError> {
-    let mut events = Vec::new();
-    let mut current_data_lines = Vec::new();
+#[derive(Default)]
+struct OpenAiResponsesSseDecoder {
+    buffer: Vec<u8>,
+    current_data_lines: Vec<String>,
+}
 
-    for line in payload.lines() {
+impl OpenAiResponsesSseDecoder {
+    fn push_bytes(
+        &mut self,
+        chunk: &[u8],
+    ) -> Result<Vec<OpenAiResponsesStreamEnvelope>, crate::AiError> {
+        self.buffer.extend_from_slice(chunk);
+
+        let mut events = Vec::new();
+        let mut line_start = 0usize;
+        let mut consumed = 0usize;
+
+        while let Some(relative_newline) = self.buffer[line_start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+        {
+            let newline = line_start + relative_newline;
+            let line = self.buffer[line_start..newline].to_vec();
+            self.process_line(&line, &mut events)?;
+            line_start = newline + 1;
+            consumed = line_start;
+        }
+
+        if consumed > 0 {
+            self.buffer.drain(..consumed);
+        }
+
+        Ok(events)
+    }
+
+    fn finish(&mut self) -> Result<Vec<OpenAiResponsesStreamEnvelope>, crate::AiError> {
+        let mut events = Vec::new();
+
+        if !self.buffer.is_empty() {
+            let line = std::mem::take(&mut self.buffer);
+            self.process_line(&line, &mut events)?;
+        }
+
+        if let Some(event) = flush_sse_event(&mut self.current_data_lines)? {
+            events.push(event);
+        }
+
+        Ok(events)
+    }
+
+    fn process_line(
+        &mut self,
+        line: &[u8],
+        events: &mut Vec<OpenAiResponsesStreamEnvelope>,
+    ) -> Result<(), crate::AiError> {
+        let line = match line.strip_suffix(b"\r") {
+            Some(stripped) => stripped,
+            None => line,
+        };
+        let line = std::str::from_utf8(line).map_err(|error| {
+            crate::AiError::Message(format!("Invalid UTF-8 in OpenAI Responses SSE stream: {error}"))
+        })?;
+
         if line.is_empty() {
-            if let Some(event) = flush_sse_event(&mut current_data_lines)? {
+            if let Some(event) = flush_sse_event(&mut self.current_data_lines)? {
                 events.push(event);
             }
-            continue;
+            return Ok(());
         }
 
         if let Some(data) = line.strip_prefix("data:") {
-            current_data_lines.push(data.trim_start().to_string());
+            self.current_data_lines.push(data.trim_start().to_string());
         }
-    }
 
-    if let Some(event) = flush_sse_event(&mut current_data_lines)? {
-        events.push(event);
+        Ok(())
     }
+}
 
+pub fn parse_openai_responses_sse_text(
+    payload: &str,
+) -> Result<Vec<OpenAiResponsesStreamEnvelope>, crate::AiError> {
+    let mut decoder = OpenAiResponsesSseDecoder::default();
+    let mut events = decoder.push_bytes(payload.as_bytes())?;
+    events.extend(decoder.finish()?);
     Ok(events)
 }
 
@@ -431,6 +685,433 @@ pub fn stream_openai_responses_sse_text(
     Ok(stream_openai_responses_sse_events(model, events))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenAiResponsesBlockKind {
+    Text,
+    Thinking,
+    ToolCall,
+}
+
+#[derive(Debug, Clone)]
+struct OpenAiResponsesStreamState {
+    output: AssistantMessage,
+    current_block_index: Option<usize>,
+    current_block_kind: Option<OpenAiResponsesBlockKind>,
+    current_tool_json: String,
+}
+
+impl OpenAiResponsesStreamState {
+    fn new(model: &Model) -> Self {
+        let mut output = AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone());
+        output.timestamp = now_ms();
+        Self {
+            output,
+            current_block_index: None,
+            current_block_kind: None,
+            current_tool_json: String::new(),
+        }
+    }
+
+    fn start_event(&self) -> AssistantEvent {
+        AssistantEvent::Start {
+            partial: self.output.clone(),
+        }
+    }
+
+    fn aborted_event(&self) -> AssistantEvent {
+        let mut error = self.output.clone();
+        error.stop_reason = StopReason::Aborted;
+        error.error_message = Some("Request was aborted".into());
+        AssistantEvent::Error {
+            reason: StopReason::Aborted,
+            error,
+        }
+    }
+
+    fn error_event(&self, error_message: impl Into<String>) -> AssistantEvent {
+        let mut error = self.output.clone();
+        error.stop_reason = StopReason::Error;
+        error.error_message = Some(error_message.into());
+        AssistantEvent::Error {
+            reason: StopReason::Error,
+            error,
+        }
+    }
+
+    fn process_event(&mut self, event: OpenAiResponsesStreamEnvelope) -> Vec<AssistantEvent> {
+        let mut emitted = Vec::new();
+
+        match event.event_type.as_str() {
+            "response.created" => {
+                self.output.response_id = event
+                    .data
+                    .get("response")
+                    .and_then(Value::as_object)
+                    .and_then(|response| response.get("id"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+            }
+            "response.output_item.added" => {
+                let item = event
+                    .data
+                    .get("item")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                match item.get("type").and_then(Value::as_str) {
+                    Some("message") => {
+                        self.output
+                            .content
+                            .push(AssistantContent::Text { text: String::new() });
+                        let index = self.output.content.len() - 1;
+                        self.current_block_index = Some(index);
+                        self.current_block_kind = Some(OpenAiResponsesBlockKind::Text);
+                        self.current_tool_json.clear();
+                        emitted.push(AssistantEvent::TextStart {
+                            content_index: index,
+                            partial: self.output.clone(),
+                        });
+                    }
+                    Some("function_call") => {
+                        let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+                        let call_id = item
+                            .get("call_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
+                        self.current_tool_json = item
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        self.output.content.push(AssistantContent::ToolCall {
+                            id: format!("{call_id}|{id}"),
+                            name: name.to_string(),
+                            arguments: BTreeMap::new(),
+                        });
+                        let index = self.output.content.len() - 1;
+                        self.current_block_index = Some(index);
+                        self.current_block_kind = Some(OpenAiResponsesBlockKind::ToolCall);
+                        emitted.push(AssistantEvent::ToolCallStart {
+                            content_index: index,
+                            partial: self.output.clone(),
+                        });
+                    }
+                    Some("reasoning") => {
+                        self.output.content.push(AssistantContent::Thinking {
+                            thinking: String::new(),
+                        });
+                        let index = self.output.content.len() - 1;
+                        self.current_block_index = Some(index);
+                        self.current_block_kind = Some(OpenAiResponsesBlockKind::Thinking);
+                        self.current_tool_json.clear();
+                        emitted.push(AssistantEvent::ThinkingStart {
+                            content_index: index,
+                            partial: self.output.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            "response.reasoning_summary_part.added" => {}
+            "response.reasoning_summary_text.delta" => {
+                if self.current_block_kind == Some(OpenAiResponsesBlockKind::Thinking)
+                    && let Some(index) = self.current_block_index
+                {
+                    let delta = event
+                        .data
+                        .get("delta")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    if let Some(AssistantContent::Thinking { thinking }) =
+                        self.output.content.get_mut(index)
+                    {
+                        thinking.push_str(&delta);
+                    }
+                    emitted.push(AssistantEvent::ThinkingDelta {
+                        content_index: index,
+                        delta,
+                        partial: self.output.clone(),
+                    });
+                }
+            }
+            "response.reasoning_summary_part.done" => {
+                if self.current_block_kind == Some(OpenAiResponsesBlockKind::Thinking)
+                    && let Some(index) = self.current_block_index
+                {
+                    let delta = "\n\n".to_string();
+                    if let Some(AssistantContent::Thinking { thinking }) =
+                        self.output.content.get_mut(index)
+                    {
+                        thinking.push_str(&delta);
+                    }
+                    emitted.push(AssistantEvent::ThinkingDelta {
+                        content_index: index,
+                        delta,
+                        partial: self.output.clone(),
+                    });
+                }
+            }
+            "response.content_part.added" => {}
+            "response.output_text.delta" | "response.refusal.delta" => {
+                if self.current_block_kind == Some(OpenAiResponsesBlockKind::Text)
+                    && let Some(index) = self.current_block_index
+                {
+                    let delta = event
+                        .data
+                        .get("delta")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    if let Some(AssistantContent::Text { text }) = self.output.content.get_mut(index)
+                    {
+                        text.push_str(&delta);
+                    }
+                    emitted.push(AssistantEvent::TextDelta {
+                        content_index: index,
+                        delta,
+                        partial: self.output.clone(),
+                    });
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                if self.current_block_kind == Some(OpenAiResponsesBlockKind::ToolCall)
+                    && let Some(index) = self.current_block_index
+                {
+                    let delta = event
+                        .data
+                        .get("delta")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    self.current_tool_json.push_str(&delta);
+                    if let Some(AssistantContent::ToolCall { arguments, .. }) =
+                        self.output.content.get_mut(index)
+                    {
+                        *arguments = parse_streaming_json_map(&self.current_tool_json);
+                    }
+                    emitted.push(AssistantEvent::ToolCallDelta {
+                        content_index: index,
+                        delta,
+                        partial: self.output.clone(),
+                    });
+                }
+            }
+            "response.function_call_arguments.done" => {
+                if self.current_block_kind == Some(OpenAiResponsesBlockKind::ToolCall)
+                    && let Some(index) = self.current_block_index
+                {
+                    let full = event
+                        .data
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let previous = self.current_tool_json.clone();
+                    self.current_tool_json = full.clone();
+                    if let Some(AssistantContent::ToolCall { arguments, .. }) =
+                        self.output.content.get_mut(index)
+                    {
+                        *arguments = parse_streaming_json_map(&self.current_tool_json);
+                    }
+                    if full.starts_with(&previous) {
+                        let delta = full[previous.len()..].to_string();
+                        if !delta.is_empty() {
+                            emitted.push(AssistantEvent::ToolCallDelta {
+                                content_index: index,
+                                delta,
+                                partial: self.output.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            "response.output_item.done" => {
+                let item = event
+                    .data
+                    .get("item")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                match item.get("type").and_then(Value::as_str) {
+                    Some("message")
+                        if self.current_block_kind == Some(OpenAiResponsesBlockKind::Text) =>
+                    {
+                        if let Some(index) = self.current_block_index {
+                            let content = message_item_text(&item)
+                                .or_else(|| text_content(&self.output, index))
+                                .unwrap_or_default();
+                            if let Some(AssistantContent::Text { text }) =
+                                self.output.content.get_mut(index)
+                            {
+                                *text = content.clone();
+                            }
+                            emitted.push(AssistantEvent::TextEnd {
+                                content_index: index,
+                                content,
+                                partial: self.output.clone(),
+                            });
+                            self.reset_current_block();
+                        }
+                    }
+                    Some("function_call")
+                        if self.current_block_kind == Some(OpenAiResponsesBlockKind::ToolCall) =>
+                    {
+                        if let Some(index) = self.current_block_index {
+                            let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+                            let call_id = item
+                                .get("call_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
+                            let arguments = item
+                                .get("arguments")
+                                .and_then(Value::as_str)
+                                .unwrap_or(self.current_tool_json.as_str());
+                            let tool_call = AssistantContent::ToolCall {
+                                id: format!("{call_id}|{id}"),
+                                name: name.to_string(),
+                                arguments: parse_streaming_json_map(arguments),
+                            };
+                            self.output.content[index] = tool_call.clone();
+                            emitted.push(AssistantEvent::ToolCallEnd {
+                                content_index: index,
+                                tool_call,
+                                partial: self.output.clone(),
+                            });
+                            self.reset_current_block();
+                        }
+                    }
+                    Some("reasoning")
+                        if self.current_block_kind == Some(OpenAiResponsesBlockKind::Thinking) =>
+                    {
+                        if let Some(index) = self.current_block_index {
+                            let content = reasoning_summary_text(&item)
+                                .or_else(|| thinking_content(&self.output, index))
+                                .unwrap_or_default();
+                            if let Some(AssistantContent::Thinking { thinking }) =
+                                self.output.content.get_mut(index)
+                            {
+                                *thinking = content.clone();
+                            }
+                            emitted.push(AssistantEvent::ThinkingEnd {
+                                content_index: index,
+                                content,
+                                partial: self.output.clone(),
+                            });
+                            self.reset_current_block();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "response.completed" => {
+                let response = event
+                    .data
+                    .get("response")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                self.output.response_id = response
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .or(self.output.response_id.clone());
+                apply_usage_from_response(&mut self.output, &response);
+                self.output.stop_reason =
+                    map_response_status(response.get("status").and_then(Value::as_str));
+                if self
+                    .output
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, AssistantContent::ToolCall { .. }))
+                    && self.output.stop_reason == StopReason::Stop
+                {
+                    self.output.stop_reason = StopReason::ToolUse;
+                }
+                emitted.push(AssistantEvent::Done {
+                    reason: self.output.stop_reason.clone(),
+                    message: self.output.clone(),
+                });
+            }
+            "response.failed" => {
+                let response = event
+                    .data
+                    .get("response")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                self.output.response_id = response
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .or(self.output.response_id.clone());
+                apply_usage_from_response(&mut self.output, &response);
+                self.output.stop_reason = StopReason::Error;
+                self.output.error_message = Some(
+                    response
+                        .get("error")
+                        .and_then(Value::as_object)
+                        .map(|error| {
+                            let code = error
+                                .get("code")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown");
+                            let message = error
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("no message");
+                            format!("{code}: {message}")
+                        })
+                        .or_else(|| {
+                            response
+                                .get("incomplete_details")
+                                .and_then(Value::as_object)
+                                .and_then(|details| details.get("reason"))
+                                .and_then(Value::as_str)
+                                .map(|reason| format!("incomplete: {reason}"))
+                        })
+                        .unwrap_or_else(|| "Unknown error (no error details in response)".into()),
+                );
+                emitted.push(AssistantEvent::Error {
+                    reason: StopReason::Error,
+                    error: self.output.clone(),
+                });
+            }
+            "error" => {
+                self.output.stop_reason = StopReason::Error;
+                self.output.error_message = Some(format!(
+                    "Error Code {}: {}",
+                    event
+                        .data
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown"),
+                    event
+                        .data
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Unknown error")
+                ));
+                emitted.push(AssistantEvent::Error {
+                    reason: StopReason::Error,
+                    error: self.output.clone(),
+                });
+            }
+            _ => {}
+        }
+
+        emitted
+    }
+
+    fn reset_current_block(&mut self) {
+        self.current_block_index = None;
+        self.current_block_kind = None;
+        self.current_tool_json.clear();
+    }
+}
+
 pub fn stream_openai_responses_http(
     model: Model,
     params: OpenAiResponsesRequestParams,
@@ -439,9 +1120,10 @@ pub fn stream_openai_responses_http(
 ) -> AssistantEventStream {
     Box::pin(stream! {
         let mut signal = signal;
+        let mut state = OpenAiResponsesStreamState::new(&model);
 
         if is_signal_aborted(&signal) {
-            yield Ok(AssistantEvent::Error { reason: StopReason::Aborted, error: aborted_message(&model) });
+            yield Ok(state.aborted_event());
             return;
         }
 
@@ -453,20 +1135,19 @@ pub fn stream_openai_responses_http(
             .send();
         tokio::pin!(send_future);
 
-        let response = if let Some(signal) = signal.as_mut() {
+        let mut response = if let Some(signal) = signal.as_mut() {
             tokio::select! {
                 response = &mut send_future => {
                     match response {
                         Ok(response) => response,
                         Err(error) => {
-                            let message = error_message(&model, format!("HTTP request failed: {error}"));
-                            yield Ok(AssistantEvent::Error { reason: StopReason::Error, error: message });
+                            yield Ok(state.error_event(format!("HTTP request failed: {error}")));
                             return;
                         }
                     }
                 }
                 _ = wait_for_abort(signal) => {
-                    yield Ok(AssistantEvent::Error { reason: StopReason::Aborted, error: aborted_message(&model) });
+                    yield Ok(state.aborted_event());
                     return;
                 }
             }
@@ -474,8 +1155,7 @@ pub fn stream_openai_responses_http(
             match send_future.await {
                 Ok(response) => response,
                 Err(error) => {
-                    let message = error_message(&model, format!("HTTP request failed: {error}"));
-                    yield Ok(AssistantEvent::Error { reason: StopReason::Error, error: message });
+                    yield Ok(state.error_event(format!("HTTP request failed: {error}")));
                     return;
                 }
             }
@@ -489,7 +1169,7 @@ pub fn stream_openai_responses_http(
                 tokio::select! {
                     body = &mut text_future => body.unwrap_or_default(),
                     _ = wait_for_abort(signal) => {
-                        yield Ok(AssistantEvent::Error { reason: StopReason::Aborted, error: aborted_message(&model) });
+                        yield Ok(state.aborted_event());
                         return;
                     }
                 }
@@ -501,57 +1181,80 @@ pub fn stream_openai_responses_http(
             } else {
                 format!("HTTP request failed with status {status}: {body}")
             };
-            let message = error_message(&model, detail);
-            yield Ok(AssistantEvent::Error { reason: StopReason::Error, error: message });
+            yield Ok(state.error_event(detail));
             return;
         }
 
-        let text_future = response.text();
-        tokio::pin!(text_future);
-        let payload = if let Some(signal) = signal.as_mut() {
-            tokio::select! {
-                payload = &mut text_future => {
-                    match payload {
-                        Ok(payload) => payload,
+        yield Ok(state.start_event());
+
+        let mut decoder = OpenAiResponsesSseDecoder::default();
+
+        loop {
+            let chunk_future = response.chunk();
+            tokio::pin!(chunk_future);
+            let next_chunk = if let Some(signal) = signal.as_mut() {
+                tokio::select! {
+                    chunk = &mut chunk_future => chunk,
+                    _ = wait_for_abort(signal) => {
+                        yield Ok(state.aborted_event());
+                        return;
+                    }
+                }
+            } else {
+                chunk_future.await
+            };
+
+            match next_chunk {
+                Ok(Some(chunk)) => {
+                    let events = match decoder.push_bytes(chunk.as_ref()) {
+                        Ok(events) => events,
                         Err(error) => {
-                            let message = error_message(&model, format!("Failed to read SSE response body: {error}"));
-                            yield Ok(AssistantEvent::Error { reason: StopReason::Error, error: message });
+                            yield Ok(state.error_event(error.to_string()));
                             return;
+                        }
+                    };
+
+                    for event in events {
+                        if is_signal_aborted(&signal) {
+                            yield Ok(state.aborted_event());
+                            return;
+                        }
+                        let emitted = state.process_event(event);
+                        for assistant_event in emitted {
+                            let is_terminal = is_terminal_event(&assistant_event);
+                            yield Ok(assistant_event);
+                            if is_terminal {
+                                return;
+                            }
                         }
                     }
                 }
-                _ = wait_for_abort(signal) => {
-                    yield Ok(AssistantEvent::Error { reason: StopReason::Aborted, error: aborted_message(&model) });
+                Ok(None) => {
+                    let events = match decoder.finish() {
+                        Ok(events) => events,
+                        Err(error) => {
+                            yield Ok(state.error_event(error.to_string()));
+                            return;
+                        }
+                    };
+                    for event in events {
+                        if is_signal_aborted(&signal) {
+                            yield Ok(state.aborted_event());
+                            return;
+                        }
+                        let emitted = state.process_event(event);
+                        for assistant_event in emitted {
+                            let is_terminal = is_terminal_event(&assistant_event);
+                            yield Ok(assistant_event);
+                            if is_terminal {
+                                return;
+                            }
+                        }
+                    }
                     return;
                 }
-            }
-        } else {
-            match text_future.await {
-                Ok(payload) => payload,
                 Err(error) => {
-                    let message = error_message(&model, format!("Failed to read SSE response body: {error}"));
-                    yield Ok(AssistantEvent::Error { reason: StopReason::Error, error: message });
-                    return;
-                }
-            }
-        };
-
-        let inner = match stream_openai_responses_sse_text(model.clone(), &payload) {
-            Ok(stream) => stream,
-            Err(error) => {
-                let message = error_message(&model, error.to_string());
-                yield Ok(AssistantEvent::Error { reason: StopReason::Error, error: message });
-                return;
-            }
-        };
-
-        futures::pin_mut!(inner);
-        while let Some(event) = inner.next().await {
-            match event {
-                Ok(event) => yield Ok(event),
-                Err(error) => {
-                    let message = error_message(&model, error.to_string());
-                    yield Ok(AssistantEvent::Error { reason: StopReason::Error, error: message });
+                    yield Ok(state.error_event(format!("Failed to read SSE response body: {error}")));
                     return;
                 }
             }
@@ -564,211 +1267,17 @@ pub fn stream_openai_responses_sse_events(
     events: Vec<OpenAiResponsesStreamEnvelope>,
 ) -> AssistantEventStream {
     Box::pin(stream! {
-        let mut output = AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone());
-        output.timestamp = now_ms();
-        yield Ok(AssistantEvent::Start { partial: output.clone() });
-
-        let mut current_block_index: Option<usize> = None;
-        let mut current_tool_json = String::new();
+        let mut state = OpenAiResponsesStreamState::new(&model);
+        yield Ok(state.start_event());
 
         for event in events {
-            match event.event_type.as_str() {
-                "response.created" => {
-                    output.response_id = event
-                        .data
-                        .get("response")
-                        .and_then(Value::as_object)
-                        .and_then(|response| response.get("id"))
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned);
-                }
-                "response.output_item.added" => {
-                    let item = event.data.get("item").and_then(Value::as_object).cloned().unwrap_or_default();
-                    match item.get("type").and_then(Value::as_str) {
-                        Some("message") => {
-                            output.content.push(AssistantContent::Text { text: String::new() });
-                            current_block_index = Some(output.content.len() - 1);
-                            yield Ok(AssistantEvent::TextStart {
-                                content_index: output.content.len() - 1,
-                                partial: output.clone(),
-                            });
-                        }
-                        Some("function_call") => {
-                            let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
-                            let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or_default();
-                            let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
-                            current_tool_json = item.get("arguments").and_then(Value::as_str).unwrap_or_default().to_string();
-                            output.content.push(AssistantContent::ToolCall {
-                                id: format!("{call_id}|{id}"),
-                                name: name.to_string(),
-                                arguments: BTreeMap::new(),
-                            });
-                            current_block_index = Some(output.content.len() - 1);
-                            yield Ok(AssistantEvent::ToolCallStart {
-                                content_index: output.content.len() - 1,
-                                partial: output.clone(),
-                            });
-                        }
-                        Some("reasoning") => {
-                            output.content.push(AssistantContent::Thinking { thinking: String::new() });
-                            current_block_index = Some(output.content.len() - 1);
-                            yield Ok(AssistantEvent::ThinkingStart {
-                                content_index: output.content.len() - 1,
-                                partial: output.clone(),
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-                "response.output_text.delta" => {
-                    if let Some(index) = current_block_index
-                        && let Some(AssistantContent::Text { text }) = output.content.get_mut(index) {
-                        let delta = event.data.get("delta").and_then(Value::as_str).unwrap_or_default().to_string();
-                        text.push_str(&delta);
-                        yield Ok(AssistantEvent::TextDelta {
-                            content_index: index,
-                            delta,
-                            partial: output.clone(),
-                        });
-                    }
-                }
-                "response.function_call_arguments.delta" => {
-                    if let Some(index) = current_block_index {
-                        let delta = event.data.get("delta").and_then(Value::as_str).unwrap_or_default().to_string();
-                        current_tool_json.push_str(&delta);
-                        if let Some(AssistantContent::ToolCall { arguments, .. }) = output.content.get_mut(index) {
-                            *arguments = parse_streaming_json_map(&current_tool_json);
-                        }
-                        yield Ok(AssistantEvent::ToolCallDelta {
-                            content_index: index,
-                            delta,
-                            partial: output.clone(),
-                        });
-                    }
-                }
-                "response.function_call_arguments.done" => {
-                    if let Some(index) = current_block_index {
-                        let full = event.data.get("arguments").and_then(Value::as_str).unwrap_or_default().to_string();
-                        if full.starts_with(&current_tool_json) {
-                            let delta = full[current_tool_json.len()..].to_string();
-                            if !delta.is_empty() {
-                                current_tool_json = full.clone();
-                                if let Some(AssistantContent::ToolCall { arguments, .. }) = output.content.get_mut(index) {
-                                    *arguments = parse_streaming_json_map(&current_tool_json);
-                                }
-                                yield Ok(AssistantEvent::ToolCallDelta {
-                                    content_index: index,
-                                    delta,
-                                    partial: output.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
-                "response.output_item.done" => {
-                    let item = event.data.get("item").and_then(Value::as_object).cloned().unwrap_or_default();
-                    match item.get("type").and_then(Value::as_str) {
-                        Some("message") => {
-                            if let Some(index) = current_block_index
-                                && let Some(AssistantContent::Text { text }) = output.content.get(index) {
-                                yield Ok(AssistantEvent::TextEnd {
-                                    content_index: index,
-                                    content: text.clone(),
-                                    partial: output.clone(),
-                                });
-                                current_block_index = None;
-                            }
-                        }
-                        Some("function_call") => {
-                            if let Some(index) = current_block_index {
-                                let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
-                                let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or_default();
-                                let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
-                                let arguments_text = item.get("arguments").and_then(Value::as_str).unwrap_or(&current_tool_json);
-                                let tool_call = AssistantContent::ToolCall {
-                                    id: format!("{call_id}|{id}"),
-                                    name: name.to_string(),
-                                    arguments: parse_streaming_json_map(arguments_text),
-                                };
-                                output.content[index] = tool_call.clone();
-                                yield Ok(AssistantEvent::ToolCallEnd {
-                                    content_index: index,
-                                    tool_call,
-                                    partial: output.clone(),
-                                });
-                                current_block_index = None;
-                            }
-                        }
-                        Some("reasoning") => {
-                            if let Some(index) = current_block_index
-                                && let Some(AssistantContent::Thinking { thinking }) = output.content.get(index) {
-                                yield Ok(AssistantEvent::ThinkingEnd {
-                                    content_index: index,
-                                    content: thinking.clone(),
-                                    partial: output.clone(),
-                                });
-                                current_block_index = None;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                "response.completed" => {
-                    let response = event.data.get("response").and_then(Value::as_object).cloned().unwrap_or_default();
-                    output.response_id = response.get("id").and_then(Value::as_str).map(ToOwned::to_owned).or(output.response_id.clone());
-                    apply_usage_from_response(&mut output, &response);
-                    output.stop_reason = map_response_status(response.get("status").and_then(Value::as_str));
-                    if output.content.iter().any(|block| matches!(block, AssistantContent::ToolCall { .. }))
-                        && output.stop_reason == StopReason::Stop {
-                        output.stop_reason = StopReason::ToolUse;
-                    }
-                    yield Ok(AssistantEvent::Done {
-                        reason: output.stop_reason.clone(),
-                        message: output.clone(),
-                    });
+            let emitted = state.process_event(event);
+            for assistant_event in emitted {
+                let is_terminal = is_terminal_event(&assistant_event);
+                yield Ok(assistant_event);
+                if is_terminal {
                     return;
                 }
-                "response.failed" => {
-                    let response = event.data.get("response").and_then(Value::as_object).cloned().unwrap_or_default();
-                    output.response_id = response.get("id").and_then(Value::as_str).map(ToOwned::to_owned).or(output.response_id.clone());
-                    apply_usage_from_response(&mut output, &response);
-                    let error_message = response
-                        .get("error")
-                        .and_then(Value::as_object)
-                        .map(|error| {
-                            let code = error.get("code").and_then(Value::as_str).unwrap_or("unknown");
-                            let message = error.get("message").and_then(Value::as_str).unwrap_or("no message");
-                            format!("{code}: {message}")
-                        })
-                        .or_else(|| {
-                            response
-                                .get("incomplete_details")
-                                .and_then(Value::as_object)
-                                .and_then(|details| details.get("reason"))
-                                .and_then(Value::as_str)
-                                .map(|reason| format!("incomplete: {reason}"))
-                        })
-                        .unwrap_or_else(|| "Unknown error (no error details in response)".into());
-                    output.stop_reason = StopReason::Error;
-                    output.error_message = Some(error_message);
-                    yield Ok(AssistantEvent::Error {
-                        reason: StopReason::Error,
-                        error: output.clone(),
-                    });
-                    return;
-                }
-                "error" => {
-                    let code = event.data.get("code").and_then(Value::as_str).unwrap_or("unknown");
-                    let message = event.data.get("message").and_then(Value::as_str).unwrap_or("Unknown error");
-                    output.stop_reason = StopReason::Error;
-                    output.error_message = Some(format!("Error Code {code}: {message}"));
-                    yield Ok(AssistantEvent::Error {
-                        reason: StopReason::Error,
-                        error: output.clone(),
-                    });
-                    return;
-                }
-                _ => {}
             }
         }
     })
@@ -786,14 +1295,6 @@ fn error_message(model: &Model, error_message: String) -> AssistantMessage {
         stop_reason: StopReason::Error,
         error_message: Some(error_message),
         timestamp: now_ms(),
-    }
-}
-
-fn aborted_message(model: &Model) -> AssistantMessage {
-    AssistantMessage {
-        stop_reason: StopReason::Aborted,
-        error_message: Some("Request was aborted".into()),
-        ..AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone())
     }
 }
 
@@ -881,6 +1382,56 @@ fn map_response_status(status: Option<&str>) -> StopReason {
         "in_progress" | "queued" => StopReason::Stop,
         _ => StopReason::Error,
     }
+}
+
+fn message_item_text(item: &serde_json::Map<String, Value>) -> Option<String> {
+    item.get("content")
+        .and_then(Value::as_array)
+        .map(|content| {
+            content
+                .iter()
+                .filter_map(|part| {
+                    let part = part.as_object()?;
+                    match part.get("type").and_then(Value::as_str) {
+                        Some("output_text") => part.get("text").and_then(Value::as_str),
+                        Some("refusal") => part.get("refusal").and_then(Value::as_str),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        })
+}
+
+fn reasoning_summary_text(item: &serde_json::Map<String, Value>) -> Option<String> {
+    item.get("summary")
+        .and_then(Value::as_array)
+        .map(|summary| {
+            summary
+                .iter()
+                .filter_map(|part| part.as_object())
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+}
+
+fn text_content(output: &AssistantMessage, index: usize) -> Option<String> {
+    match output.content.get(index) {
+        Some(AssistantContent::Text { text }) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn thinking_content(output: &AssistantMessage, index: usize) -> Option<String> {
+    match output.content.get(index) {
+        Some(AssistantContent::Thinking { thinking }) => Some(thinking.clone()),
+        _ => None,
+    }
+}
+
+fn is_terminal_event(event: &AssistantEvent) -> bool {
+    matches!(event, AssistantEvent::Done { .. } | AssistantEvent::Error { .. })
 }
 
 #[derive(Default)]

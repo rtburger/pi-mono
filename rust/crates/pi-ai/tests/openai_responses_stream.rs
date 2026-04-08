@@ -1,6 +1,6 @@
 use futures::StreamExt;
 use pi_ai::openai_responses::{OpenAiResponsesStreamEnvelope, stream_openai_responses_sse_events};
-use pi_events::{AssistantEvent, Model, StopReason};
+use pi_events::{AssistantContent, AssistantEvent, Model, StopReason};
 use serde_json::json;
 use std::{fs, path::PathBuf};
 
@@ -165,6 +165,99 @@ async fn streams_tool_call_response_events() {
             ));
         }
         _ => panic!("expected terminal done event"),
+    }
+}
+
+#[tokio::test]
+async fn streams_reasoning_summary_response_events() {
+    let events = vec![
+        OpenAiResponsesStreamEnvelope {
+            event_type: "response.output_item.added".into(),
+            data: serde_json::from_value(json!({
+                "item": { "type": "reasoning", "id": "rs_1", "summary": [] }
+            }))
+            .unwrap(),
+        },
+        OpenAiResponsesStreamEnvelope {
+            event_type: "response.reasoning_summary_part.added".into(),
+            data: serde_json::from_value(json!({
+                "part": { "type": "summary_text", "text": "" }
+            }))
+            .unwrap(),
+        },
+        OpenAiResponsesStreamEnvelope {
+            event_type: "response.reasoning_summary_text.delta".into(),
+            data: serde_json::from_value(json!({ "delta": "I reasoned" })).unwrap(),
+        },
+        OpenAiResponsesStreamEnvelope {
+            event_type: "response.reasoning_summary_part.done".into(),
+            data: serde_json::from_value(json!({})).unwrap(),
+        },
+        OpenAiResponsesStreamEnvelope {
+            event_type: "response.output_item.done".into(),
+            data: serde_json::from_value(json!({
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [{ "type": "summary_text", "text": "I reasoned" }]
+                }
+            }))
+            .unwrap(),
+        },
+        OpenAiResponsesStreamEnvelope {
+            event_type: "response.completed".into(),
+            data: serde_json::from_value(json!({
+                "response": {
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 5,
+                        "output_tokens": 3,
+                        "total_tokens": 8,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }
+            }))
+            .unwrap(),
+        },
+    ];
+
+    let collected = stream_openai_responses_sse_events(model(), events)
+        .collect::<Vec<_>>()
+        .await;
+
+    let names = collected
+        .iter()
+        .map(|event| match event.as_ref().unwrap() {
+            AssistantEvent::Start { .. } => "start",
+            AssistantEvent::ThinkingStart { .. } => "thinking_start",
+            AssistantEvent::ThinkingDelta { .. } => "thinking_delta",
+            AssistantEvent::ThinkingEnd { .. } => "thinking_end",
+            AssistantEvent::Done { .. } => "done",
+            other => panic!("unexpected event: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        names,
+        vec![
+            "start",
+            "thinking_start",
+            "thinking_delta",
+            "thinking_delta",
+            "thinking_end",
+            "done"
+        ]
+    );
+    match collected.last().unwrap().as_ref().unwrap() {
+        AssistantEvent::Done { message, .. } => {
+            assert_eq!(
+                message.content,
+                vec![AssistantContent::Thinking {
+                    thinking: "I reasoned".into()
+                }]
+            );
+        }
+        other => panic!("expected done event, got {other:?}"),
     }
 }
 
