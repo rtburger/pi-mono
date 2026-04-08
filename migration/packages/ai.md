@@ -1,6 +1,6 @@
 # packages/ai migration inventory
 
-Status: milestone 5 scaffold + faux provider slice + OpenAI Responses streaming/replay + Copilot header slice
+Status: milestone 6 scaffold + faux provider slice + OpenAI Responses streaming/replay + tool-definition slice
 Target crate: `rust/crates/pi-ai`
 
 ## 1. Files analyzed
@@ -181,6 +181,7 @@ Files read fully for the first real-provider slice:
 Observed OpenAI Responses behaviors relevant to the current real-provider slices:
 - payload-building is split from stream processing
 - system prompt becomes `developer` role for reasoning-capable models, else `system`
+- request payloads may include function tool definitions derived from context tools
 - assistant text history is replayed as completed assistant `message` items with output-text content
 - streamed assistant text captures a reusable text signature encoding message id and optional phase
 - streamed reasoning summaries capture a reusable serialized reasoning item signature
@@ -200,6 +201,7 @@ Current Rust provider slice implements deterministic request-building coverage f
 - foreign tool-call ID normalization
 - assistant tool-call conversion to `function_call`
 - tool-result image packing into `function_call_output`
+- function tool-definition conversion from context tools with `strict: false`
 - Copilot default omission of `reasoning`
 - `developer` vs `system` role selection for system prompt replay
 - OpenAI prompt-cache parameter shaping for `sessionId` + long retention
@@ -214,7 +216,7 @@ Deferred OpenAI Responses work:
 Current Rust runtime provider path also includes:
 - lazy built-in registration of the minimal `openai-responses` provider on first dispatch
 - API key resolution from explicit stream options or provider env vars (`OPENAI_API_KEY`, Copilot token env fallbacks)
-- passthrough of `max_tokens`, `temperature`, `reasoning_effort`, `reasoning_summary`, `session_id`, and `cache_retention`
+- passthrough of `max_tokens`, `temperature`, `reasoning_effort`, `reasoning_summary`, `session_id`, `cache_retention`, and context tools
 - request-header merging via runtime options
 - GitHub Copilot dynamic request headers (`X-Initiator`, `Openai-Intent`, `Copilot-Vision-Request`)
 - immediate abort handling before HTTP send and while awaiting streamed body chunks
@@ -251,6 +253,7 @@ Covered stream/request semantics in Rust tests:
 - streamed text signature capture from OpenAI message items
 - streamed reasoning signature capture from OpenAI reasoning items
 - same-model replay of serialized reasoning items and signed assistant text
+- function tool-definition conversion in OpenAI request params
 - `response.completed` stop-reason mapping to `stop` / `toolUse`
 - `response.failed` to terminal assistant error event
 - response-id capture on created/failed responses
@@ -269,4 +272,4 @@ Covered stream/request semantics in Rust tests:
 - whether Rust-side model metadata should be generated from TS `models.generated.ts` or from shared external source during migration
 - how much of TS `SimpleStreamOptions` reasoning normalization should live in `pi-ai` vs provider-specific modules
 - whether faux provider should remain in `pi-ai` or move to `pi-test-harness` after the first provider lands
-- whether to continue OpenAI Responses next with redacted reasoning + abort-usage parity or switch to Anthropic for a second end-to-end provider
+- whether to continue AI with validation/tool execution plumbing for agent support or switch to Anthropic for a second end-to-end provider

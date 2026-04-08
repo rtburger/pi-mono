@@ -29,6 +29,7 @@ fn context() -> Context {
             content: vec![UserContent::Text { text: "hi".into() }],
             timestamp: 1,
         }],
+        tools: vec![],
     }
 }
 
@@ -115,6 +116,7 @@ async fn dispatches_github_copilot_with_dynamic_headers() {
             ],
             timestamp: 1,
         }],
+        tools: vec![],
     };
 
     let response = complete(
@@ -168,6 +170,7 @@ async fn merges_custom_headers_after_copilot_defaults() {
             error_message: None,
             timestamp: 1,
         }],
+        tools: vec![],
     };
 
     let response = complete(

@@ -33,6 +33,7 @@ fn context() -> Context {
             content: vec![UserContent::Text { text: "hi".into() }],
             timestamp: 1,
         }],
+        tools: vec![],
     }
 }
 

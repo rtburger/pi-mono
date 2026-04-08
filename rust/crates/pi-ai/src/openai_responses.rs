@@ -1,8 +1,8 @@
 use crate::{AiProvider, AssistantEventStream, StreamOptions, register_provider};
 use async_stream::stream;
 use pi_events::{
-    AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason, Usage,
-    UserContent,
+    AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason,
+    ToolDefinition, Usage, UserContent,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -44,6 +44,8 @@ pub struct OpenAiResponsesRequestParams {
     pub reasoning: Option<OpenAiResponsesReasoning>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ResponsesToolDefinition>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +110,17 @@ pub enum ResponsesFunctionCallOutput {
     Content(Vec<ResponsesContentPart>),
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponsesToolDefinition {
+    Function {
+        name: String,
+        description: String,
+        parameters: Value,
+        strict: bool,
+    },
+}
+
 pub fn build_openai_responses_request_params(
     model: &Model,
     context: &Context,
@@ -164,6 +177,11 @@ pub fn build_openai_responses_request_params(
             .as_ref()
             .map(|_| vec!["reasoning.encrypted_content".into()]),
         reasoning,
+        tools: if context.tools.is_empty() {
+            None
+        } else {
+            Some(convert_openai_responses_tools(&context.tools))
+        },
     }
 }
 
@@ -527,6 +545,18 @@ fn flush_orphaned_tool_calls(
     }
     pending_tool_calls.clear();
     existing_tool_result_ids.clear();
+}
+
+fn convert_openai_responses_tools(tools: &[ToolDefinition]) -> Vec<ResponsesToolDefinition> {
+    tools
+        .iter()
+        .map(|tool| ResponsesToolDefinition::Function {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters: tool.parameters.clone(),
+            strict: false,
+        })
+        .collect()
 }
 
 fn convert_user_content(content: &[UserContent], model: &Model) -> Vec<ResponsesContentPart> {

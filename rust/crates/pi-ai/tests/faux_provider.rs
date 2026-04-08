@@ -16,6 +16,7 @@ fn user_context(text: &str) -> Context {
             content: vec![UserContent::Text { text: text.into() }],
             timestamp: 1,
         }],
+        tools: vec![],
     }
 }
 

@@ -80,6 +80,7 @@ fn converts_foreign_assistant_tool_call_to_function_call() {
                 timestamp: 2,
             },
         ],
+        tools: vec![],
     };
 
     let items = convert_openai_responses_messages(
@@ -146,6 +147,7 @@ fn inserts_synthetic_tool_result_for_orphaned_tool_call() {
                 timestamp: 3,
             },
         ],
+        tools: vec![],
     };
 
     let items = convert_openai_responses_messages(
@@ -207,6 +209,7 @@ fn skips_aborted_assistant_messages_during_replay() {
                 timestamp: 3,
             },
         ],
+        tools: vec![],
     };
 
     let items = convert_openai_responses_messages(
@@ -247,6 +250,7 @@ fn omits_fc_item_id_for_same_provider_different_model_handoff() {
             error_message: None,
             timestamp: 1,
         }],
+        tools: vec![],
     };
 
     let items = convert_openai_responses_messages(
@@ -286,6 +290,7 @@ fn converts_different_model_thinking_to_assistant_output_text() {
             error_message: None,
             timestamp: 1,
         }],
+        tools: vec![],
     };
 
     let items = convert_openai_responses_messages(
@@ -348,6 +353,7 @@ fn replays_same_model_reasoning_and_text_signatures() {
             error_message: None,
             timestamp: 1,
         }],
+        tools: vec![],
     };
 
     let items = convert_openai_responses_messages(
@@ -448,6 +454,7 @@ fn keeps_tool_result_images_inside_function_call_output() {
                 timestamp: 3,
             },
         ],
+        tools: vec![],
     };
 
     let items = convert_openai_responses_messages(
