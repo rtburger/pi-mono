@@ -1,5 +1,6 @@
-use crate::AssistantEventStream;
+use crate::{AiProvider, AssistantEventStream, StreamOptions, register_provider};
 use async_stream::stream;
+use futures::StreamExt;
 use pi_events::{
     AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason, Usage,
     UserContent,
@@ -7,12 +8,13 @@ use pi_events::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct OpenAiResponsesParamsOptions {
     pub max_output_tokens: Option<u64>,
-    pub temperature: Option<String>,
+    pub temperature: Option<f64>,
     pub reasoning_effort: Option<String>,
     pub reasoning_summary: Option<String>,
     pub session_id: Option<String>,
@@ -38,7 +40,7 @@ pub struct OpenAiResponsesRequestParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<String>,
+    pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<OpenAiResponsesReasoning>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -429,6 +431,134 @@ pub fn stream_openai_responses_sse_text(
     Ok(stream_openai_responses_sse_events(model, events))
 }
 
+pub fn stream_openai_responses_http(
+    model: Model,
+    params: OpenAiResponsesRequestParams,
+    api_key: String,
+    signal: Option<tokio::sync::watch::Receiver<bool>>,
+) -> AssistantEventStream {
+    Box::pin(stream! {
+        let mut signal = signal;
+
+        if is_signal_aborted(&signal) {
+            yield Ok(AssistantEvent::Error { reason: StopReason::Aborted, error: aborted_message(&model) });
+            return;
+        }
+
+        let send_future = reqwest::Client::new()
+            .post(format!("{}/responses", model.base_url.trim_end_matches('/')))
+            .bearer_auth(api_key)
+            .header("accept", "text/event-stream")
+            .json(&params)
+            .send();
+        tokio::pin!(send_future);
+
+        let response = if let Some(signal) = signal.as_mut() {
+            tokio::select! {
+                response = &mut send_future => {
+                    match response {
+                        Ok(response) => response,
+                        Err(error) => {
+                            let message = error_message(&model, format!("HTTP request failed: {error}"));
+                            yield Ok(AssistantEvent::Error { reason: StopReason::Error, error: message });
+                            return;
+                        }
+                    }
+                }
+                _ = wait_for_abort(signal) => {
+                    yield Ok(AssistantEvent::Error { reason: StopReason::Aborted, error: aborted_message(&model) });
+                    return;
+                }
+            }
+        } else {
+            match send_future.await {
+                Ok(response) => response,
+                Err(error) => {
+                    let message = error_message(&model, format!("HTTP request failed: {error}"));
+                    yield Ok(AssistantEvent::Error { reason: StopReason::Error, error: message });
+                    return;
+                }
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text_future = response.text();
+            tokio::pin!(text_future);
+            let body = if let Some(signal) = signal.as_mut() {
+                tokio::select! {
+                    body = &mut text_future => body.unwrap_or_default(),
+                    _ = wait_for_abort(signal) => {
+                        yield Ok(AssistantEvent::Error { reason: StopReason::Aborted, error: aborted_message(&model) });
+                        return;
+                    }
+                }
+            } else {
+                text_future.await.unwrap_or_default()
+            };
+            let detail = if body.is_empty() {
+                format!("HTTP request failed with status {status}")
+            } else {
+                format!("HTTP request failed with status {status}: {body}")
+            };
+            let message = error_message(&model, detail);
+            yield Ok(AssistantEvent::Error { reason: StopReason::Error, error: message });
+            return;
+        }
+
+        let text_future = response.text();
+        tokio::pin!(text_future);
+        let payload = if let Some(signal) = signal.as_mut() {
+            tokio::select! {
+                payload = &mut text_future => {
+                    match payload {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            let message = error_message(&model, format!("Failed to read SSE response body: {error}"));
+                            yield Ok(AssistantEvent::Error { reason: StopReason::Error, error: message });
+                            return;
+                        }
+                    }
+                }
+                _ = wait_for_abort(signal) => {
+                    yield Ok(AssistantEvent::Error { reason: StopReason::Aborted, error: aborted_message(&model) });
+                    return;
+                }
+            }
+        } else {
+            match text_future.await {
+                Ok(payload) => payload,
+                Err(error) => {
+                    let message = error_message(&model, format!("Failed to read SSE response body: {error}"));
+                    yield Ok(AssistantEvent::Error { reason: StopReason::Error, error: message });
+                    return;
+                }
+            }
+        };
+
+        let inner = match stream_openai_responses_sse_text(model.clone(), &payload) {
+            Ok(stream) => stream,
+            Err(error) => {
+                let message = error_message(&model, error.to_string());
+                yield Ok(AssistantEvent::Error { reason: StopReason::Error, error: message });
+                return;
+            }
+        };
+
+        futures::pin_mut!(inner);
+        while let Some(event) = inner.next().await {
+            match event {
+                Ok(event) => yield Ok(event),
+                Err(error) => {
+                    let message = error_message(&model, error.to_string());
+                    yield Ok(AssistantEvent::Error { reason: StopReason::Error, error: message });
+                    return;
+                }
+            }
+        }
+    })
+}
+
 pub fn stream_openai_responses_sse_events(
     model: Model,
     events: Vec<OpenAiResponsesStreamEnvelope>,
@@ -644,6 +774,44 @@ pub fn stream_openai_responses_sse_events(
     })
 }
 
+fn error_message(model: &Model, error_message: String) -> AssistantMessage {
+    AssistantMessage {
+        role: "assistant".into(),
+        content: Vec::new(),
+        api: model.api.clone(),
+        provider: model.provider.clone(),
+        model: model.id.clone(),
+        response_id: None,
+        usage: Usage::default(),
+        stop_reason: StopReason::Error,
+        error_message: Some(error_message),
+        timestamp: now_ms(),
+    }
+}
+
+fn aborted_message(model: &Model) -> AssistantMessage {
+    AssistantMessage {
+        stop_reason: StopReason::Aborted,
+        error_message: Some("Request was aborted".into()),
+        ..AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone())
+    }
+}
+
+fn is_signal_aborted(signal: &Option<tokio::sync::watch::Receiver<bool>>) -> bool {
+    signal
+        .as_ref()
+        .map(|signal| *signal.borrow())
+        .unwrap_or(false)
+}
+
+async fn wait_for_abort(signal: &mut tokio::sync::watch::Receiver<bool>) {
+    while !*signal.borrow() {
+        if signal.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 fn flush_sse_event(
     current_data_lines: &mut Vec<String>,
 ) -> Result<Option<OpenAiResponsesStreamEnvelope>, crate::AiError> {
@@ -713,6 +881,58 @@ fn map_response_status(status: Option<&str>) -> StopReason {
         "in_progress" | "queued" => StopReason::Stop,
         _ => StopReason::Error,
     }
+}
+
+#[derive(Default)]
+pub struct OpenAiResponsesProvider;
+
+impl AiProvider for OpenAiResponsesProvider {
+    fn stream(
+        &self,
+        model: Model,
+        context: Context,
+        options: StreamOptions,
+    ) -> AssistantEventStream {
+        let params = build_openai_responses_request_params(
+            &model,
+            &context,
+            &["openai", "openai-codex", "opencode"],
+            OpenAiResponsesConvertOptions::default(),
+            OpenAiResponsesParamsOptions {
+                max_output_tokens: options.max_tokens,
+                temperature: options.temperature,
+                reasoning_effort: options.reasoning_effort.clone(),
+                reasoning_summary: options.reasoning_summary.clone(),
+                session_id: options.session_id.clone(),
+                cache_retention: Some(match options.cache_retention {
+                    crate::CacheRetention::None => "none".into(),
+                    crate::CacheRetention::Short => "short".into(),
+                    crate::CacheRetention::Long => "long".into(),
+                }),
+            },
+        );
+
+        let api_key = options
+            .api_key
+            .clone()
+            .or_else(|| crate::get_env_api_key(&model.provider));
+
+        match api_key {
+            Some(api_key) => {
+                stream_openai_responses_http(model, params, api_key, options.signal.clone())
+            }
+            None => Box::pin(stream! {
+                yield Ok(AssistantEvent::Error {
+                    reason: StopReason::Error,
+                    error: error_message(&model, "OpenAI Responses API key is required".into()),
+                });
+            }),
+        }
+    }
+}
+
+pub fn register_openai_responses_provider() {
+    register_provider("openai-responses", Arc::new(OpenAiResponsesProvider));
 }
 
 fn now_ms() -> u64 {

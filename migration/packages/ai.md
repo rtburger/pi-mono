@@ -63,8 +63,8 @@ Key TS runtime dependencies:
 - streaming/utilities: `partial-json`, `undici`, `proxy-agent`
 
 First Rust target dependencies chosen:
-- `tokio`, `futures`, `serde`, `serde_json`, `thiserror`, `async-stream`
-- `reqwest` is planned but not required for the faux-provider slice yet
+- `tokio`, `futures`, `serde`, `serde_json`, `thiserror`, `async-stream`, `reqwest`
+- `reqwest` is now used for the first minimal live OpenAI Responses transport path
 
 ## 5. Config / env var summary
 
@@ -76,9 +76,14 @@ Observed env/config semantics in TS:
 - max retry delay, payload inspection hooks, metadata headers, transport preference
 - OAuth-backed providers: anthropic, github-copilot, google-gemini-cli, google-antigravity, openai-codex
 
-First Rust slice preserves only:
+Current Rust slice preserves:
 - `session_id`
 - `cache_retention`
+- explicit `api_key`
+- `temperature`
+- `max_tokens`
+- `reasoning_effort`
+- `reasoning_summary`
 - abort signaling
 
 ## 6. Runtime behavior summary
@@ -192,16 +197,26 @@ Current Rust provider slice implements deterministic request-building coverage f
 - OpenAI prompt-cache parameter shaping for `sessionId` + long retention
 
 Deferred OpenAI Responses work:
-- real HTTP client integration
+- incremental HTTP body chunk parsing instead of whole-body collection
 - reasoning block replay/signature handling
 - Copilot-specific headers and auth behavior
-- provider-registry integration of the current OpenAI Responses parser as a live network-backed provider
+- model-catalog integration for the runtime provider
+- broader parity for provider-specific runtime options beyond the current minimal passthrough
+
+Current Rust runtime provider path also includes:
+- lazy built-in registration of the minimal `openai-responses` provider on first dispatch
+- API key resolution from explicit stream options or `OPENAI_API_KEY`
+- passthrough of `max_tokens`, `temperature`, `reasoning_effort`, `reasoning_summary`, `session_id`, and `cache_retention`
+- immediate abort handling before HTTP send and while awaiting response/body completion
 
 Current Rust transport-adjacent coverage now includes:
 - SSE `data:` frame parsing from raw text
 - `[DONE]` handling
 - invalid-JSON SSE failure detection
 - direct text-to-event-stream bridging for deterministic tests
+- minimal live HTTP POST -> SSE text -> normalized event stream flow using `reqwest`
+- HTTP failure mapping to terminal assistant error events
+- provider-registry dispatch for a minimal `openai-responses` runtime path
 
 Current Rust streaming coverage now includes deterministic parsing for:
 - `response.created`

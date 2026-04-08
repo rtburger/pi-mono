@@ -11,7 +11,7 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     pin::Pin,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, Once, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -33,6 +33,11 @@ pub struct StreamOptions {
     pub signal: Option<tokio::sync::watch::Receiver<bool>>,
     pub session_id: Option<String>,
     pub cache_retention: CacheRetention,
+    pub api_key: Option<String>,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<u64>,
+    pub reasoning_effort: Option<String>,
+    pub reasoning_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -72,6 +77,22 @@ pub fn unregister_provider(api: &str) {
     registry().lock().unwrap().remove(api);
 }
 
+pub fn get_env_api_key(provider: &str) -> Option<String> {
+    match provider {
+        "openai" => std::env::var("OPENAI_API_KEY").ok(),
+        _ => None,
+    }
+}
+
+pub fn register_builtin_providers() {
+    openai_responses::register_openai_responses_provider();
+}
+
+fn ensure_builtin_providers_registered() {
+    static BUILTINS: Once = Once::new();
+    BUILTINS.call_once(register_builtin_providers);
+}
+
 pub fn complete(
     model: Model,
     context: Context,
@@ -96,6 +117,7 @@ pub fn stream_response(
     context: Context,
     options: StreamOptions,
 ) -> Result<AssistantEventStream, AiError> {
+    ensure_builtin_providers_registered();
     let provider = registry()
         .lock()
         .unwrap()
