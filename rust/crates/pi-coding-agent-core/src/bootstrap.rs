@@ -196,5 +196,5 @@ pub fn bootstrap_session(
 }
 
 fn same_model(left: &Model, right: &Model) -> bool {
-    left.provider == right.provider && left.id == right.id && left.api == right.api
+    left.provider == right.provider && left.id == right.id
 }

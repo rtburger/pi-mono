@@ -2,7 +2,7 @@ use pi_agent::ThinkingLevel;
 use pi_coding_agent_core::{
     DEFAULT_MODELS, DEFAULT_THINKING_LEVEL, InitialModelOptions, ModelCatalog,
     ParseModelPatternOptions, ScopedModel, default_model_id_for_provider, find_initial_model,
-    parse_model_pattern, resolve_cli_model, restore_model_from_session,
+    parse_model_pattern, resolve_cli_model, resolve_model_scope, restore_model_from_session,
 };
 use pi_events::Model;
 
@@ -106,6 +106,58 @@ fn parse_model_pattern_warns_on_invalid_thinking_level_in_scope_mode() {
             .as_deref()
             .is_some_and(|warning| warning.contains("Invalid thinking level \"random\""))
     );
+}
+
+#[test]
+fn resolve_model_scope_supports_globs_and_glob_thinking_levels() {
+    let models = vec![
+        mock_model("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5", true),
+        mock_model("anthropic", "claude-opus-4-6", "Claude Opus 4.6", true),
+        mock_model("openai", "gpt-4o", "GPT-4o", false),
+    ];
+
+    let result = resolve_model_scope(
+        &[
+            String::from("anthropic/*:high"),
+            String::from("openai/gpt-4o"),
+        ],
+        &models,
+    );
+
+    assert!(result.warnings.is_empty());
+    assert_eq!(result.scoped_models.len(), 3);
+    assert_eq!(result.scoped_models[0].model.id, "claude-sonnet-4-5");
+    assert_eq!(
+        result.scoped_models[0].thinking_level,
+        Some(ThinkingLevel::High)
+    );
+    assert_eq!(result.scoped_models[1].model.id, "claude-opus-4-6");
+    assert_eq!(
+        result.scoped_models[1].thinking_level,
+        Some(ThinkingLevel::High)
+    );
+    assert_eq!(result.scoped_models[2].model.id, "gpt-4o");
+    assert_eq!(result.scoped_models[2].thinking_level, None);
+}
+
+#[test]
+fn resolve_model_scope_keeps_first_duplicate_match_and_emits_scope_warnings() {
+    let result = resolve_model_scope(
+        &[
+            String::from("claude-sonnet-4-5"),
+            String::from("anthropic/*:high"),
+            String::from("sonnet:random"),
+            String::from("missing"),
+        ],
+        &base_models(),
+    );
+
+    assert_eq!(result.scoped_models.len(), 1);
+    assert_eq!(result.scoped_models[0].model.id, "claude-sonnet-4-5");
+    assert_eq!(result.scoped_models[0].thinking_level, None);
+    assert_eq!(result.warnings.len(), 2);
+    assert!(result.warnings[0].contains("Invalid thinking level \"random\""));
+    assert_eq!(result.warnings[1], "No models match pattern \"missing\"");
 }
 
 #[test]

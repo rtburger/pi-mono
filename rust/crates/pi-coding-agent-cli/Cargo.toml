@@ -11,6 +11,7 @@ pi-ai = { path = "../pi-ai" }
 pi-coding-agent-core = { path = "../pi-coding-agent-core" }
 pi-coding-agent-tools = { path = "../pi-coding-agent-tools" }
 pi-events = { path = "../pi-events" }
+pi-tui = { path = "../pi-tui" }
 serde_json.workspace = true
 
 [dev-dependencies]

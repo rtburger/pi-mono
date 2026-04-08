@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+globset = "0.4"
 pi-agent = { path = "../pi-agent" }
 pi-ai = { path = "../pi-ai" }
 pi-coding-agent-tools = { path = "../pi-coding-agent-tools" }

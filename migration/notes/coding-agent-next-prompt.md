@@ -24,63 +24,62 @@ Scope constraints:
 
 Repo/worktree rules:
 - Read every file you modify in full before editing.
-- Use read for file contents, not cat/sed.
+- Use `read` for file contents, not cat/sed.
 - After code changes, run required validation.
 - In this environment, `npm run check` is blocked because `biome` is missing; note that explicitly.
 - Do not commit unless asked.
 
-Current state after the latest coding-agent-core milestone:
+Current state after the latest coding-agent CLI/model milestone:
+- `rust/crates/pi-ai` now provides the Rust-backed built-in model catalog used by `rust/apps/pi`.
 - `rust/crates/pi-coding-agent-core` now has:
-  - model resolution (`model_resolver.rs`)
-  - `models.json` subset registry (`model_registry.rs`)
-  - minimal auth seam (`auth.rs`)
-  - uncached config/header resolution (`config_value.rs`)
-  - startup bootstrap selection (`bootstrap.rs`)
-  - minimal non-interactive runtime (`runtime.rs`)
-- `create_coding_agent_core()` now:
-  - builds `ModelRegistry`
-  - runs `bootstrap_session()`
-  - creates a `pi-agent::Agent`
-  - uses a registry-backed streamer to resolve auth/headers into `pi-ai::stream_response()`
-- Tests added under `rust/crates/pi-coding-agent-core/tests/`:
-  - `model_resolver.rs`
-  - `model_registry.rs`
-  - `bootstrap.rs`
-  - `runtime.rs`
+  - CLI model resolution parity slices
+  - scoped-model resolution via `resolve_model_scope()`
+  - `models.json` subset registry
+  - startup bootstrap selection with saved-default-in-scope handling
+  - minimal non-interactive runtime over `pi-agent`
+- `rust/crates/pi-coding-agent-cli` now has:
+  - `--list-models [search]`
+  - `--models` scoped-model selection in the non-interactive path
+  - `--api-key` override support for explicit `--model` and current first-scoped-model selection
+- `rust/crates/pi-tui` now has:
+  - `fuzzy_match()`
+  - `fuzzy_filter()`
+  - tests ported from `packages/tui/test/fuzzy.test.ts`
 - Validation already completed on this milestone:
   - `cd rust && cargo fmt`
+  - `cd rust && cargo test -p pi-tui`
   - `cd rust && cargo test -p pi-coding-agent-core`
+  - `cd rust && cargo test -p pi-coding-agent-cli`
   - `cd rust && cargo test`
   - `npm run check` fails with `biome: command not found`
 
 Important current gaps:
-- built-in model catalog still injected as `Vec<Model>` instead of sourced from Rust `pi-ai`
-- coding-agent custom message conversion parity from `packages/coding-agent/src/core/messages.ts` is still missing
-- default coding tools (`read`, `bash`, `edit`, `write`) are not wired into the runtime yet
-- no auth.json persistence / OAuth / dynamic provider lifecycle yet
-- no session-manager/settings/resource-loader integration yet
-- no TUI work yet
+- no xhigh-capability clamping parity yet in the Rust CLI startup path
+- no settings-manager/resource-loader/session-manager integration yet
+- no JSON session-manager wrapper/header parity yet
+- no `blockImages` runtime wrapper yet
+- no image auto-resize parity yet
+- no broader OAuth/cloud auth parity yet for all providers
+- no interactive coding-agent/TUI integration yet beyond fuzzy helpers
 
 Recommended next task:
-- Stay in `packages/coding-agent / rust/crates/pi-coding-agent-core`
-- Port the minimal coding-agent message conversion layer from `packages/coding-agent/src/core/messages.ts`
-- Then wire the default coding tools (`read`, `bash`, `edit`, `write`) into the runtime through `pi-agent::AgentTool`
-- Keep it non-interactive and session-manager-free for one more milestone
+- Stay in `packages/coding-agent`, `packages/ai`, `rust/crates/pi-coding-agent-core`, and `rust/crates/pi-coding-agent-cli`
+- Port the remaining CLI startup model-selection parity that does not require session-manager:
+  - xhigh/thinking clamp behavior against model capabilities
+  - any missing availability/auth edge cases that affect initial model selection
+- Keep TUI and session-manager integration deferred for now
 
 Before editing, ground in:
-- `packages/coding-agent/src/core/messages.ts`
-- `packages/coding-agent/src/core/sdk.ts`
-- `packages/coding-agent/src/core/agent-session-services.ts`
-- `rust/crates/pi-coding-agent-core/src/runtime.rs`
-- `rust/crates/pi-agent/src/agent.rs`
-- `rust/crates/pi-agent/src/tool.rs`
+- `packages/coding-agent/src/main.ts`
+- `packages/coding-agent/src/core/model-resolver.ts`
+- `packages/ai/src/models.ts`
+- `rust/crates/pi-ai/src/models.rs`
+- `rust/crates/pi-coding-agent-core/src/model_resolver.rs`
+- `rust/crates/pi-coding-agent-core/src/bootstrap.rs`
+- `rust/crates/pi-coding-agent-cli/src/runner.rs`
 - `migration/packages/coding-agent.md`
+- `migration/packages/tui.md`
 
 Also note:
-- Ignore unrelated existing worktree changes in:
-  - `rust/crates/pi-agent/src/loop.rs`
-  - `rust/crates/pi-agent/src/tool.rs`
-  - `rust/crates/pi-agent/tests/agent_loop.rs`
-- Ignore unrelated untracked noise:
-  - `.codex`
-  - `rust/target/`
+- Ignore unrelated existing worktree changes outside the files touched by this migration slice.
+- Ignore `rust/target/` noise.

@@ -5,6 +5,7 @@ use pi_ai::{
     register_builtin_providers, register_provider, stream_response, unregister_provider,
 };
 use pi_coding_agent_cli::{EnvAuthSource, RunCommandOptions, run_command};
+use pi_coding_agent_core::MemoryAuthStorage;
 use pi_events::{
     AssistantContent, AssistantEvent, AssistantMessage, Context, Model, StopReason, Usage,
     UserContent,
@@ -21,6 +22,7 @@ const TINY_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACAQMAAABIeJ9nAAAAIGNIUk0A
 #[derive(Debug, Clone, Default)]
 struct RecordedRequest {
     context: Option<Context>,
+    model: Option<Model>,
     api_key: Option<String>,
 }
 
@@ -39,6 +41,7 @@ impl AiProvider for RecordingProvider {
     ) -> AssistantEventStream {
         *self.recorded.lock().unwrap() = RecordedRequest {
             context: Some(context),
+            model: Some(model.clone()),
             api_key: options.api_key,
         };
 
@@ -188,7 +191,11 @@ async fn run_command_uses_pi_ai_built_in_model_catalog() {
     })
     .await;
 
-    assert_eq!(result.exit_code, 0, "stderr: {} stdout: {}", result.stderr, result.stdout);
+    assert_eq!(
+        result.exit_code, 0,
+        "stderr: {} stdout: {}",
+        result.stderr, result.stdout
+    );
     assert_eq!(result.stdout, "catalog\n");
     assert!(result.stderr.is_empty());
 
@@ -330,4 +337,114 @@ async fn run_command_rejects_interactive_mode_for_now() {
             .stderr
             .contains("Interactive mode is not supported in the Rust CLI yet")
     );
+}
+
+#[tokio::test]
+async fn run_command_lists_models_without_entering_print_or_interactive_mode() {
+    let result = run_command(RunCommandOptions {
+        args: vec![String::from("--list-models")],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([("openai", "token")])),
+        built_in_models: vec![model("openai-responses", "openai", "gpt-5.2-codex")],
+        models_json_path: None,
+        cwd: unique_temp_dir("runner-list-models"),
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0);
+    assert!(result.stderr.is_empty());
+    assert!(result.stdout.contains("provider"));
+    assert!(result.stdout.contains("gpt-5.2-codex"));
+    assert!(!result.stdout.contains("Interactive mode is not supported"));
+}
+
+#[tokio::test]
+async fn run_command_uses_first_scoped_model_when_models_flag_is_provided() {
+    let provider = unique_name("provider");
+    let second_provider = unique_name("provider");
+    let (api, recorded) = register_recording_provider("scoped");
+
+    let result = run_command(RunCommandOptions {
+        args: vec![
+            String::from("-p"),
+            String::from("--models"),
+            String::from("beta-model,alpha-model:high"),
+            String::from("hello"),
+        ],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([
+            (provider.as_str(), "token-a"),
+            (second_provider.as_str(), "token-b"),
+        ])),
+        built_in_models: vec![
+            model(&api, &provider, "alpha-model"),
+            model(&api, &second_provider, "beta-model"),
+        ],
+        models_json_path: None,
+        cwd: unique_temp_dir("runner-model-scope"),
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout, "scoped\n");
+    assert!(result.stderr.is_empty());
+    assert_eq!(
+        recorded
+            .lock()
+            .unwrap()
+            .model
+            .as_ref()
+            .map(|model| (model.provider.as_str(), model.id.as_str())),
+        Some((second_provider.as_str(), "beta-model"))
+    );
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
+async fn run_command_applies_cli_api_key_override_when_models_flag_selects_initial_model() {
+    let provider = unique_name("provider");
+    let (api, recorded) = register_recording_provider("scoped");
+
+    let result = run_command(RunCommandOptions {
+        args: vec![
+            String::from("-p"),
+            String::from("--models"),
+            String::from("alpha-model"),
+            String::from("--api-key"),
+            String::from("cli-token"),
+            String::from("hello"),
+        ],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            provider.as_str(),
+            "token-a",
+        )])),
+        built_in_models: vec![model(&api, &provider, "alpha-model")],
+        models_json_path: None,
+        cwd: unique_temp_dir("runner-model-scope-api-key"),
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout, "scoped\n");
+    assert!(result.stderr.is_empty());
+    assert_eq!(
+        recorded.lock().unwrap().api_key.as_deref(),
+        Some("cli-token")
+    );
+
+    unregister_provider(&api);
 }

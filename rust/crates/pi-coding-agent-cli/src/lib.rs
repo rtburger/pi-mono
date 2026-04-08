@@ -2,6 +2,7 @@ pub mod args;
 pub mod auth;
 pub mod file_processor;
 pub mod initial_message;
+mod list_models;
 pub mod print_mode;
 pub mod runner;
 

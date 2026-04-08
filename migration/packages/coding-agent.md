@@ -159,7 +159,7 @@ Still deferred:
 - session-manager/settings-manager/resource-loader integration
 - extension lifecycle and session headers in JSON mode
 - `blockImages` filtering wrapper from `packages/coding-agent/src/core/sdk.ts`
-- CLI list-models output and export mode
+- CLI export mode
 - interactive mode and TUI layers
 
 ## 3. Compatibility notes and edge cases
@@ -190,12 +190,12 @@ Current compatibility deviations:
 - Rust json print mode still emits serialized `pi-agent` events only; it does not include TS session-manager JSON headers or extension/session wrapper events
 - Rust json print mode buffers lines until the run completes instead of writing directly to stdout as events arrive
 - Rust help text is currently a short migration-oriented help block, not TS full help output
-- the Rust runner explicitly rejects unsupported flags (`--models`, session flags, resource flags, `--list-models`, `--export`) instead of partially emulating TS behavior
+- the Rust runner explicitly rejects unsupported session/resource/export flags instead of partially emulating the full TS CLI surface
 - Rust `@file` image preprocessing currently attaches supported images without TS auto-resize and without dimension-note text
 - Rust `@file` preprocessing currently uses magic-byte image detection but does not yet port the full TS image-resize pipeline
 - `rust/apps/pi` now uses the Rust `pi-ai` built-in catalog, but that catalog is still a migration-time parse of the TS generated source rather than a Rust-native generated artifact
 - app-side auth coverage is broader now, but it still does not reach full TS parity for every provider/auth mode (for example OAuth-backed flows and some cloud-specific credential chains remain incomplete)
-- CLI `--api-key` override is currently wired for explicit `--model` flows only; TS `--models` scoped-model interactions remain deferred with the rest of model-scope support
+- CLI `--api-key` override now covers explicit `--model` flows and the current first-scoped-model `--models` path, but settings/session-backed scoped-model flows remain deferred
 - malformed payloads for recognized custom roles are currently skipped during conversion rather than surfaced as explicit diagnostics
 - the TS `blockImages` wrapper is not yet ported into the runtime path because settings-manager wiring is still deferred
 - image auto-resize parity from TS `read.ts` is not yet ported; Rust currently returns supported images as-is
@@ -445,7 +445,7 @@ Deferred to later milestones:
 - full auth storage port (`auth.json`, runtime overrides beyond in-memory/env tests, persistence, locking, OAuth refresh)
 - dynamic provider lifecycle APIs
 - model compat/cost metadata behavior
-- scope globbing and settings/session wiring
+- settings/session-backed scoped-model wiring
 - `blockImages` filtering parity
 - full help/list-models/export/session CLI behavior
 - TUI rendering/state tests
@@ -468,3 +468,130 @@ Stay in `packages/coding-agent`, `rust/crates/pi-coding-agent-cli`, `rust/crates
 - port `--list-models` on top of the new Rust-backed catalog and current registry/auth path
 - then continue filling in provider/auth parity gaps that still affect model availability and startup selection
 - keep session-manager and TUI work deferred until the non-interactive CLI surface is broader
+
+## Milestone 11 update: `--list-models`
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/main.ts` (list-models dispatch path)
+- `packages/coding-agent/docs/models.md`
+- `packages/tui/README.md`
+- `packages/tui/src/index.ts`
+- `packages/tui/src/fuzzy.ts`
+- `packages/tui/test/fuzzy.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/Cargo.toml`
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-cli/Cargo.toml`
+- `rust/crates/pi-coding-agent-cli/src/lib.rs`
+- `rust/crates/pi-coding-agent-cli/src/runner.rs`
+- `rust/crates/pi-coding-agent-cli/tests/runner.rs`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- top-level `--list-models` now exits successfully without requiring `--print` or entering interactive mode
+- list-model rendering uses the current Rust `ModelRegistry::get_available()` path, so output is filtered by configured auth and `models.json` provider API-key configuration
+- optional fuzzy search now follows the TS `packages/tui/src/fuzzy.ts` rules, including whitespace-token matching and the swapped alphanumeric fallback (`codex52` -> `5.2-codex` style matches)
+- list output matches the TS column set and ordering semantics:
+  - provider
+  - model id
+  - context window
+  - max output
+  - thinking support
+  - image support
+- token counts now use TS-style compact formatting (`K` / `M`, one decimal when needed)
+- empty availability and no-match cases now use the TS list-model messages instead of the generic startup failure path
+
+### Rust design summary
+
+New Rust slices added:
+- `rust/crates/pi-tui/src/fuzzy.rs`
+  - `FuzzyMatch`
+  - `fuzzy_match()`
+  - `fuzzy_filter()`
+- `rust/crates/pi-coding-agent-cli/src/list_models.rs`
+  - list rendering over `ModelRegistry`
+  - TS-style compact token-count formatting
+  - unit tests covering table output, fuzzy search, no-match, and no-available-model cases
+- `rust/crates/pi-coding-agent-cli/src/runner.rs`
+  - early `--list-models` handling before app-mode rejection and print-mode setup
+  - minimal help text updated to advertise `--list-models [search]` as supported
+
+### Validation summary
+
+New Rust coverage added for:
+- `pi-tui` fuzzy matching parity cases ported from `packages/tui/test/fuzzy.test.ts`
+- coding-agent CLI list-model rendering and search behavior
+- runner-level proof that `--list-models` bypasses the current interactive-mode rejection path
+
+### Remaining gaps after this milestone
+
+Still deferred for the CLI/model surface:
+- `--models` scoped-model parsing/execution in the Rust runner
+- session-manager/settings/resource-loader-backed list/help parity
+- TS full help text
+- JSON/session wrapper parity in print mode
+- broader auth/OAuth parity that can still affect which providers appear as available
+
+## Milestone 12 update: `--models` scoped-model slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/core/model-resolver.ts`
+- `packages/coding-agent/src/main.ts` (scoped-model/session-option path)
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-core/Cargo.toml`
+- `rust/crates/pi-coding-agent-core/src/lib.rs`
+- `rust/crates/pi-coding-agent-core/src/model_resolver.rs`
+- `rust/crates/pi-coding-agent-core/src/bootstrap.rs`
+- `rust/crates/pi-coding-agent-core/tests/model_resolver.rs`
+- `rust/crates/pi-coding-agent-core/tests/bootstrap.rs`
+- `rust/crates/pi-coding-agent-cli/src/runner.rs`
+- `rust/crates/pi-coding-agent-cli/tests/runner.rs`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- `--models` is no longer rejected by the Rust runner
+- scoped-model resolution now follows the TS `resolveModelScope()` split:
+  - non-glob patterns use the existing model-pattern parser
+  - glob patterns support matching against both `provider/modelId` and bare `modelId`
+  - valid `:<thinking>` suffixes on glob patterns are preserved
+  - invalid thinking suffixes on non-glob scope patterns become warnings, not hard errors
+  - duplicate matches keep the first resolved scoped entry, matching TS dedupe behavior
+- non-interactive startup now passes scoped models into bootstrap selection, so a scope can choose the initial model even without `--model`
+- CLI `--api-key` overrides now work with a selected scoped model in the current non-interactive Rust path when the scope resolves to an available model
+- saved-default-in-scope comparison in Rust bootstrap now matches TS `modelsAreEqual()` semantics (`provider + id`, not `api`)
+
+### Rust design summary
+
+New/expanded Rust slices:
+- `pi-coding-agent-core::resolve_model_scope()`
+  - returns scoped models plus warning messages
+  - uses `globset` for case-insensitive glob matching
+- `pi-coding-agent-cli::runner`
+  - resolves scopes from the current registry `get_available()` set before core creation
+  - emits scope warnings through stderr in the same warning style as other CLI diagnostics
+  - passes scoped models into `SessionBootstrapOptions`
+  - applies `--api-key` to the first scoped model when no explicit `--model` was supplied
+
+### Validation summary
+
+New Rust coverage added for:
+- scoped-model resolution with glob patterns and glob thinking suffixes
+- duplicate-scope handling and scope warning behavior
+- runner-level initial-model selection from `--models`
+- runner-level `--api-key` override when `--models` selects the initial model
+
+### Remaining gaps after this milestone
+
+Still deferred for the CLI/model surface:
+- settings-manager-backed enabled-model scopes (`settingsManager.getEnabledModels()`)
+- interactive scoped-model cycling and session-manager integration
+- full TS help output and startup messaging around scoped models
+- broader auth parity for providers where availability still depends on unported OAuth/cloud auth flows

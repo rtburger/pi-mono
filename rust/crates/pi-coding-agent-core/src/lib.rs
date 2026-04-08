@@ -20,10 +20,10 @@ pub use messages::{
 pub use model_registry::{ModelRegistry, RequestAuth};
 pub use model_resolver::{
     DEFAULT_MODELS, DEFAULT_THINKING_LEVEL, InitialModelOptions, InitialModelResult, ModelCatalog,
-    ParseModelPatternOptions, ParsedModelResult, ResolveCliModelResult, RestoreModelResult,
-    ScopedModel, default_model_id_for_provider, find_exact_model_reference_match,
-    find_initial_model, parse_model_pattern, parse_thinking_level, resolve_cli_model,
-    restore_model_from_session,
+    ParseModelPatternOptions, ParsedModelResult, ResolveCliModelResult, ResolveModelScopeResult,
+    RestoreModelResult, ScopedModel, default_model_id_for_provider,
+    find_exact_model_reference_match, find_initial_model, parse_model_pattern,
+    parse_thinking_level, resolve_cli_model, resolve_model_scope, restore_model_from_session,
 };
 pub use runtime::{
     CodingAgentCore, CodingAgentCoreOptions, CreateCodingAgentCoreResult, create_coding_agent_core,

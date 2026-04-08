@@ -1,12 +1,13 @@
 use crate::{
-    AppMode, Args, Diagnostic, DiagnosticKind, OverlayAuthSource, PrintModeOptions,
-    build_initial_message, parse_args, process_file_arguments, resolve_app_mode, run_print_mode,
-    to_print_output_mode,
+    AppMode, Args, Diagnostic, DiagnosticKind, ListModels, OverlayAuthSource, PrintModeOptions,
+    build_initial_message, list_models::render_list_models, parse_args, process_file_arguments,
+    resolve_app_mode, run_print_mode, to_print_output_mode,
 };
 use pi_ai::StreamOptions;
 use pi_coding_agent_core::{
     AuthSource, BootstrapDiagnosticLevel, CodingAgentCoreError, CodingAgentCoreOptions,
-    ModelRegistry, SessionBootstrapOptions, create_coding_agent_core, resolve_cli_model,
+    ModelRegistry, ScopedModel, SessionBootstrapOptions, create_coding_agent_core,
+    resolve_cli_model, resolve_model_scope,
 };
 use pi_events::Model;
 use std::{
@@ -85,6 +86,29 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         };
     }
 
+    if parsed.export.is_some() {
+        push_line(&mut stderr, "--export is not supported in the Rust CLI yet");
+        return RunCommandResult {
+            exit_code: 1,
+            stdout,
+            stderr,
+        };
+    }
+
+    if let Some(list_models) = parsed.list_models.as_ref() {
+        let registry = ModelRegistry::new(auth_source, built_in_models, models_json_path);
+        let search_pattern = match list_models {
+            ListModels::All => None,
+            ListModels::Search(pattern) => Some(pattern.as_str()),
+        };
+        stdout.push_str(&render_list_models(&registry, search_pattern));
+        return RunCommandResult {
+            exit_code: 0,
+            stdout,
+            stderr,
+        };
+    }
+
     if let Some(message) = unsupported_flag_message(&parsed) {
         push_line(&mut stderr, &message);
         return RunCommandResult {
@@ -102,6 +126,19 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
             stdout,
             stderr,
         };
+    };
+
+    let scoped_models = if let Some(patterns) = parsed.models.as_ref() {
+        let registry = ModelRegistry::new(
+            auth_source.clone(),
+            built_in_models.clone(),
+            models_json_path.clone(),
+        );
+        let resolved = resolve_model_scope(patterns, &registry.get_available());
+        stderr.push_str(&render_scope_warnings(&resolved.warnings));
+        resolved.scoped_models
+    } else {
+        Vec::new()
     };
 
     let stdin_content = normalize_stdin_content(stdin_is_tty, stdin_content);
@@ -131,6 +168,7 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         &overlay_auth,
         &built_in_models,
         models_json_path.as_deref(),
+        &scoped_models,
     ) {
         push_line(&mut stderr, &format!("Error: {error}"));
         return RunCommandResult {
@@ -155,6 +193,7 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
             cli_provider: parsed.provider.clone(),
             cli_model: parsed.model.clone(),
             cli_thinking_level: parsed.thinking,
+            scoped_models,
             ..SessionBootstrapOptions::default()
         },
         stream_options,
@@ -219,12 +258,18 @@ fn apply_runtime_api_key_override(
     overlay_auth: &OverlayAuthSource,
     built_in_models: &[Model],
     models_json_path: Option<&Path>,
+    scoped_models: &[ScopedModel],
 ) -> Result<(), String> {
     let Some(api_key) = parsed.api_key.as_ref() else {
         return Ok(());
     };
 
     if parsed.model.is_none() {
+        if let Some(scoped_model) = scoped_models.first() {
+            overlay_auth.set_runtime_api_key(scoped_model.model.provider.clone(), api_key.clone());
+            return Ok(());
+        }
+
         return Err(API_KEY_MODEL_REQUIREMENT.into());
     }
 
@@ -293,6 +338,14 @@ fn render_parse_diagnostics(diagnostics: &[Diagnostic]) -> String {
     output
 }
 
+fn render_scope_warnings(warnings: &[String]) -> String {
+    let mut output = String::new();
+    for warning in warnings {
+        push_line(&mut output, &format!("Warning: {warning}"));
+    }
+    output
+}
+
 fn render_bootstrap_diagnostics(
     diagnostics: &[pi_coding_agent_core::BootstrapDiagnostic],
 ) -> String {
@@ -327,16 +380,6 @@ fn unsupported_flag_message(parsed: &Args) -> Option<String> {
     if parsed.export.is_some() {
         return Some(String::from(
             "--export is not supported in the Rust CLI yet",
-        ));
-    }
-    if parsed.list_models.is_some() {
-        return Some(String::from(
-            "--list-models is not supported in the Rust CLI yet",
-        ));
-    }
-    if parsed.models.is_some() {
-        return Some(String::from(
-            "--models is not supported in the Rust CLI yet",
         ));
     }
     if parsed.continue_session
@@ -385,13 +428,14 @@ fn render_help() -> String {
         "Supported today:",
         "  - non-interactive text mode (-p / piped stdin)",
         "  - non-interactive json mode (--mode json)",
-        "  - --provider, --model, --api-key, --system-prompt, --append-system-prompt, --thinking",
+        "  - --provider, --model, --models, --api-key, --system-prompt, --append-system-prompt, --thinking",
+        "  - --list-models [search]",
         "  - @file text/image preprocessing",
         "",
         "Not yet supported:",
         "  - interactive mode",
         "  - rpc mode",
-        "  - sessions, scoped models, export, list-models",
+        "  - sessions, export",
     ]
     .join("\n")
 }

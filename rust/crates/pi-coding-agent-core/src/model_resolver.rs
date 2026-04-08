@@ -1,3 +1,4 @@
+use globset::GlobBuilder;
 use pi_agent::ThinkingLevel;
 use pi_events::Model;
 use std::collections::HashMap;
@@ -105,6 +106,12 @@ pub struct ResolveCliModelResult {
     pub thinking_level: Option<ThinkingLevel>,
     pub warning: Option<String>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ResolveModelScopeResult {
+    pub scoped_models: Vec<ScopedModel>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -427,6 +434,59 @@ pub fn resolve_cli_model(
     }
 }
 
+pub fn resolve_model_scope(
+    patterns: &[String],
+    available_models: &[Model],
+) -> ResolveModelScopeResult {
+    let mut scoped_models = Vec::new();
+    let mut warnings = Vec::new();
+
+    for pattern in patterns {
+        if has_glob_chars(pattern) {
+            let (glob_pattern, thinking_level) = parse_glob_pattern(pattern);
+            let matches = available_models
+                .iter()
+                .filter(|model| {
+                    let full_id = canonical_model_reference(model);
+                    glob_matches(glob_pattern, &full_id) || glob_matches(glob_pattern, &model.id)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+
+            if matches.is_empty() {
+                warnings.push(format!("No models match pattern \"{pattern}\""));
+                continue;
+            }
+
+            for model in matches {
+                push_scoped_model(&mut scoped_models, model, thinking_level);
+            }
+            continue;
+        }
+
+        let parsed = parse_model_pattern(
+            pattern,
+            available_models,
+            ParseModelPatternOptions::default(),
+        );
+
+        if let Some(warning) = parsed.warning {
+            warnings.push(warning);
+        }
+
+        if let Some(model) = parsed.model {
+            push_scoped_model(&mut scoped_models, model, parsed.thinking_level);
+        } else {
+            warnings.push(format!("No models match pattern \"{pattern}\""));
+        }
+    }
+
+    ResolveModelScopeResult {
+        scoped_models,
+        warnings,
+    }
+}
+
 pub fn find_initial_model(
     catalog: &ModelCatalog,
     options: InitialModelOptions,
@@ -583,6 +643,54 @@ fn strip_provider_prefix<'a>(cli_model: &'a str, provider: &str) -> Option<&'a s
     cli_model[..prefix.len()]
         .eq_ignore_ascii_case(&prefix)
         .then_some(&cli_model[prefix.len()..])
+}
+
+fn has_glob_chars(pattern: &str) -> bool {
+    pattern.contains('*') || pattern.contains('?') || pattern.contains('[')
+}
+
+fn parse_glob_pattern(pattern: &str) -> (&str, Option<ThinkingLevel>) {
+    let Some(last_colon_index) = pattern.rfind(':') else {
+        return (pattern, None);
+    };
+
+    let suffix = &pattern[last_colon_index + 1..];
+    let Some(thinking_level) = parse_thinking_level(suffix) else {
+        return (pattern, None);
+    };
+
+    (&pattern[..last_colon_index], Some(thinking_level))
+}
+
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    GlobBuilder::new(pattern)
+        .case_insensitive(true)
+        .literal_separator(true)
+        .build()
+        .ok()
+        .is_some_and(|glob| glob.compile_matcher().is_match(value))
+}
+
+fn push_scoped_model(
+    scoped_models: &mut Vec<ScopedModel>,
+    model: Model,
+    thinking_level: Option<ThinkingLevel>,
+) {
+    if scoped_models
+        .iter()
+        .any(|scoped| same_model_reference(&scoped.model, &model))
+    {
+        return;
+    }
+
+    scoped_models.push(ScopedModel {
+        model,
+        thinking_level,
+    });
+}
+
+fn same_model_reference(left: &Model, right: &Model) -> bool {
+    left.provider == right.provider && left.id == right.id
 }
 
 fn build_fallback_model(
