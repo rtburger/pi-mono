@@ -35,7 +35,8 @@ async fn completes_with_estimated_usage() {
     assert_eq!(
         response.content,
         vec![AssistantContent::Text {
-            text: "hello world".into()
+            text: "hello world".into(),
+            text_signature: None,
         }]
     );
     assert!(response.usage.input > 0);

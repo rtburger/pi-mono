@@ -79,8 +79,13 @@ async fn streams_text_response_events() {
         },
     ];
 
-    let actual = stream_openai_responses_sse_events(model(), events)
-        .map(|event| match event.unwrap() {
+    let collected = stream_openai_responses_sse_events(model(), events)
+        .collect::<Vec<_>>()
+        .await;
+
+    let actual = collected
+        .iter()
+        .map(|event| match event.as_ref().unwrap() {
             AssistantEvent::Start { .. } => "start".to_string(),
             AssistantEvent::TextStart { .. } => "text_start".to_string(),
             AssistantEvent::TextDelta { .. } => "text_delta".to_string(),
@@ -88,10 +93,21 @@ async fn streams_text_response_events() {
             AssistantEvent::Done { .. } => "done".to_string(),
             other => panic!("unexpected event: {other:?}"),
         })
-        .collect::<Vec<_>>()
-        .await;
+        .collect::<Vec<_>>();
 
     assert_eq!(actual, fixture("openai_responses_stream_text.json"));
+    match collected.last().unwrap().as_ref().unwrap() {
+        AssistantEvent::Done { message, .. } => {
+            assert_eq!(
+                message.content,
+                vec![AssistantContent::Text {
+                    text: "Hello".into(),
+                    text_signature: Some(r#"{"v":1,"id":"msg_1"}"#.into()),
+                }]
+            );
+        }
+        other => panic!("expected done event, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -253,7 +269,12 @@ async fn streams_reasoning_summary_response_events() {
             assert_eq!(
                 message.content,
                 vec![AssistantContent::Thinking {
-                    thinking: "I reasoned".into()
+                    thinking: "I reasoned".into(),
+                    thinking_signature: Some(
+                        r#"{"id":"rs_1","summary":[{"text":"I reasoned","type":"summary_text"}],"type":"reasoning"}"#
+                            .into(),
+                    ),
+                    redacted: false,
                 }]
             );
         }

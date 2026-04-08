@@ -1,6 +1,6 @@
 # packages/ai migration inventory
 
-Status: milestone 3 scaffold + faux provider slice + OpenAI Responses incremental streaming slice
+Status: milestone 4 scaffold + faux provider slice + OpenAI Responses incremental streaming + signature replay slice
 Target crate: `rust/crates/pi-ai`
 
 ## 1. Files analyzed
@@ -178,10 +178,14 @@ Files read fully for the first real-provider slice:
 - `packages/ai/test/openai-responses-reasoning-replay-e2e.test.ts`
 - `packages/ai/test/openai-responses-tool-result-images.test.ts`
 
-Observed OpenAI Responses behaviors relevant to the first real-provider slices:
+Observed OpenAI Responses behaviors relevant to the current real-provider slices:
 - payload-building is split from stream processing
 - system prompt becomes `developer` role for reasoning-capable models, else `system`
 - assistant text history is replayed as completed assistant `message` items with output-text content
+- streamed assistant text captures a reusable text signature encoding message id and optional phase
+- streamed reasoning summaries capture a reusable serialized reasoning item signature
+- same-model replay can feed serialized reasoning items back into OpenAI request input
+- same-model replay can feed signed assistant text back with preserved message id/phase
 - assistant tool calls are replayed as `function_call` items
 - orphaned tool calls are backfilled with synthetic error tool results before replay continues
 - errored/aborted assistant turns are skipped during replay
@@ -201,7 +205,7 @@ Current Rust provider slice implements deterministic request-building coverage f
 - OpenAI prompt-cache parameter shaping for `sessionId` + long retention
 
 Deferred OpenAI Responses work:
-- same-model reasoning replay/signature handling (`thinkingSignature`, text signatures, redacted reasoning)
+- redacted reasoning parity and explicit encrypted-content replay rules
 - Copilot-specific headers and auth behavior
 - model-catalog integration for the runtime provider
 - broader parity for provider-specific runtime options beyond the current minimal passthrough
@@ -242,6 +246,9 @@ Covered stream/request semantics in Rust tests:
 - text start/delta/end event order
 - tool call start/delta/end event order
 - reasoning start/delta/end event order
+- streamed text signature capture from OpenAI message items
+- streamed reasoning signature capture from OpenAI reasoning items
+- same-model replay of serialized reasoning items and signed assistant text
 - `response.completed` stop-reason mapping to `stop` / `toolUse`
 - `response.failed` to terminal assistant error event
 - response-id capture on created/failed responses
@@ -259,4 +266,4 @@ Covered stream/request semantics in Rust tests:
 - whether Rust-side model metadata should be generated from TS `models.generated.ts` or from shared external source during migration
 - how much of TS `SimpleStreamOptions` reasoning normalization should live in `pi-ai` vs provider-specific modules
 - whether faux provider should remain in `pi-ai` or move to `pi-test-harness` after the first provider lands
-- whether to continue OpenAI Responses next with same-model reasoning signature replay or switch to Anthropic for a second end-to-end provider
+- whether to continue OpenAI Responses next with redacted reasoning/auth parity or switch to Anthropic for a second end-to-end provider

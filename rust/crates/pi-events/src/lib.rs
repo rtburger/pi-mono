@@ -38,15 +38,27 @@ pub struct Usage {
 pub enum AssistantContent {
     Text {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text_signature: Option<String>,
     },
     Thinking {
         thinking: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thinking_signature: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        redacted: bool,
     },
     ToolCall {
         id: String,
         name: String,
         arguments: BTreeMap<String, serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

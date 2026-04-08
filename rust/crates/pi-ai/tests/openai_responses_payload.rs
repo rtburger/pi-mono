@@ -68,6 +68,7 @@ fn converts_foreign_assistant_tool_call_to_function_call() {
                     id: COPILOT_RAW_TOOL_CALL_ID.into(),
                     name: "edit".into(),
                     arguments: tool_call_arguments(&[("path", json!("src/styles/app.css"))]),
+                    thought_signature: None,
                 }],
                 api: "openai-responses".into(),
                 provider: "github-copilot".into(),
@@ -127,6 +128,7 @@ fn inserts_synthetic_tool_result_for_orphaned_tool_call() {
                     id: "call_123|fc_123".into(),
                     name: "calculate".into(),
                     arguments: tool_call_arguments(&[("expression", json!("25 * 18"))]),
+                    thought_signature: None,
                 }],
                 api: "openai-responses".into(),
                 provider: "openai".into(),
@@ -184,6 +186,10 @@ fn skips_aborted_assistant_messages_during_replay() {
             Message::Assistant {
                 content: vec![AssistantContent::Thinking {
                     thinking: "internal reasoning".into(),
+                    thinking_signature: Some(
+                        r#"{"type":"reasoning","id":"rs_abort","summary":[]}"#.into(),
+                    ),
+                    redacted: false,
                 }],
                 api: "openai-responses".into(),
                 provider: "openai".into(),
@@ -230,6 +236,7 @@ fn omits_fc_item_id_for_same_provider_different_model_handoff() {
                 id: "call_123|fc_123".into(),
                 name: "edit".into(),
                 arguments: tool_call_arguments(&[("path", json!("src/main.rs"))]),
+                thought_signature: None,
             }],
             api: "openai-responses".into(),
             provider: "openai".into(),
@@ -267,6 +274,8 @@ fn converts_different_model_thinking_to_assistant_output_text() {
         messages: vec![Message::Assistant {
             content: vec![AssistantContent::Thinking {
                 thinking: "Let me think about this...".into(),
+                thinking_signature: None,
+                redacted: false,
             }],
             api: "openai-responses".into(),
             provider: "github-copilot".into(),
@@ -310,6 +319,82 @@ fn converts_different_model_thinking_to_assistant_output_text() {
 }
 
 #[test]
+fn replays_same_model_reasoning_and_text_signatures() {
+    let context = Context {
+        system_prompt: None,
+        messages: vec![Message::Assistant {
+            content: vec![
+                AssistantContent::Thinking {
+                    thinking: "Short summary".into(),
+                    thinking_signature: Some(
+                        r#"{"type":"reasoning","id":"rs_123","summary":[{"type":"summary_text","text":"Short summary"}],"encrypted_content":"enc"}"#
+                            .into(),
+                    ),
+                    redacted: false,
+                },
+                AssistantContent::Text {
+                    text: "Final answer".into(),
+                    text_signature: Some(
+                        r#"{"v":1,"id":"msg_signature_123","phase":"final_answer"}"#.into(),
+                    ),
+                },
+            ],
+            api: "openai-responses".into(),
+            provider: "openai".into(),
+            model: "gpt-5-mini".into(),
+            response_id: Some("resp_123".into()),
+            usage: usage(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 1,
+        }],
+    };
+
+    let items = convert_openai_responses_messages(
+        &model("openai", "gpt-5-mini"),
+        &context,
+        &["openai", "openai-codex", "opencode"],
+        OpenAiResponsesConvertOptions {
+            include_system_prompt: false,
+        },
+    );
+
+    match &items[0] {
+        ResponsesInputItem::Reasoning { data } => {
+            assert_eq!(data.get("id").and_then(Value::as_str), Some("rs_123"));
+            assert_eq!(
+                data.get("encrypted_content").and_then(Value::as_str),
+                Some("enc")
+            );
+        }
+        other => panic!("expected reasoning replay item, got {other:?}"),
+    }
+
+    match &items[1] {
+        ResponsesInputItem::Message {
+            role,
+            id,
+            phase,
+            status,
+            content,
+        } => {
+            assert_eq!(role, "assistant");
+            assert_eq!(id.as_deref(), Some("msg_signature_123"));
+            assert_eq!(phase.as_deref(), Some("final_answer"));
+            assert_eq!(status.as_deref(), Some("completed"));
+            assert_eq!(
+                content,
+                &vec![pi_ai::openai_responses::ResponsesContentPart::OutputText {
+                    text: "Final answer".into(),
+                    annotations: Vec::new(),
+                }]
+            );
+        }
+        other => panic!("expected assistant replay message, got {other:?}"),
+    }
+}
+
+#[test]
 fn keeps_tool_result_images_inside_function_call_output() {
     let expected: Value = serde_json::from_str(
         &fs::read_to_string(
@@ -336,6 +421,7 @@ fn keeps_tool_result_images_inside_function_call_output() {
                     id: "call_123|fc_123".into(),
                     name: "get_circle_with_description".into(),
                     arguments: tool_call_arguments(&[]),
+                    thought_signature: None,
                 }],
                 api: "openai-responses".into(),
                 provider: "openai".into(),

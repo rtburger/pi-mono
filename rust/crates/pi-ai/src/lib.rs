@@ -319,11 +319,11 @@ impl AiProvider for FauxProvider {
                 }
                 match block {
                     FauxContentBlock::Text(text) => {
-                        partial.content.push(AssistantContent::Text { text: String::new() });
+                        partial.content.push(AssistantContent::Text { text: String::new(), text_signature: None });
                         yield Ok(AssistantEvent::TextStart { content_index: index, partial: partial.clone() });
                         for chunk in chunk_string(text, chunk_chars) {
                             if chunk_delay.as_millis() > 0 { sleep(chunk_delay).await; }
-                            if let Some(AssistantContent::Text { text }) = partial.content.get_mut(index) {
+                            if let Some(AssistantContent::Text { text, .. }) = partial.content.get_mut(index) {
                                 text.push_str(&chunk);
                             }
                             yield Ok(AssistantEvent::TextDelta { content_index: index, delta: chunk, partial: partial.clone() });
@@ -336,11 +336,11 @@ impl AiProvider for FauxProvider {
                         yield Ok(AssistantEvent::TextEnd { content_index: index, content: text.clone(), partial: partial.clone() });
                     }
                     FauxContentBlock::Thinking(thinking) => {
-                        partial.content.push(AssistantContent::Thinking { thinking: String::new() });
+                        partial.content.push(AssistantContent::Thinking { thinking: String::new(), thinking_signature: None, redacted: false });
                         yield Ok(AssistantEvent::ThinkingStart { content_index: index, partial: partial.clone() });
                         for chunk in chunk_string(thinking, chunk_chars) {
                             if chunk_delay.as_millis() > 0 { sleep(chunk_delay).await; }
-                            if let Some(AssistantContent::Thinking { thinking }) = partial.content.get_mut(index) {
+                            if let Some(AssistantContent::Thinking { thinking, .. }) = partial.content.get_mut(index) {
                                 thinking.push_str(&chunk);
                             }
                             yield Ok(AssistantEvent::ThinkingDelta { content_index: index, delta: chunk, partial: partial.clone() });
@@ -353,7 +353,7 @@ impl AiProvider for FauxProvider {
                         yield Ok(AssistantEvent::ThinkingEnd { content_index: index, content: thinking.clone(), partial: partial.clone() });
                     }
                     FauxContentBlock::ToolCall { id, name, arguments } => {
-                        partial.content.push(AssistantContent::ToolCall { id: id.clone(), name: name.clone(), arguments: BTreeMap::new() });
+                        partial.content.push(AssistantContent::ToolCall { id: id.clone(), name: name.clone(), arguments: BTreeMap::new(), thought_signature: None });
                         yield Ok(AssistantEvent::ToolCallStart { content_index: index, partial: partial.clone() });
                         let json = serde_json::to_string(arguments).unwrap();
                         for chunk in chunk_string(&json, chunk_chars) {
@@ -365,7 +365,7 @@ impl AiProvider for FauxProvider {
                                 return;
                             }
                         }
-                        partial.content[index] = AssistantContent::ToolCall { id: id.clone(), name: name.clone(), arguments: arguments.clone() };
+                        partial.content[index] = AssistantContent::ToolCall { id: id.clone(), name: name.clone(), arguments: arguments.clone(), thought_signature: None };
                         yield Ok(AssistantEvent::ToolCallEnd { content_index: index, tool_call: partial.content[index].clone(), partial: partial.clone() });
                     }
                 }
@@ -509,8 +509,8 @@ fn assistant_content_to_text(content: &[AssistantContent]) -> String {
     content
         .iter()
         .map(|block| match block {
-            AssistantContent::Text { text } => text.clone(),
-            AssistantContent::Thinking { thinking } => thinking.clone(),
+            AssistantContent::Text { text, .. } => text.clone(),
+            AssistantContent::Thinking { thinking, .. } => thinking.clone(),
             AssistantContent::ToolCall {
                 name, arguments, ..
             } => format!("{name}:{}", serde_json::to_string(arguments).unwrap()),

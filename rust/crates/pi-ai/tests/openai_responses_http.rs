@@ -320,7 +320,8 @@ async fn streams_incrementally_across_http_body_chunks() {
             assert_eq!(
                 message.content,
                 vec![AssistantContent::Text {
-                    text: "Hello world".into()
+                    text: "Hello world".into(),
+                    text_signature: Some(r#"{"v":1,"id":"msg_1"}"#.into()),
                 }]
             );
         }
@@ -377,7 +378,8 @@ async fn aborts_while_waiting_for_next_http_body_chunk() {
                 assert_eq!(
                     error.content,
                     vec![AssistantContent::Text {
-                        text: "Hello".into()
+                        text: "Hello".into(),
+                        text_signature: None,
                     }]
                 );
                 break;

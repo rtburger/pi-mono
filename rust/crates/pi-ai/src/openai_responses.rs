@@ -6,7 +6,7 @@ use pi_events::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -71,6 +71,10 @@ pub enum ResponsesInputItem {
         id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         phase: Option<String>,
+    },
+    Reasoning {
+        #[serde(flatten)]
+        data: serde_json::Map<String, Value>,
     },
     FunctionCall {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -173,7 +177,7 @@ pub fn convert_openai_responses_messages(
     let allowed_tool_call_providers = allowed_tool_call_providers
         .iter()
         .copied()
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<BTreeSet<_>>();
     let transformed_messages = transform_messages_for_openai_responses(
         model,
         &context.messages,
@@ -224,7 +228,15 @@ pub fn convert_openai_responses_messages(
 
                 for block in content {
                     match block {
-                        AssistantContent::Text { text } => {
+                        AssistantContent::Text {
+                            text,
+                            text_signature,
+                        } => {
+                            let parsed_signature = parse_text_signature(text_signature.as_deref());
+                            let message_id = parsed_signature
+                                .as_ref()
+                                .map(|signature| normalize_message_item_id(&signature.id))
+                                .unwrap_or_else(|| format!("msg_{message_index}"));
                             items.push(ResponsesInputItem::Message {
                                 role: "assistant".into(),
                                 content: vec![ResponsesContentPart::OutputText {
@@ -232,15 +244,25 @@ pub fn convert_openai_responses_messages(
                                     annotations: Vec::new(),
                                 }],
                                 status: Some("completed".into()),
-                                id: Some(format!("msg_{message_index}")),
-                                phase: None,
+                                id: Some(message_id),
+                                phase: parsed_signature.and_then(|signature| signature.phase),
                             });
                         }
-                        AssistantContent::Thinking { .. } => {}
+                        AssistantContent::Thinking {
+                            thinking_signature,
+                            ..
+                        } => {
+                            if let Some(thinking_signature) = thinking_signature {
+                                if let Ok(reasoning_item) = serde_json::from_str::<ResponsesInputItem>(thinking_signature) {
+                                    items.push(reasoning_item);
+                                }
+                            }
+                        }
                         AssistantContent::ToolCall {
                             id,
                             name,
                             arguments,
+                            ..
                         } => {
                             let (call_id, item_id) = split_tool_call_id(id);
                             let item_id = if is_different_model
@@ -321,7 +343,7 @@ fn transform_messages_for_openai_responses(
     messages: &[Message],
     target_provider_supports_openai_tool_ids: bool,
 ) -> Vec<Message> {
-    let mut tool_call_id_map = std::collections::BTreeMap::<String, String>::new();
+    let mut tool_call_id_map = BTreeMap::<String, String>::new();
     let mut transformed = Vec::new();
 
     for message in messages.iter().cloned() {
@@ -364,20 +386,38 @@ fn transform_messages_for_openai_responses(
 
                 for block in content {
                     match block {
-                        AssistantContent::Text { text } => {
-                            transformed_content.push(AssistantContent::Text { text });
+                        AssistantContent::Text {
+                            text,
+                            text_signature,
+                        } => {
+                            transformed_content.push(AssistantContent::Text {
+                                text,
+                                text_signature,
+                            });
                         }
-                        AssistantContent::Thinking { thinking } => {
+                        AssistantContent::Thinking {
+                            thinking,
+                            thinking_signature,
+                            redacted,
+                        } => {
                             if is_same_model {
-                                transformed_content.push(AssistantContent::Thinking { thinking });
+                                transformed_content.push(AssistantContent::Thinking {
+                                    thinking,
+                                    thinking_signature,
+                                    redacted,
+                                });
                             } else if !thinking.trim().is_empty() {
-                                transformed_content.push(AssistantContent::Text { text: thinking });
+                                transformed_content.push(AssistantContent::Text {
+                                    text: thinking,
+                                    text_signature: None,
+                                });
                             }
                         }
                         AssistantContent::ToolCall {
                             id,
                             name,
                             arguments,
+                            thought_signature,
                         } => {
                             let normalized_id = if is_same_model {
                                 id.clone()
@@ -395,6 +435,7 @@ fn transform_messages_for_openai_responses(
                                 id: normalized_id,
                                 name,
                                 arguments,
+                                thought_signature: if is_same_model { thought_signature } else { None },
                             });
                         }
                     }
@@ -417,7 +458,7 @@ fn transform_messages_for_openai_responses(
 
     let mut result = Vec::new();
     let mut pending_tool_calls = Vec::<(String, String)>::new();
-    let mut existing_tool_result_ids = std::collections::BTreeSet::<String>::new();
+    let mut existing_tool_result_ids = BTreeSet::<String>::new();
 
     for message in transformed {
         match &message {
@@ -469,7 +510,7 @@ fn transform_messages_for_openai_responses(
 fn flush_orphaned_tool_calls(
     result: &mut Vec<Message>,
     pending_tool_calls: &mut Vec<(String, String)>,
-    existing_tool_result_ids: &mut std::collections::BTreeSet<String>,
+    existing_tool_result_ids: &mut BTreeSet<String>,
 ) {
     for (tool_call_id, tool_name) in pending_tool_calls.iter() {
         if !existing_tool_result_ids.contains(tool_call_id) {
@@ -506,6 +547,55 @@ fn convert_user_content(content: &[UserContent], model: &Model) -> Vec<Responses
             UserContent::Image { .. } => None,
         })
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TextSignatureV1 {
+    v: u8,
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedTextSignature {
+    id: String,
+    phase: Option<String>,
+}
+
+fn encode_text_signature_v1(id: &str, phase: Option<&str>) -> String {
+    serde_json::to_string(&TextSignatureV1 {
+        v: 1,
+        id: id.to_string(),
+        phase: phase.map(ToOwned::to_owned),
+    })
+    .unwrap_or_else(|_| id.to_string())
+}
+
+fn parse_text_signature(signature: Option<&str>) -> Option<ParsedTextSignature> {
+    let signature = signature?;
+    if signature.starts_with('{')
+        && let Ok(parsed) = serde_json::from_str::<TextSignatureV1>(signature)
+    {
+        if parsed.v == 1 {
+            return Some(ParsedTextSignature {
+                id: parsed.id,
+                phase: parsed.phase,
+            });
+        }
+    }
+    Some(ParsedTextSignature {
+        id: signature.to_string(),
+        phase: None,
+    })
+}
+
+fn normalize_message_item_id(id: &str) -> String {
+    if id.chars().count() > 64 {
+        format!("msg_{}", short_hash(id))
+    } else {
+        id.to_string()
+    }
 }
 
 pub fn normalize_tool_call_id(
@@ -760,9 +850,10 @@ impl OpenAiResponsesStreamState {
                     .unwrap_or_default();
                 match item.get("type").and_then(Value::as_str) {
                     Some("message") => {
-                        self.output
-                            .content
-                            .push(AssistantContent::Text { text: String::new() });
+                        self.output.content.push(AssistantContent::Text {
+                            text: String::new(),
+                            text_signature: None,
+                        });
                         let index = self.output.content.len() - 1;
                         self.current_block_index = Some(index);
                         self.current_block_kind = Some(OpenAiResponsesBlockKind::Text);
@@ -788,6 +879,7 @@ impl OpenAiResponsesStreamState {
                             id: format!("{call_id}|{id}"),
                             name: name.to_string(),
                             arguments: BTreeMap::new(),
+                            thought_signature: None,
                         });
                         let index = self.output.content.len() - 1;
                         self.current_block_index = Some(index);
@@ -800,6 +892,8 @@ impl OpenAiResponsesStreamState {
                     Some("reasoning") => {
                         self.output.content.push(AssistantContent::Thinking {
                             thinking: String::new(),
+                            thinking_signature: None,
+                            redacted: false,
                         });
                         let index = self.output.content.len() - 1;
                         self.current_block_index = Some(index);
@@ -824,7 +918,7 @@ impl OpenAiResponsesStreamState {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    if let Some(AssistantContent::Thinking { thinking }) =
+                    if let Some(AssistantContent::Thinking { thinking, .. }) =
                         self.output.content.get_mut(index)
                     {
                         thinking.push_str(&delta);
@@ -841,7 +935,7 @@ impl OpenAiResponsesStreamState {
                     && let Some(index) = self.current_block_index
                 {
                     let delta = "\n\n".to_string();
-                    if let Some(AssistantContent::Thinking { thinking }) =
+                    if let Some(AssistantContent::Thinking { thinking, .. }) =
                         self.output.content.get_mut(index)
                     {
                         thinking.push_str(&delta);
@@ -864,7 +958,7 @@ impl OpenAiResponsesStreamState {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    if let Some(AssistantContent::Text { text }) = self.output.content.get_mut(index)
+                    if let Some(AssistantContent::Text { text, .. }) = self.output.content.get_mut(index)
                     {
                         text.push_str(&delta);
                     }
@@ -942,10 +1036,14 @@ impl OpenAiResponsesStreamState {
                             let content = message_item_text(&item)
                                 .or_else(|| text_content(&self.output, index))
                                 .unwrap_or_default();
-                            if let Some(AssistantContent::Text { text }) =
+                            if let Some(AssistantContent::Text { text, text_signature }) =
                                 self.output.content.get_mut(index)
                             {
                                 *text = content.clone();
+                                *text_signature = item
+                                    .get("id")
+                                    .and_then(Value::as_str)
+                                    .map(|id| encode_text_signature_v1(id, item.get("phase").and_then(Value::as_str)));
                             }
                             emitted.push(AssistantEvent::TextEnd {
                                 content_index: index,
@@ -973,6 +1071,7 @@ impl OpenAiResponsesStreamState {
                                 id: format!("{call_id}|{id}"),
                                 name: name.to_string(),
                                 arguments: parse_streaming_json_map(arguments),
+                                thought_signature: None,
                             };
                             self.output.content[index] = tool_call.clone();
                             emitted.push(AssistantEvent::ToolCallEnd {
@@ -990,10 +1089,14 @@ impl OpenAiResponsesStreamState {
                             let content = reasoning_summary_text(&item)
                                 .or_else(|| thinking_content(&self.output, index))
                                 .unwrap_or_default();
-                            if let Some(AssistantContent::Thinking { thinking }) =
-                                self.output.content.get_mut(index)
+                            if let Some(AssistantContent::Thinking {
+                                thinking,
+                                thinking_signature,
+                                ..
+                            }) = self.output.content.get_mut(index)
                             {
                                 *thinking = content.clone();
+                                *thinking_signature = Some(Value::Object(item.clone()).to_string());
                             }
                             emitted.push(AssistantEvent::ThinkingEnd {
                                 content_index: index,
@@ -1418,14 +1521,14 @@ fn reasoning_summary_text(item: &serde_json::Map<String, Value>) -> Option<Strin
 
 fn text_content(output: &AssistantMessage, index: usize) -> Option<String> {
     match output.content.get(index) {
-        Some(AssistantContent::Text { text }) => Some(text.clone()),
+        Some(AssistantContent::Text { text, .. }) => Some(text.clone()),
         _ => None,
     }
 }
 
 fn thinking_content(output: &AssistantMessage, index: usize) -> Option<String> {
     match output.content.get(index) {
-        Some(AssistantContent::Thinking { thinking }) => Some(thinking.clone()),
+        Some(AssistantContent::Thinking { thinking, .. }) => Some(thinking.clone()),
         _ => None,
     }
 }
