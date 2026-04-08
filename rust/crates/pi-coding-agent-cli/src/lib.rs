@@ -12,7 +12,7 @@ pub use args::{
     to_print_output_mode,
 };
 pub use auth::{EnvAuthSource, OverlayAuthSource};
-pub use file_processor::{ProcessedFiles, process_file_arguments};
+pub use file_processor::{ProcessFileOptions, ProcessedFiles, process_file_arguments};
 pub use initial_message::{InitialMessageResult, build_initial_message};
 pub use pi_coding_agent_core::{AuthFileSource, ChainedAuthSource};
 pub use print_mode::{PrintModeOptions, PrintModeRunResult, run_print_mode};

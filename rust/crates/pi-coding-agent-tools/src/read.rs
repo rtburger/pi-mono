@@ -1,12 +1,22 @@
 use crate::{
+    format_dimension_note,
     path_utils::resolve_read_path,
+    resize_image_bytes,
     truncate::{DEFAULT_MAX_BYTES, TruncatedBy, TruncationOptions, format_size, truncate_head},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use pi_agent::{AgentTool, AgentToolError, AgentToolResult};
 use pi_events::{ToolDefinition, UserContent};
 use serde_json::{Value, json};
-use std::{fs, path::Path, path::PathBuf};
+use std::{
+    fs,
+    path::Path,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 pub fn read_tool_definition() -> ToolDefinition {
     ToolDefinition {
@@ -31,7 +41,29 @@ pub fn create_read_tool(cwd: impl Into<PathBuf>) -> AgentTool {
         read_tool_definition(),
         move |_tool_call_id, args, signal| {
             let cwd = cwd.clone();
-            async move { execute_read(&cwd, args, signal.as_ref()) }
+            async move { execute_read(&cwd, args, signal.as_ref(), true) }
+        },
+    )
+}
+
+pub fn create_read_tool_with_auto_resize_flag(
+    cwd: impl Into<PathBuf>,
+    auto_resize_images: Arc<AtomicBool>,
+) -> AgentTool {
+    let cwd = cwd.into();
+    AgentTool::new(
+        read_tool_definition(),
+        move |_tool_call_id, args, signal| {
+            let cwd = cwd.clone();
+            let auto_resize_images = auto_resize_images.clone();
+            async move {
+                execute_read(
+                    &cwd,
+                    args,
+                    signal.as_ref(),
+                    auto_resize_images.load(Ordering::Relaxed),
+                )
+            }
         },
     )
 }
@@ -40,6 +72,7 @@ fn execute_read(
     cwd: &Path,
     args: Value,
     signal: Option<&tokio::sync::watch::Receiver<bool>>,
+    auto_resize_images: bool,
 ) -> Result<AgentToolResult, AgentToolError> {
     abort_if_requested(signal)?;
 
@@ -52,8 +85,30 @@ fn execute_read(
     abort_if_requested(signal)?;
 
     if let Some(mime_type) = detect_supported_image_mime_type(&buffer) {
-        return Ok(AgentToolResult {
-            content: vec![
+        let content = if auto_resize_images {
+            match resize_image_bytes(&buffer, mime_type, None) {
+                Some(resized) => {
+                    let mut text = format!("Read image file [{}]", resized.mime_type);
+                    if let Some(dimension_note) = format_dimension_note(&resized) {
+                        text.push('\n');
+                        text.push_str(&dimension_note);
+                    }
+                    vec![
+                        UserContent::Text { text },
+                        UserContent::Image {
+                            data: resized.data,
+                            mime_type: resized.mime_type,
+                        },
+                    ]
+                }
+                None => vec![UserContent::Text {
+                    text: format!(
+                        "Read image file [{mime_type}]\n[Image omitted: could not be resized below the inline image size limit.]"
+                    ),
+                }],
+            }
+        } else {
+            vec![
                 UserContent::Text {
                     text: format!("Read image file [{mime_type}]"),
                 },
@@ -61,7 +116,11 @@ fn execute_read(
                     data: STANDARD.encode(buffer),
                     mime_type: mime_type.into(),
                 },
-            ],
+            ]
+        };
+
+        return Ok(AgentToolResult {
+            content,
             details: Value::Null,
         });
     }

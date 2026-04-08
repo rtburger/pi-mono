@@ -109,6 +109,40 @@ impl AiProvider for RecordingProvider {
     }
 }
 
+#[derive(Clone)]
+struct RecordingContextProvider {
+    contexts: Arc<Mutex<Vec<Context>>>,
+}
+
+impl AiProvider for RecordingContextProvider {
+    fn stream(
+        &self,
+        model: Model,
+        context: Context,
+        _options: StreamOptions,
+    ) -> AssistantEventStream {
+        let contexts = self.contexts.clone();
+        Box::pin(stream! {
+            contexts.lock().unwrap().push(context);
+
+            let partial = AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone());
+            let mut message = partial.clone();
+            message.content.push(AssistantContent::Text {
+                text: "recorded".into(),
+                text_signature: None,
+            });
+            message.stop_reason = StopReason::Stop;
+            message.timestamp = 1;
+
+            yield Ok(AssistantEvent::Start { partial });
+            yield Ok(AssistantEvent::Done {
+                reason: StopReason::Stop,
+                message,
+            });
+        })
+    }
+}
+
 #[tokio::test]
 async fn creates_prompt_capable_core_and_streams_via_faux_provider() {
     let faux = register_faux_provider(RegisterFauxProviderOptions {
@@ -435,6 +469,125 @@ async fn runtime_executes_edit_tool_calls_with_legacy_old_text_arguments() {
     );
 
     faux.unregister();
+}
+
+#[tokio::test]
+async fn runtime_can_toggle_block_images_between_requests() {
+    let api = unique_name("runtime-block-images-api");
+    let provider = unique_name("runtime-block-images-provider");
+    let model_id = unique_name("runtime-block-images-model");
+    let recorded_contexts = Arc::new(Mutex::new(Vec::new()));
+    register_provider(
+        api.clone(),
+        Arc::new(RecordingContextProvider {
+            contexts: recorded_contexts.clone(),
+        }),
+    );
+
+    let created = create_coding_agent_core(CodingAgentCoreOptions {
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            provider.clone(),
+            "token",
+        )])),
+        built_in_models: vec![Model {
+            id: model_id.clone(),
+            name: "Block Images Model".into(),
+            api: api.clone(),
+            provider: provider.clone(),
+            base_url: "https://example.com/v1".into(),
+            reasoning: false,
+            input: vec!["text".into(), "image".into()],
+            context_window: 128_000,
+            max_tokens: 16_384,
+        }],
+        models_json_path: None,
+        cwd: None,
+        tools: None,
+        system_prompt: String::new(),
+        bootstrap: SessionBootstrapOptions::default(),
+        stream_options: StreamOptions::default(),
+    })
+    .unwrap();
+
+    created.core.set_block_images(true);
+    created
+        .core
+        .prompt_message(Message::User {
+            content: vec![
+                UserContent::Text {
+                    text: "before".into(),
+                },
+                UserContent::Image {
+                    data: "image-1".into(),
+                    mime_type: "image/png".into(),
+                },
+                UserContent::Image {
+                    data: "image-2".into(),
+                    mime_type: "image/png".into(),
+                },
+                UserContent::Text {
+                    text: "after".into(),
+                },
+            ],
+            timestamp: 1,
+        })
+        .await
+        .unwrap();
+
+    created.core.set_block_images(false);
+    created
+        .core
+        .prompt_message(Message::User {
+            content: vec![
+                UserContent::Text {
+                    text: "keep".into(),
+                },
+                UserContent::Image {
+                    data: "image-3".into(),
+                    mime_type: "image/png".into(),
+                },
+            ],
+            timestamp: 2,
+        })
+        .await
+        .unwrap();
+
+    let contexts = recorded_contexts.lock().unwrap();
+    assert_eq!(contexts.len(), 2);
+    assert_eq!(
+        contexts[0].messages.last(),
+        Some(&Message::User {
+            content: vec![
+                UserContent::Text {
+                    text: "before".into(),
+                },
+                UserContent::Text {
+                    text: "Image reading is disabled.".into(),
+                },
+                UserContent::Text {
+                    text: "after".into(),
+                },
+            ],
+            timestamp: 1,
+        })
+    );
+    assert_eq!(
+        contexts[1].messages.last(),
+        Some(&Message::User {
+            content: vec![
+                UserContent::Text {
+                    text: "keep".into(),
+                },
+                UserContent::Image {
+                    data: "image-3".into(),
+                    mime_type: "image/png".into(),
+                },
+            ],
+            timestamp: 2,
+        })
+    );
+
+    unregister_provider(&api);
 }
 
 #[tokio::test]

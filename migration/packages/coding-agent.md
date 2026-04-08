@@ -862,3 +862,312 @@ Still deferred for the CLI/model/auth surface:
 - request-time auth refresh errors are still returned as missing-auth/runtime failures rather than being accumulated in an `AuthStorage`-style error buffer
 - startup refresh in `rust/apps/pi` is still best-effort and silent
 - settings-manager/session-manager-backed startup defaults and interactive/TUI integration
+
+## Milestone 17 update: `blockImages` runtime wrapper slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/core/sdk.ts`
+- `packages/coding-agent/test/block-images.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-core/src/lib.rs`
+- `rust/crates/pi-coding-agent-core/src/messages.rs`
+- `rust/crates/pi-coding-agent-core/src/runtime.rs`
+- `rust/crates/pi-coding-agent-core/tests/messages.rs`
+- `rust/crates/pi-coding-agent-core/tests/runtime.rs`
+- `rust/crates/pi-events/src/lib.rs`
+
+### Behavior summary
+
+New TS-compatible image-blocking behavior now covered in Rust:
+- image blocking remains a convert-to-LLM defense-in-depth layer, not a read/file-processing restriction
+- when blocking is enabled, only LLM-bound `user` and `toolResult` message content is rewritten
+- image blocks are replaced with the exact TS placeholder text `Image reading is disabled.`
+- consecutive image blocks collapse to a single placeholder text block, matching the TS dedupe behavior
+- assistant messages are left unchanged
+- the Rust core now supports dynamic toggling after construction, matching the TS intent that mid-session settings changes affect future requests
+
+### Rust design summary
+
+Expanded coding-agent-core/message conversion slices:
+- `pi-coding-agent-core::messages`
+  - new `BLOCKED_IMAGE_PLACEHOLDER` constant
+  - new `filter_blocked_images()` helper over normalized `pi_events::Message` values
+- `pi-coding-agent-core::runtime`
+  - `CodingAgentCore` now carries a shared `AtomicBool` image-blocking flag
+  - new `CodingAgentCore::block_images()` getter
+  - new `CodingAgentCore::set_block_images(bool)` setter
+  - installed convert-to-LLM hook now applies `convert_to_llm()` first, then conditionally runs `filter_blocked_images()` on each request
+
+This stays intentionally below settings-manager/session-manager wiring: the runtime behavior is now present, while config persistence and CLI/UI control remain deferred.
+
+### Validation summary
+
+New Rust coverage added for:
+- direct message-level filtering of user/tool-result images with placeholder dedupe
+- runtime proof that `set_block_images(true/false)` changes the actual provider request context across successive prompts
+
+Validation run results:
+- `cd rust && cargo fmt` passed
+- `cd rust && cargo test -p pi-coding-agent-core --test messages` passed
+- `cd rust && cargo test -p pi-coding-agent-core --test runtime` passed
+- `cd rust && cargo test -p pi-coding-agent-core` passed
+- `cd rust && cargo test` passed
+- `npm run check` still fails in this environment before repo checks run because `biome` is not installed (`sh: biome: command not found`)
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent image/settings surface:
+- no Rust settings-manager integration yet for persisting or loading `images.blockImages`
+- no CLI/TUI settings control wired to `CodingAgentCore::set_block_images()` yet
+- no TS image auto-resize parity yet in the Rust file-processing/runtime path
+- session-manager-backed and interactive/TUI image-setting behavior remains deferred
+
+## Milestone 18 update: settings-backed `blockImages` in the Rust non-interactive path
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/core/settings-manager.ts`
+- `packages/coding-agent/src/core/sdk.ts`
+- `packages/coding-agent/src/cli/file-processor.ts`
+- `packages/coding-agent/test/block-images.test.ts`
+- `packages/coding-agent/test/image-processing.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-config/Cargo.toml`
+- `rust/crates/pi-config/src/lib.rs`
+- `rust/crates/pi-coding-agent-cli/Cargo.toml`
+- `rust/crates/pi-coding-agent-cli/src/lib.rs`
+- `rust/crates/pi-coding-agent-cli/src/runner.rs`
+- `rust/crates/pi-coding-agent-cli/tests/runner.rs`
+- `rust/apps/pi/Cargo.toml`
+- `rust/apps/pi/src/main.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- the Rust non-interactive app now reads `settings.json` for image blocking using the same path split as TS:
+  - global: `<agentDir>/settings.json`
+  - project: `<cwd>/.pi/settings.json`
+- project settings override global settings for `images.blockImages`
+- the loaded setting now reaches the actual request path by calling `CodingAgentCore::set_block_images(...)` before the run
+- end-to-end non-interactive requests now honor stored `images.blockImages: true` by replacing LLM-bound image blocks with `Image reading is disabled.`
+- invalid settings JSON is non-fatal and reported as a warning, matching the TS startup philosophy for settings load issues
+
+Still deferred in this slice:
+- `images.autoResize` loading is not wired yet because the Rust image-resize pipeline has not been ported
+- interactive/TUI settings control is still deferred
+
+### Rust design summary
+
+New minimal config slice in `pi-config`:
+- `SettingsScope`
+- `SettingsWarning`
+- `ImageSettings`
+- `LoadedImageSettings`
+- `load_image_settings(cwd, agent_dir)`
+
+Integration changes:
+- `pi-coding-agent-cli::RunCommandOptions` now accepts `agent_dir`
+- `pi-coding-agent-cli::runner` loads image settings and renders warnings in the current CLI stderr style
+- `rust/apps/pi` now passes the resolved agent dir into the runner so the default app path honors stored `settings.json`
+
+This is intentionally narrow: it ports only the config-loading needed for the already-implemented runtime `blockImages` behavior, without introducing a full Rust `SettingsManager` yet.
+
+### Validation summary
+
+New Rust coverage added for:
+- `pi-config` defaults when settings files are absent
+- `pi-config` project-overrides-global behavior for `images.blockImages`
+- `pi-config` warning behavior for invalid JSON
+- runner-level end-to-end proof that global `settings.json` with `images.blockImages: true` changes the actual provider request context
+
+Validation run results:
+- `cd rust && cargo fmt` passed
+- `cd rust && cargo test -p pi-config` passed
+- `cd rust && cargo test -p pi-coding-agent-cli --test runner` passed
+- `cd rust && cargo test` passed
+- `npm run check` still fails in this environment before repo checks run because `biome` is not installed (`sh: biome: command not found`)
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent settings/image surface:
+- no full Rust `SettingsManager` API yet
+- no settings-backed `images.autoResize` parity yet
+- no session-manager/resource-loader-backed settings diagnostics aggregation yet
+- no interactive/TUI settings UI or persistence editing flow yet
+
+## Milestone 19 update: non-interactive `@file` image auto-resize parity slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/cli/file-processor.ts`
+- `packages/coding-agent/src/utils/image-resize.ts`
+- `packages/coding-agent/test/image-processing.test.ts`
+- `packages/coding-agent/src/core/settings-manager.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tools/Cargo.toml`
+- `rust/crates/pi-coding-agent-tools/src/lib.rs`
+- `rust/crates/pi-coding-agent-tools/src/read.rs`
+- `rust/crates/pi-coding-agent-tools/tests/read_write.rs`
+- `rust/crates/pi-coding-agent-cli/Cargo.toml`
+- `rust/crates/pi-coding-agent-cli/src/lib.rs`
+- `rust/crates/pi-coding-agent-cli/src/file_processor.rs`
+- `rust/crates/pi-coding-agent-cli/src/runner.rs`
+- `rust/crates/pi-coding-agent-cli/tests/runner.rs`
+- `rust/crates/pi-config/src/lib.rs`
+- `rust/crates/pi-config/tests/settings.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- non-interactive `@file` image preprocessing now defaults to auto-resizing inline image attachments
+- resize behavior follows the current TS algorithm shape closely:
+  - preserve original image unchanged when already within dimension and encoded-size limits
+  - clamp dimensions to `2000x2000`
+  - try PNG first, then JPEG quality fallbacks
+  - if still too large, progressively shrink dimensions by 75%
+  - omit the image with the TS placeholder note when it cannot be made small enough
+- resized images now add the same dimension note text used by TS so the model can map displayed coordinates back to the original image
+- Rust settings loading now includes `images.autoResize` with TS-compatible defaults and project-overrides-global behavior
+- the Rust non-interactive runner now honors `images.autoResize: false` from `settings.json`, preserving the original image attachment without the resize note
+
+Still deferred in this slice:
+- read-tool image auto-resize parity is not wired yet
+- EXIF orientation handling and the exact Photon-based TS implementation details remain unported
+- interactive/TUI image preprocessing remains deferred
+
+### Rust design summary
+
+New shared image helper slice in `pi-coding-agent-tools`:
+- `src/image.rs`
+  - `ImageResizeOptions`
+  - `ResizedImage`
+  - `resize_image_bytes()`
+  - `format_dimension_note()`
+- exported through `pi-coding-agent-tools` so the same helper can be reused later by the read-tool path
+
+CLI integration changes:
+- `pi-coding-agent-cli::file_processor`
+  - new `ProcessFileOptions`
+  - image preprocessing now runs through the shared resize helper
+- `pi-coding-agent-cli::runner`
+  - passes settings-backed `auto_resize_images` into file preprocessing
+- `pi-config::ImageSettings`
+  - now includes both `auto_resize_images` and `block_images`
+
+This remains intentionally scoped to the non-interactive `@file` path; the read tool will reuse the same helper in a later milestone.
+
+### Validation summary
+
+New Rust coverage added for:
+- image resize helper parity cases:
+  - unchanged small image
+  - dimension-triggered resize
+  - byte-limit-triggered resize
+  - impossible byte limit returning `None`
+- CLI file-processor behavior:
+  - default auto-resize of oversized images
+  - explicit disable path preserving original image data
+- runner-level proof that `settings.json` with `images.autoResize: false` changes the actual non-interactive request payload
+- updated config tests for `images.autoResize` defaults and override behavior
+
+Validation run results:
+- `cd rust && cargo fmt` passed
+- `cd rust && cargo test -p pi-coding-agent-tools --test image_resize` passed
+- `cd rust && cargo test -p pi-coding-agent-cli --test file_processor` passed
+- `cd rust && cargo test -p pi-coding-agent-cli --test runner` passed
+- `cd rust && cargo test -p pi-config` passed
+- `cd rust && cargo test` passed
+- `npm run check` still fails in this environment before repo checks run because `biome` is not installed (`sh: biome: command not found`)
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent image/settings surface:
+- read-tool image auto-resize parity is still missing
+- TS Photon/EXIF parity is not complete in Rust
+- no full Rust `SettingsManager` API yet
+- no interactive/TUI image settings workflow yet
+
+## Milestone 20 update: read-tool image auto-resize parity slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/core/tools/index.ts`
+- `packages/coding-agent/src/core/agent-session.ts`
+- `packages/coding-agent/src/core/tools/read.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-core/src/runtime.rs`
+- `rust/crates/pi-coding-agent-core/tests/runtime.rs`
+- `rust/crates/pi-coding-agent-tools/src/read.rs`
+- `rust/crates/pi-coding-agent-tools/src/lib.rs`
+- `rust/crates/pi-coding-agent-tools/tests/read_write.rs`
+- `rust/crates/pi-coding-agent-cli/src/runner.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- the Rust `read` tool now auto-resizes image files by default instead of always returning the original image bytes
+- read-tool image behavior now matches the TS shape already used in `packages/coding-agent/src/core/tools/read.ts`:
+  - unchanged images stay unchanged when already within limits
+  - oversized images are resized before being returned to the model
+  - resized images include the same dimension note text used by the TS implementation
+  - impossible-to-fit images return the TS omission note instead of an attachment
+- the read tool now supports dynamic runtime toggling of auto-resize through a shared flag, mirroring the TS intent that settings changes can affect future tool behavior
+- the Rust non-interactive runner now applies stored `images.autoResize` to both major image-entry points now implemented in Rust:
+  - `@file` CLI preprocessing
+  - default `read` tool runtime behavior
+
+Still deferred in this slice:
+- full Photon/EXIF parity remains unported
+- interactive/TUI settings editing remains deferred
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tools` image/read slices:
+- `read.rs`
+  - new `create_read_tool_with_auto_resize_flag(...)`
+  - read execution now delegates image resizing to the shared `resize_image_bytes()` helper
+- `lib.rs`
+  - new `create_coding_tools_with_read_auto_resize_flag(...)`
+
+Expanded `pi-coding-agent-core::runtime`:
+- `CodingAgentCore` now tracks a shared `auto_resize_images` flag alongside `block_images`
+- new methods:
+  - `CodingAgentCore::auto_resize_images()`
+  - `CodingAgentCore::set_auto_resize_images(bool)`
+- default tool creation now wires the read tool to that shared flag so later setting changes can affect tool execution without recreating the core
+
+Runner integration:
+- `pi-coding-agent-cli::runner` now applies settings-backed `auto_resize_images` to the core after creation, alongside `block_images`
+
+### Validation summary
+
+New Rust coverage added for:
+- read-tool behavior on valid small images
+- read-tool default auto-resize on oversized images
+- read-tool dynamic shared-flag toggle between resized and unresized output
+- existing targeted runner/runtime coverage continues to validate surrounding startup integration
+
+Validation run results:
+- `cd rust && cargo fmt` passed
+- `cd rust && cargo test -p pi-coding-agent-tools --test read_write` passed
+- `cd rust && cargo test -p pi-coding-agent-core --test runtime` passed
+- `cd rust && cargo test -p pi-coding-agent-cli --test runner` passed
+- `cd rust && cargo test` passed
+- `npm run check` still fails in this environment before repo checks run because `biome` is not installed (`sh: biome: command not found`)
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent image/settings surface:
+- full Photon/EXIF parity is still missing
+- no full Rust `SettingsManager` API yet
+- no interactive/TUI image settings workflow yet
+- broader session-manager-backed settings parity remains deferred

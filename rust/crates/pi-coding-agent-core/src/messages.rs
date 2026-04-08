@@ -9,6 +9,7 @@ pub const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
 pub const BRANCH_SUMMARY_PREFIX: &str =
     "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n";
 pub const BRANCH_SUMMARY_SUFFIX: &str = "</summary>";
+pub const BLOCKED_IMAGE_PLACEHOLDER: &str = "Image reading is disabled.";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -173,6 +174,13 @@ pub fn convert_to_llm(messages: Vec<AgentMessage>) -> Vec<Message> {
         .collect()
 }
 
+pub fn filter_blocked_images(messages: Vec<Message>) -> Vec<Message> {
+    messages
+        .into_iter()
+        .map(filter_blocked_images_in_message)
+        .collect()
+}
+
 fn convert_message_to_llm(message: AgentMessage) -> Option<Message> {
     match message {
         AgentMessage::Standard(message) => Some(message),
@@ -230,6 +238,54 @@ fn convert_custom_message_to_llm(message: pi_agent::CustomAgentMessage) -> Optio
         }
         _ => None,
     }
+}
+
+fn filter_blocked_images_in_message(message: Message) -> Message {
+    match message {
+        Message::User { content, timestamp } => Message::User {
+            content: filter_blocked_images_in_content(content),
+            timestamp,
+        },
+        Message::ToolResult {
+            tool_call_id,
+            tool_name,
+            content,
+            is_error,
+            timestamp,
+        } => Message::ToolResult {
+            tool_call_id,
+            tool_name,
+            content: filter_blocked_images_in_content(content),
+            is_error,
+            timestamp,
+        },
+        Message::Assistant { .. } => message,
+    }
+}
+
+fn filter_blocked_images_in_content(content: Vec<UserContent>) -> Vec<UserContent> {
+    let mut filtered = Vec::with_capacity(content.len());
+
+    for block in content {
+        match block {
+            UserContent::Image { .. } => push_blocked_image_placeholder(&mut filtered),
+            UserContent::Text { .. } => filtered.push(block),
+        }
+    }
+
+    filtered
+}
+
+fn push_blocked_image_placeholder(content: &mut Vec<UserContent>) {
+    if content.last().is_some_and(
+        |block| matches!(block, UserContent::Text { text } if text == BLOCKED_IMAGE_PLACEHOLDER),
+    ) {
+        return;
+    }
+
+    content.push(UserContent::Text {
+        text: BLOCKED_IMAGE_PLACEHOLDER.into(),
+    });
 }
 
 fn custom_agent_message(

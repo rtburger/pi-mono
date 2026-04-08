@@ -27,7 +27,8 @@ async fn main() -> ExitCode {
         }
     };
 
-    let auth_path = get_auth_path();
+    let agent_dir = get_agent_dir();
+    let auth_path = agent_dir.join("auth.json");
     refresh_auth_file_oauth(&auth_path).await;
 
     let result = run_command(RunCommandOptions {
@@ -39,7 +40,8 @@ async fn main() -> ExitCode {
             Arc::new(EnvAuthSource::new()),
         ])),
         built_in_models: built_in_models().to_vec(),
-        models_json_path: Some(get_models_path()),
+        models_json_path: Some(agent_dir.join("models.json")),
+        agent_dir: Some(agent_dir),
         cwd: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         default_system_prompt: String::new(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -59,14 +61,6 @@ async fn main() -> ExitCode {
     } else {
         ExitCode::from(result.exit_code as u8)
     }
-}
-
-fn get_models_path() -> PathBuf {
-    get_agent_dir().join("models.json")
-}
-
-fn get_auth_path() -> PathBuf {
-    get_agent_dir().join("auth.json")
 }
 
 fn get_agent_dir() -> PathBuf {

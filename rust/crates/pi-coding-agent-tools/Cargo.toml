@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 pi-agent = { path = "../pi-agent" }
 pi-events = { path = "../pi-events" }
 serde.workspace = true

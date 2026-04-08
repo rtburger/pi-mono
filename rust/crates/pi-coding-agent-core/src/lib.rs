@@ -15,10 +15,11 @@ pub use bootstrap::{
     SessionBootstrapOptions, SessionBootstrapResult, bootstrap_session,
 };
 pub use messages::{
-    BRANCH_SUMMARY_PREFIX, BRANCH_SUMMARY_SUFFIX, BashExecutionMessage, BranchSummaryMessage,
-    COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, CompactionSummaryMessage, CustomMessage,
-    CustomMessageContent, bash_execution_to_text, convert_to_llm, create_bash_execution_message,
-    create_branch_summary_message, create_compaction_summary_message, create_custom_message,
+    BLOCKED_IMAGE_PLACEHOLDER, BRANCH_SUMMARY_PREFIX, BRANCH_SUMMARY_SUFFIX, BashExecutionMessage,
+    BranchSummaryMessage, COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX,
+    CompactionSummaryMessage, CustomMessage, CustomMessageContent, bash_execution_to_text,
+    convert_to_llm, create_bash_execution_message, create_branch_summary_message,
+    create_compaction_summary_message, create_custom_message, filter_blocked_images,
 };
 pub use model_registry::{ModelRegistry, RequestAuth};
 pub use model_resolver::{

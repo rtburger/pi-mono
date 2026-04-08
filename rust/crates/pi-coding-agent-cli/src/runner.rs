@@ -1,7 +1,7 @@
 use crate::{
     AppMode, Args, Diagnostic, DiagnosticKind, ListModels, OverlayAuthSource, PrintModeOptions,
-    build_initial_message, list_models::render_list_models, parse_args, process_file_arguments,
-    resolve_app_mode, run_print_mode, to_print_output_mode,
+    ProcessFileOptions, build_initial_message, list_models::render_list_models, parse_args,
+    process_file_arguments, resolve_app_mode, run_print_mode, to_print_output_mode,
 };
 use pi_ai::StreamOptions;
 use pi_coding_agent_core::{
@@ -9,6 +9,7 @@ use pi_coding_agent_core::{
     ModelRegistry, ScopedModel, SessionBootstrapOptions, create_coding_agent_core,
     resolve_cli_model, resolve_model_scope,
 };
+use pi_config::load_image_settings;
 use pi_events::Model;
 use std::{
     path::{Path, PathBuf},
@@ -26,6 +27,7 @@ pub struct RunCommandOptions {
     pub auth_source: Arc<dyn AuthSource>,
     pub built_in_models: Vec<Model>,
     pub models_json_path: Option<PathBuf>,
+    pub agent_dir: Option<PathBuf>,
     pub cwd: PathBuf,
     pub default_system_prompt: String,
     pub version: String,
@@ -46,6 +48,7 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         auth_source,
         built_in_models,
         models_json_path,
+        agent_dir,
         cwd,
         default_system_prompt,
         version,
@@ -128,6 +131,12 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         };
     };
 
+    let image_settings = agent_dir
+        .as_deref()
+        .map(|agent_dir| load_image_settings(&cwd, agent_dir))
+        .unwrap_or_default();
+    stderr.push_str(&render_settings_warnings(&image_settings.warnings));
+
     let scoped_models = if let Some(patterns) = parsed.models.as_ref() {
         let registry = ModelRegistry::new(
             auth_source.clone(),
@@ -142,7 +151,13 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
     };
 
     let stdin_content = normalize_stdin_content(stdin_is_tty, stdin_content);
-    let processed_files = match process_file_arguments(&parsed.file_args, &cwd) {
+    let processed_files = match process_file_arguments(
+        &parsed.file_args,
+        &cwd,
+        ProcessFileOptions {
+            auto_resize_images: image_settings.settings.auto_resize_images,
+        },
+    ) {
         Ok(files) => files,
         Err(error) => {
             push_line(&mut stderr, &format!("Error: {error}"));
@@ -218,6 +233,13 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
             };
         }
     };
+
+    created
+        .core
+        .set_auto_resize_images(image_settings.settings.auto_resize_images);
+    created
+        .core
+        .set_block_images(image_settings.settings.block_images);
 
     stderr.push_str(&render_bootstrap_diagnostics(&created.diagnostics));
     if created
@@ -334,6 +356,21 @@ fn render_parse_diagnostics(diagnostics: &[Diagnostic]) -> String {
             DiagnosticKind::Error => "Error",
         };
         push_line(&mut output, &format!("{label}: {}", diagnostic.message));
+    }
+    output
+}
+
+fn render_settings_warnings(warnings: &[pi_config::SettingsWarning]) -> String {
+    let mut output = String::new();
+    for warning in warnings {
+        push_line(
+            &mut output,
+            &format!(
+                "Warning: ({} settings) {}",
+                warning.scope.label(),
+                warning.message
+            ),
+        );
     }
     output
 }

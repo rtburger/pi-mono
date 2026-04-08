@@ -1,5 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use pi_coding_agent_tools::{detect_supported_image_mime_type, resolve_read_path};
+use pi_coding_agent_tools::{
+    detect_supported_image_mime_type, format_dimension_note, resize_image_bytes, resolve_read_path,
+};
 use pi_events::UserContent;
 use std::{
     fs,
@@ -12,7 +14,24 @@ pub struct ProcessedFiles {
     pub images: Vec<UserContent>,
 }
 
-pub fn process_file_arguments(file_args: &[String], cwd: &Path) -> Result<ProcessedFiles, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessFileOptions {
+    pub auto_resize_images: bool,
+}
+
+impl Default for ProcessFileOptions {
+    fn default() -> Self {
+        Self {
+            auto_resize_images: true,
+        }
+    }
+}
+
+pub fn process_file_arguments(
+    file_args: &[String],
+    cwd: &Path,
+    options: ProcessFileOptions,
+) -> Result<ProcessedFiles, String> {
     let mut text = String::new();
     let mut images = Vec::new();
 
@@ -33,14 +52,41 @@ pub fn process_file_arguments(file_args: &[String], cwd: &Path) -> Result<Proces
             .map_err(|error| format!("Could not read file {}: {error}", absolute_path.display()))?;
 
         if let Some(mime_type) = detect_supported_image_mime_type(&bytes) {
-            images.push(UserContent::Image {
-                data: STANDARD.encode(bytes),
-                mime_type: mime_type.to_string(),
-            });
-            text.push_str(&format!(
-                "<file name=\"{}\"></file>\n",
-                absolute_path.display()
-            ));
+            if options.auto_resize_images {
+                let Some(resized) = resize_image_bytes(&bytes, mime_type, None) else {
+                    text.push_str(&format!(
+                        "<file name=\"{}\">[Image omitted: could not be resized below the inline image size limit.]</file>\n",
+                        absolute_path.display()
+                    ));
+                    continue;
+                };
+
+                let dimension_note = format_dimension_note(&resized);
+                images.push(UserContent::Image {
+                    data: resized.data,
+                    mime_type: resized.mime_type,
+                });
+                if let Some(dimension_note) = dimension_note {
+                    text.push_str(&format!(
+                        "<file name=\"{}\">{dimension_note}</file>\n",
+                        absolute_path.display()
+                    ));
+                } else {
+                    text.push_str(&format!(
+                        "<file name=\"{}\"></file>\n",
+                        absolute_path.display()
+                    ));
+                }
+            } else {
+                images.push(UserContent::Image {
+                    data: STANDARD.encode(bytes),
+                    mime_type: mime_type.to_string(),
+                });
+                text.push_str(&format!(
+                    "<file name=\"{}\"></file>\n",
+                    absolute_path.display()
+                ));
+            }
             continue;
         }
 

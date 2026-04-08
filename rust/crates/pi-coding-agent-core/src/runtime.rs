@@ -1,14 +1,20 @@
 use crate::{
     AuthSource, BootstrapDiagnostic, ModelRegistry, SessionBootstrapOptions, bootstrap_session,
-    convert_to_llm,
+    convert_to_llm, filter_blocked_images,
 };
 use async_stream::stream;
 use futures::StreamExt;
 use pi_agent::{Agent, AgentState, AgentTool, AssistantStreamer};
 use pi_ai::{AiError, AssistantEventStream, StreamOptions, stream_response};
-use pi_coding_agent_tools::create_coding_tools;
+use pi_coding_agent_tools::create_coding_tools_with_read_auto_resize_flag;
 use pi_events::{Context, Message, Model};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 pub struct CodingAgentCoreOptions {
     pub auth_source: Arc<dyn AuthSource>,
@@ -31,6 +37,8 @@ pub struct CreateCodingAgentCoreResult {
 pub struct CodingAgentCore {
     agent: Agent,
     model_registry: Arc<ModelRegistry>,
+    auto_resize_images: Arc<AtomicBool>,
+    block_images: Arc<AtomicBool>,
 }
 
 impl CodingAgentCore {
@@ -44,6 +52,22 @@ impl CodingAgentCore {
 
     pub fn state(&self) -> AgentState {
         self.agent.state()
+    }
+
+    pub fn auto_resize_images(&self) -> bool {
+        self.auto_resize_images.load(Ordering::Relaxed)
+    }
+
+    pub fn set_auto_resize_images(&self, enabled: bool) {
+        self.auto_resize_images.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn block_images(&self) -> bool {
+        self.block_images.load(Ordering::Relaxed)
+    }
+
+    pub fn set_block_images(&self, blocked: bool) {
+        self.block_images.store(blocked, Ordering::Relaxed);
     }
 
     pub async fn prompt_text(
@@ -104,10 +128,14 @@ pub fn create_coding_agent_core(
             .map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))?,
     };
 
+    let auto_resize_images = Arc::new(AtomicBool::new(true));
+
     let mut state = AgentState::new(model);
     state.system_prompt = system_prompt;
     state.thinking_level = bootstrap.thinking_level;
-    state.tools = tools.unwrap_or_else(|| create_coding_tools(cwd));
+    state.tools = tools.unwrap_or_else(|| {
+        create_coding_tools_with_read_auto_resize_flag(cwd, auto_resize_images.clone())
+    });
 
     let agent = Agent::with_parts(
         state,
@@ -116,12 +144,26 @@ pub fn create_coding_agent_core(
         }),
         stream_options,
     );
-    agent.set_convert_to_llm(|messages| async move { convert_to_llm(messages) });
+    let block_images = Arc::new(AtomicBool::new(false));
+    let convert_block_images = block_images.clone();
+    agent.set_convert_to_llm(move |messages| {
+        let convert_block_images = convert_block_images.clone();
+        async move {
+            let converted = convert_to_llm(messages);
+            if convert_block_images.load(Ordering::Relaxed) {
+                filter_blocked_images(converted)
+            } else {
+                converted
+            }
+        }
+    });
 
     Ok(CreateCodingAgentCoreResult {
         core: CodingAgentCore {
             agent,
             model_registry,
+            auto_resize_images,
+            block_images,
         },
         diagnostics: bootstrap.diagnostics,
         model_fallback_message: bootstrap.model_fallback_message,

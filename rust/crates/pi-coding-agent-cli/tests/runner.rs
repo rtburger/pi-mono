@@ -1,5 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::stream;
+use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
 use pi_ai::{
     AiProvider, AssistantEventStream, StreamOptions, built_in_models, get_model,
     register_builtin_providers, register_provider, stream_response, unregister_provider,
@@ -12,6 +13,7 @@ use pi_events::{
 };
 use std::{
     fs,
+    io::Cursor,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -82,6 +84,15 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     path
 }
 
+fn solid_png(width: u32, height: u32) -> Vec<u8> {
+    let image = ImageBuffer::from_pixel(width, height, Rgba([255, 0, 0, 255]));
+    let mut bytes = Vec::new();
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+        .unwrap();
+    bytes
+}
+
 fn register_recording_provider(response_text: &str) -> (String, Arc<Mutex<RecordedRequest>>) {
     let api = unique_name("recording-api");
     let recorded = Arc::new(Mutex::new(RecordedRequest::default()));
@@ -132,6 +143,7 @@ async fn run_command_applies_cli_api_key_override_to_stream_options() {
         auth_source: Arc::new(EnvAuthSource::new()),
         built_in_models: vec![built_in_model],
         models_json_path: None,
+        agent_dir: None,
         cwd: unique_temp_dir("runner-api-key"),
         default_system_prompt: String::new(),
         version: String::from("0.1.0"),
@@ -184,6 +196,7 @@ async fn run_command_uses_pi_ai_built_in_model_catalog() {
         auth_source: Arc::new(EnvAuthSource::new()),
         built_in_models: built_in_models().to_vec(),
         models_json_path: None,
+        agent_dir: None,
         cwd: unique_temp_dir("runner-built-in-catalog"),
         default_system_prompt: String::new(),
         version: String::from("0.1.0"),
@@ -242,6 +255,7 @@ async fn run_command_merges_stdin_text_file_args_and_image_attachments() {
         auth_source: Arc::new(EnvAuthSource::new()),
         built_in_models: vec![built_in_model],
         models_json_path: None,
+        agent_dir: None,
         cwd: temp_dir.clone(),
         default_system_prompt: String::new(),
         version: String::from("0.1.0"),
@@ -287,6 +301,163 @@ async fn run_command_merges_stdin_text_file_args_and_image_attachments() {
 }
 
 #[tokio::test]
+async fn run_command_loads_block_images_setting_from_global_settings() {
+    let provider = unique_name("provider");
+    let model_id = unique_name("model");
+    let (api, recorded) = register_recording_provider("blocked");
+    let built_in_model = model(&api, &provider, &model_id);
+    let cwd = unique_temp_dir("runner-block-images-cwd");
+    let agent_dir = unique_temp_dir("runner-block-images-agent");
+    let image_path = cwd.join("screenshot.png");
+    fs::write(&image_path, STANDARD.decode(TINY_PNG).unwrap()).unwrap();
+    fs::write(
+        agent_dir.join("settings.json"),
+        serde_json::json!({
+            "images": {
+                "blockImages": true
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let result = run_command(RunCommandOptions {
+        args: vec![
+            String::from("-p"),
+            String::from("--provider"),
+            provider.clone(),
+            String::from("--model"),
+            model_id.clone(),
+            format!("@{}", image_path.display()),
+            String::from("Explain"),
+        ],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            provider.as_str(),
+            "token",
+        )])),
+        built_in_models: vec![built_in_model],
+        models_json_path: None,
+        agent_dir: Some(agent_dir),
+        cwd,
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout, "blocked\n");
+    assert!(result.stderr.is_empty());
+
+    let recorded = recorded.lock().unwrap().clone();
+    let context = recorded.context.expect("expected recorded context");
+    match &context.messages[0] {
+        pi_events::Message::User { content, .. } => {
+            assert_eq!(content.len(), 2);
+            match &content[0] {
+                UserContent::Text { text } => {
+                    assert!(text.contains("<file name="));
+                    assert!(text.contains("Explain"));
+                }
+                other => panic!("expected text block, got {other:?}"),
+            }
+            assert_eq!(
+                content[1],
+                UserContent::Text {
+                    text: String::from("Image reading is disabled."),
+                }
+            );
+        }
+        other => panic!("expected user message, got {other:?}"),
+    }
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
+async fn run_command_loads_auto_resize_setting_from_global_settings() {
+    let provider = unique_name("provider");
+    let model_id = unique_name("model");
+    let (api, recorded) = register_recording_provider("resized");
+    let built_in_model = model(&api, &provider, &model_id);
+    let cwd = unique_temp_dir("runner-auto-resize-cwd");
+    let agent_dir = unique_temp_dir("runner-auto-resize-agent");
+    let image_path = cwd.join("large.png");
+    let original_bytes = solid_png(2_100, 2_100);
+    let original_base64 = STANDARD.encode(&original_bytes);
+    fs::write(&image_path, &original_bytes).unwrap();
+    fs::write(
+        agent_dir.join("settings.json"),
+        serde_json::json!({
+            "images": {
+                "autoResize": false
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let result = run_command(RunCommandOptions {
+        args: vec![
+            String::from("-p"),
+            String::from("--provider"),
+            provider.clone(),
+            String::from("--model"),
+            model_id.clone(),
+            format!("@{}", image_path.display()),
+            String::from("Explain"),
+        ],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            provider.as_str(),
+            "token",
+        )])),
+        built_in_models: vec![built_in_model],
+        models_json_path: None,
+        agent_dir: Some(agent_dir),
+        cwd,
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout, "resized\n");
+    assert!(result.stderr.is_empty());
+
+    let recorded = recorded.lock().unwrap().clone();
+    let context = recorded.context.expect("expected recorded context");
+    match &context.messages[0] {
+        pi_events::Message::User { content, .. } => {
+            assert_eq!(content.len(), 2);
+            match &content[0] {
+                UserContent::Text { text } => {
+                    assert!(!text.contains("[Image:"));
+                    assert!(
+                        text.contains(&format!("<file name=\"{}\"></file>", image_path.display()))
+                    );
+                }
+                other => panic!("expected text block, got {other:?}"),
+            }
+            assert_eq!(
+                content[1],
+                UserContent::Image {
+                    data: original_base64,
+                    mime_type: String::from("image/png"),
+                }
+            );
+        }
+        other => panic!("expected user message, got {other:?}"),
+    }
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
 async fn run_command_rejects_api_key_without_model() {
     let result = run_command(RunCommandOptions {
         args: vec![
@@ -300,6 +471,7 @@ async fn run_command_rejects_api_key_without_model() {
         auth_source: Arc::new(EnvAuthSource::new()),
         built_in_models: Vec::new(),
         models_json_path: None,
+        agent_dir: None,
         cwd: unique_temp_dir("runner-api-key-error"),
         default_system_prompt: String::new(),
         version: String::from("0.1.0"),
@@ -323,6 +495,7 @@ async fn run_command_rejects_interactive_mode_for_now() {
         auth_source: Arc::new(EnvAuthSource::new()),
         built_in_models: Vec::new(),
         models_json_path: None,
+        agent_dir: None,
         cwd: unique_temp_dir("runner-interactive"),
         default_system_prompt: String::new(),
         version: String::from("0.1.0"),
@@ -348,6 +521,7 @@ async fn run_command_lists_models_without_entering_print_or_interactive_mode() {
         auth_source: Arc::new(MemoryAuthStorage::with_api_keys([("openai", "token")])),
         built_in_models: vec![model("openai-responses", "openai", "gpt-5.2-codex")],
         models_json_path: None,
+        agent_dir: None,
         cwd: unique_temp_dir("runner-list-models"),
         default_system_prompt: String::new(),
         version: String::from("0.1.0"),
@@ -386,6 +560,7 @@ async fn run_command_uses_first_scoped_model_when_models_flag_is_provided() {
             model(&api, &second_provider, "beta-model"),
         ],
         models_json_path: None,
+        agent_dir: None,
         cwd: unique_temp_dir("runner-model-scope"),
         default_system_prompt: String::new(),
         version: String::from("0.1.0"),
@@ -431,6 +606,7 @@ async fn run_command_applies_cli_api_key_override_when_models_flag_selects_initi
         )])),
         built_in_models: vec![model(&api, &provider, "alpha-model")],
         models_json_path: None,
+        agent_dir: None,
         cwd: unique_temp_dir("runner-model-scope-api-key"),
         default_system_prompt: String::new(),
         version: String::from("0.1.0"),
@@ -477,6 +653,7 @@ async fn run_command_uses_auth_json_api_keys_for_initial_model_selection() {
         ))])),
         built_in_models: vec![model(&api, &provider, &model_id)],
         models_json_path: None,
+        agent_dir: None,
         cwd: temp_dir,
         default_system_prompt: String::new(),
         version: String::from("0.1.0"),

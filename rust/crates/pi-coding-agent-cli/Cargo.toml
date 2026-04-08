@@ -10,10 +10,12 @@ pi-agent = { path = "../pi-agent" }
 pi-ai = { path = "../pi-ai" }
 pi-coding-agent-core = { path = "../pi-coding-agent-core" }
 pi-coding-agent-tools = { path = "../pi-coding-agent-tools" }
+pi-config = { path = "../pi-config" }
 pi-events = { path = "../pi-events" }
 pi-tui = { path = "../pi-tui" }
 serde_json.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
 tokio.workspace = true

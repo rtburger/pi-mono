@@ -4,10 +4,11 @@ use pi_ai::{
     register_faux_provider,
 };
 use pi_coding_agent_core::{
-    BRANCH_SUMMARY_PREFIX, BRANCH_SUMMARY_SUFFIX, BashExecutionMessage, BranchSummaryMessage,
-    COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, CodingAgentCoreOptions,
-    CompactionSummaryMessage, CustomMessage, CustomMessageContent, MemoryAuthStorage,
-    SessionBootstrapOptions, bash_execution_to_text, convert_to_llm, create_coding_agent_core,
+    BLOCKED_IMAGE_PLACEHOLDER, BRANCH_SUMMARY_PREFIX, BRANCH_SUMMARY_SUFFIX, BashExecutionMessage,
+    BranchSummaryMessage, COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX,
+    CodingAgentCoreOptions, CompactionSummaryMessage, CustomMessage, CustomMessageContent,
+    MemoryAuthStorage, SessionBootstrapOptions, bash_execution_to_text, convert_to_llm,
+    create_coding_agent_core, filter_blocked_images,
 };
 use pi_events::{Message, UserContent};
 use serde_json::json;
@@ -146,6 +147,105 @@ fn convert_to_llm_converts_supported_coding_agent_messages() {
             is_error: false,
             timestamp: 7,
         }
+    );
+}
+
+#[test]
+fn filter_blocked_images_replaces_user_and_tool_result_images_with_placeholder() {
+    let filtered = filter_blocked_images(vec![
+        Message::User {
+            content: vec![
+                UserContent::Text {
+                    text: "before".into(),
+                },
+                UserContent::Image {
+                    data: "image-1".into(),
+                    mime_type: "image/png".into(),
+                },
+                UserContent::Image {
+                    data: "image-2".into(),
+                    mime_type: "image/png".into(),
+                },
+                UserContent::Text {
+                    text: "middle".into(),
+                },
+                UserContent::Image {
+                    data: "image-3".into(),
+                    mime_type: "image/png".into(),
+                },
+            ],
+            timestamp: 10,
+        },
+        Message::ToolResult {
+            tool_call_id: "call-1".into(),
+            tool_name: "read".into(),
+            content: vec![
+                UserContent::Image {
+                    data: "image-4".into(),
+                    mime_type: "image/jpeg".into(),
+                },
+                UserContent::Image {
+                    data: "image-5".into(),
+                    mime_type: "image/jpeg".into(),
+                },
+            ],
+            is_error: false,
+            timestamp: 11,
+        },
+        Message::Assistant {
+            content: vec![],
+            api: "api".into(),
+            provider: "provider".into(),
+            model: "model".into(),
+            response_id: None,
+            usage: Default::default(),
+            stop_reason: pi_events::StopReason::Stop,
+            error_message: None,
+            timestamp: 12,
+        },
+    ]);
+
+    assert_eq!(
+        filtered,
+        vec![
+            Message::User {
+                content: vec![
+                    UserContent::Text {
+                        text: "before".into(),
+                    },
+                    UserContent::Text {
+                        text: BLOCKED_IMAGE_PLACEHOLDER.into(),
+                    },
+                    UserContent::Text {
+                        text: "middle".into(),
+                    },
+                    UserContent::Text {
+                        text: BLOCKED_IMAGE_PLACEHOLDER.into(),
+                    },
+                ],
+                timestamp: 10,
+            },
+            Message::ToolResult {
+                tool_call_id: "call-1".into(),
+                tool_name: "read".into(),
+                content: vec![UserContent::Text {
+                    text: BLOCKED_IMAGE_PLACEHOLDER.into(),
+                }],
+                is_error: false,
+                timestamp: 11,
+            },
+            Message::Assistant {
+                content: vec![],
+                api: "api".into(),
+                provider: "provider".into(),
+                model: "model".into(),
+                response_id: None,
+                usage: Default::default(),
+                stop_reason: pi_events::StopReason::Stop,
+                error_message: None,
+                timestamp: 12,
+            },
+        ]
     );
 }
 
