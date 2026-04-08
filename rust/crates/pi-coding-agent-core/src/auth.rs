@@ -502,6 +502,15 @@ async fn refresh_auth_file_oauth_inner(
     path: &Path,
     overrides: &OAuthRefreshOverrides<'_>,
 ) -> Vec<String> {
+    if !path.exists() {
+        return Vec::new();
+    }
+
+    let _lock = match acquire_auth_file_lock(path).await {
+        Ok(lock) => lock,
+        Err(error) => return vec![error],
+    };
+
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(_) => return Vec::new(),
@@ -900,6 +909,70 @@ mod tests {
         });
 
         (format!("http://{address}/token"), handle)
+    }
+
+    #[tokio::test]
+    async fn refresh_auth_file_oauth_rereads_auth_json_after_waiting_for_lock() {
+        let temp_dir = unique_temp_dir("startup-refresh-lock");
+        let auth_path = temp_dir.join("auth.json");
+        fs::write(
+            &auth_path,
+            serde_json::json!({
+                "anthropic": {
+                    "type": "oauth",
+                    "refresh": "refresh-token",
+                    "access": "expired-access-token",
+                    "expires": 0
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let lock_path = PathBuf::from(format!("{}.lock", auth_path.to_string_lossy()));
+        fs::write(&lock_path, "locked").unwrap();
+
+        let auth_path_for_thread = auth_path.clone();
+        let lock_path_for_thread = lock_path.clone();
+        let updater = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            fs::write(
+                &auth_path_for_thread,
+                serde_json::json!({
+                    "anthropic": {
+                        "type": "oauth",
+                        "refresh": "refresh-token",
+                        "access": "already-refreshed-token",
+                        "expires": i64::MAX
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            fs::remove_file(&lock_path_for_thread).unwrap();
+        });
+
+        let errors = refresh_auth_file_oauth_inner(
+            &auth_path,
+            &OAuthRefreshOverrides {
+                anthropic_token_url: Some("http://127.0.0.1:9/token"),
+                ..OAuthRefreshOverrides::default()
+            },
+        )
+        .await;
+
+        updater.join().unwrap();
+
+        assert!(errors.is_empty(), "unexpected refresh errors: {errors:?}");
+
+        let refreshed: Value =
+            serde_json::from_str(&fs::read_to_string(&auth_path).unwrap()).unwrap();
+        assert_eq!(
+            refreshed
+                .pointer("/anthropic/access")
+                .and_then(Value::as_str),
+            Some("already-refreshed-token")
+        );
     }
 
     #[tokio::test]
