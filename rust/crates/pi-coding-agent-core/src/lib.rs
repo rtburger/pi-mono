@@ -6,7 +6,7 @@ pub mod model_registry;
 pub mod model_resolver;
 pub mod runtime;
 
-pub use auth::{AuthSource, MemoryAuthStorage};
+pub use auth::{AuthFileSource, AuthSource, ChainedAuthSource, MemoryAuthStorage};
 pub use bootstrap::{
     BootstrapDiagnostic, BootstrapDiagnosticLevel, ExistingSessionSelection,
     SessionBootstrapOptions, SessionBootstrapResult, bootstrap_session,

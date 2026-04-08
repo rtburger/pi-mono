@@ -201,6 +201,74 @@ fn bootstrap_uses_existing_session_thinking_without_explicit_entry_fallback() {
 }
 
 #[test]
+fn bootstrap_clamps_cli_model_shorthand_xhigh_for_non_xhigh_models() {
+    let auth = Arc::new(MemoryAuthStorage::with_api_keys([("anthropic", "token")]));
+    let registry = ModelRegistry::in_memory(auth, built_in_models());
+
+    let result = bootstrap_session(
+        &registry,
+        SessionBootstrapOptions {
+            cli_model: Some("sonnet:xhigh".into()),
+            ..SessionBootstrapOptions::default()
+        },
+    );
+
+    assert_eq!(
+        result.model.as_ref().map(|model| model.id.as_str()),
+        Some("claude-sonnet-4-5")
+    );
+    assert_eq!(result.thinking_level, ThinkingLevel::High);
+}
+
+#[test]
+fn bootstrap_clamps_explicit_cli_xhigh_for_default_non_xhigh_models() {
+    let auth = Arc::new(MemoryAuthStorage::with_api_keys([("anthropic", "token")]));
+    let registry = ModelRegistry::in_memory(
+        auth,
+        vec![mock_model(
+            "anthropic",
+            "claude-sonnet-4-5",
+            "Claude Sonnet 4.5",
+            true,
+        )],
+    );
+
+    let result = bootstrap_session(
+        &registry,
+        SessionBootstrapOptions {
+            cli_thinking_level: Some(ThinkingLevel::XHigh),
+            ..SessionBootstrapOptions::default()
+        },
+    );
+
+    assert_eq!(
+        result.model.as_ref().map(|model| model.id.as_str()),
+        Some("claude-sonnet-4-5")
+    );
+    assert_eq!(result.thinking_level, ThinkingLevel::High);
+}
+
+#[test]
+fn bootstrap_preserves_cli_xhigh_for_xhigh_capable_models() {
+    let auth = Arc::new(MemoryAuthStorage::with_api_keys([("anthropic", "token")]));
+    let registry = ModelRegistry::in_memory(auth, built_in_models());
+
+    let result = bootstrap_session(
+        &registry,
+        SessionBootstrapOptions {
+            cli_model: Some("claude-opus-4-6:xhigh".into()),
+            ..SessionBootstrapOptions::default()
+        },
+    );
+
+    assert_eq!(
+        result.model.as_ref().map(|model| model.id.as_str()),
+        Some("claude-opus-4-6")
+    );
+    assert_eq!(result.thinking_level, ThinkingLevel::XHigh);
+}
+
+#[test]
 fn bootstrap_reports_cli_resolution_errors() {
     let auth = Arc::new(MemoryAuthStorage::with_api_keys([("anthropic", "token")]));
     let registry = ModelRegistry::in_memory(auth, built_in_models());

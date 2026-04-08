@@ -1,5 +1,7 @@
 use pi_ai::{StreamOptions, built_in_models};
-use pi_coding_agent_cli::{EnvAuthSource, RunCommandOptions, run_command};
+use pi_coding_agent_cli::{
+    AuthFileSource, ChainedAuthSource, EnvAuthSource, RunCommandOptions, run_command,
+};
 use std::{
     env,
     io::{self, IsTerminal as _, Read as _},
@@ -28,7 +30,10 @@ async fn main() -> ExitCode {
         args: env::args().skip(1).collect(),
         stdin_is_tty,
         stdin_content,
-        auth_source: Arc::new(EnvAuthSource::new()),
+        auth_source: Arc::new(ChainedAuthSource::new(vec![
+            Arc::new(AuthFileSource::new(get_auth_path())),
+            Arc::new(EnvAuthSource::new()),
+        ])),
         built_in_models: built_in_models().to_vec(),
         models_json_path: Some(get_models_path()),
         cwd: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -54,6 +59,10 @@ async fn main() -> ExitCode {
 
 fn get_models_path() -> PathBuf {
     get_agent_dir().join("models.json")
+}
+
+fn get_auth_path() -> PathBuf {
+    get_agent_dir().join("auth.json")
 }
 
 fn get_agent_dir() -> PathBuf {

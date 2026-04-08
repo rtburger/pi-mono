@@ -5,7 +5,7 @@ use pi_ai::{
     register_builtin_providers, register_provider, stream_response, unregister_provider,
 };
 use pi_coding_agent_cli::{EnvAuthSource, RunCommandOptions, run_command};
-use pi_coding_agent_core::MemoryAuthStorage;
+use pi_coding_agent_core::{AuthFileSource, ChainedAuthSource, MemoryAuthStorage};
 use pi_events::{
     AssistantContent, AssistantEvent, AssistantMessage, Context, Model, StopReason, Usage,
     UserContent,
@@ -444,6 +444,52 @@ async fn run_command_applies_cli_api_key_override_when_models_flag_selects_initi
     assert_eq!(
         recorded.lock().unwrap().api_key.as_deref(),
         Some("cli-token")
+    );
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
+async fn run_command_uses_auth_json_api_keys_for_initial_model_selection() {
+    let provider = unique_name("provider");
+    let model_id = unique_name("model");
+    let (api, recorded) = register_recording_provider("auth-file");
+    let temp_dir = unique_temp_dir("runner-auth-file");
+    let auth_path = temp_dir.join("auth.json");
+    fs::write(
+        &auth_path,
+        serde_json::json!({
+            provider.clone(): {
+                "type": "api_key",
+                "key": "stored-token"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let result = run_command(RunCommandOptions {
+        args: vec![String::from("-p"), String::from("hello")],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: Arc::new(ChainedAuthSource::new(vec![Arc::new(AuthFileSource::new(
+            auth_path,
+        ))])),
+        built_in_models: vec![model(&api, &provider, &model_id)],
+        models_json_path: None,
+        cwd: temp_dir,
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout, "auth-file\n");
+    assert!(result.stderr.is_empty());
+    assert_eq!(
+        recorded.lock().unwrap().api_key.as_deref(),
+        Some("stored-token")
     );
 
     unregister_provider(&api);

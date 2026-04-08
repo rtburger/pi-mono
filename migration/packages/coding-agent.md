@@ -595,3 +595,126 @@ Still deferred for the CLI/model surface:
 - interactive scoped-model cycling and session-manager integration
 - full TS help output and startup messaging around scoped models
 - broader auth parity for providers where availability still depends on unported OAuth/cloud auth flows
+
+## Milestone 13 update: CLI xhigh startup clamp parity
+
+### Files analyzed
+
+Additional TypeScript behavior reviewed for this slice:
+- `packages/coding-agent/src/main.ts` (post-startup CLI thinking clamp path)
+- `packages/coding-agent/src/core/agent-session.ts` (thinking-level clamp semantics)
+- `packages/ai/src/models.ts` (`supportsXhigh()` behavior)
+- `packages/coding-agent/test/model-resolver.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-core/src/bootstrap.rs`
+- `rust/crates/pi-coding-agent-core/tests/bootstrap.rs`
+- `rust/crates/pi-coding-agent-core/src/model_resolver.rs`
+- `rust/crates/pi-ai/src/lib.rs`
+- `rust/crates/pi-ai/tests/models.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- non-interactive startup now clamps explicit CLI-requested `xhigh` thinking to `high` when the selected startup model is reasoning-capable but not `supportsXhigh()`-capable
+- the clamp applies to both CLI forms that trigger the TypeScript post-startup clamp path:
+  - `--thinking xhigh`
+  - `--model <pattern>:xhigh`
+- xhigh is preserved for startup models that are xhigh-capable (for example Claude Opus 4.6)
+- the existing startup clamp to `off` for non-reasoning models is unchanged
+- no new warning/diagnostic text is emitted for the clamp, matching the current TypeScript startup behavior
+
+### Rust design summary
+
+Implementation stays in `pi-coding-agent-core::bootstrap_session()`:
+- track whether startup thinking came from an explicit CLI source (`--thinking` or CLI model shorthand)
+- after final model selection and default-thinking resolution, apply a narrow xhigh capability clamp using `pi_ai::supports_xhigh()`
+- keep the clamp intentionally scoped to the current CLI startup path rather than broadening it to session/default/scoped-model sources, which would change current TS behavior
+
+### Validation summary
+
+New Rust coverage added for:
+- CLI model shorthand `sonnet:xhigh` clamping to `high`
+- explicit `--thinking xhigh` clamping when startup falls back to a non-xhigh reasoning model
+- preservation of `xhigh` for xhigh-capable startup models
+
+### Remaining gaps after this milestone
+
+Still deferred for the CLI/model surface:
+- settings-manager/session-manager-backed startup parity beyond the current bootstrap subset
+- broader auth/OAuth/cloud-auth availability parity for providers whose startup availability does not come solely from env keys or current `models.json` support
+- JSON/session wrapper parity and interactive coding-agent/TUI integration
+
+## Milestone 14 update: auth.json startup auth source
+
+### Files analyzed
+
+Additional TypeScript behavior reviewed for this slice:
+- `packages/coding-agent/src/core/auth-storage.ts`
+- `packages/coding-agent/src/core/model-registry.ts`
+- `packages/ai/src/oauth.ts`
+- `packages/ai/src/utils/oauth/index.ts`
+- `packages/ai/src/utils/oauth/anthropic.ts`
+- `packages/ai/src/utils/oauth/github-copilot.ts`
+- `packages/ai/src/utils/oauth/google-gemini-cli.ts`
+- `packages/ai/src/utils/oauth/google-antigravity.ts`
+- `packages/ai/src/utils/oauth/openai-codex.ts`
+- `packages/ai/src/utils/oauth/types.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-core/src/auth.rs`
+- `rust/crates/pi-coding-agent-core/src/lib.rs`
+- `rust/crates/pi-coding-agent-cli/src/lib.rs`
+- `rust/crates/pi-coding-agent-cli/tests/runner.rs`
+- `rust/apps/pi/src/main.rs`
+- `rust/apps/pi/Cargo.toml`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- the Rust app now reads `auth.json` alongside env vars for startup model availability and request auth
+- stored `api_key` credentials in `auth.json` now participate in:
+  - `get_available()` / initial model selection
+  - request-time API key resolution
+- stored OAuth credentials in `auth.json` now count as configured auth for startup availability, matching the TS `hasAuth()` shape check
+- request-time API key derivation is now supported for the built-in OAuth providers that can be mapped directly from stored credentials without a refresh flow:
+  - `anthropic`
+  - `github-copilot`
+  - `openai-codex`
+  - `google-gemini-cli`
+  - `google-antigravity`
+- the Rust app now layers auth sources in TS order for the current non-interactive path:
+  - runtime override (`OverlayAuthSource`, already present)
+  - `auth.json`
+  - environment variables
+
+### Rust design summary
+
+New auth-source slice in `pi-coding-agent-core`:
+- `AuthFileSource`
+  - reads `auth.json` on demand
+  - supports `api_key` and `oauth` entries
+  - resolves `api_key.key` with the existing config-value resolver
+- `ChainedAuthSource`
+  - composes multiple `AuthSource` implementations with first-match `get_api_key()` semantics and any-match `has_auth()` semantics
+
+App integration:
+- `rust/apps/pi/src/main.rs` now constructs a chained auth source using:
+  - `AuthFileSource(<agentDir>/auth.json)`
+  - `EnvAuthSource`
+
+### Validation summary
+
+New Rust coverage added for:
+- `AuthFileSource` loading `api_key` credentials
+- OAuth credential translation for `google-gemini-cli`
+- chained auth-source fallback behavior
+- full non-interactive runner startup using `auth.json` API keys to select the initial model and authenticate the request
+
+### Remaining gaps after this milestone
+
+Still deferred for the CLI/model/auth surface:
+- OAuth refresh parity from `auth.json` (Rust currently only uses stored unexpired credentials; it does not refresh)
+- OAuth-driven model mutation parity such as GitHub Copilot enterprise base-url rewriting
+- settings-manager/session-manager-backed startup defaults and resource-loader integration
+- JSON/session wrapper parity and interactive coding-agent/TUI integration

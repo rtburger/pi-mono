@@ -6,6 +6,7 @@ use crate::{
     },
 };
 use pi_agent::ThinkingLevel;
+use pi_ai::supports_xhigh;
 use pi_events::Model;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +58,7 @@ pub fn bootstrap_session(
     let mut diagnostics = Vec::new();
     let mut model = None;
     let mut thinking_level = None;
+    let mut should_clamp_xhigh = options.cli_thinking_level.is_some();
 
     if options.cli_model.is_some() {
         let resolved = resolve_cli_model(
@@ -79,6 +81,9 @@ pub fn bootstrap_session(
         if let Some(resolved_model) = resolved.model {
             model = Some(resolved_model);
             if options.cli_thinking_level.is_none() {
+                if resolved.thinking_level.is_some() {
+                    should_clamp_xhigh = true;
+                }
                 thinking_level = resolved.thinking_level;
             }
         }
@@ -185,6 +190,13 @@ pub fn bootstrap_session(
         .is_none_or(|selected_model| !selected_model.reasoning)
     {
         effective_thinking_level = ThinkingLevel::Off;
+    } else if should_clamp_xhigh
+        && effective_thinking_level == ThinkingLevel::XHigh
+        && model
+            .as_ref()
+            .is_some_and(|selected_model| !supports_xhigh(selected_model))
+    {
+        effective_thinking_level = ThinkingLevel::High;
     }
 
     SessionBootstrapResult {

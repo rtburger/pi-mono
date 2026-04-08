@@ -14,5 +14,6 @@ pub use args::{
 pub use auth::{EnvAuthSource, OverlayAuthSource};
 pub use file_processor::{ProcessedFiles, process_file_arguments};
 pub use initial_message::{InitialMessageResult, build_initial_message};
+pub use pi_coding_agent_core::{AuthFileSource, ChainedAuthSource};
 pub use print_mode::{PrintModeOptions, PrintModeRunResult, run_print_mode};
 pub use runner::{RunCommandOptions, RunCommandResult, run_command};
