@@ -164,7 +164,10 @@ fn inserts_synthetic_tool_result_for_orphaned_tool_call() {
     match &items[2] {
         ResponsesInputItem::FunctionCallOutput { call_id, output } => {
             assert_eq!(call_id, "call_123");
-            assert_eq!(output, &ResponsesFunctionCallOutput::Text("No result provided".into()));
+            assert_eq!(
+                output,
+                &ResponsesFunctionCallOutput::Text("No result provided".into())
+            );
         }
         other => panic!("expected synthetic function_call_output, got {other:?}"),
     }

@@ -4,7 +4,9 @@ use pi_ai::openai_responses::{
     OpenAiResponsesConvertOptions, OpenAiResponsesParamsOptions,
     build_openai_responses_request_params, stream_openai_responses_http,
 };
-use pi_events::{AssistantContent, AssistantEvent, Context, Message, Model, StopReason, UserContent};
+use pi_events::{
+    AssistantContent, AssistantEvent, Context, Message, Model, StopReason, UserContent,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -313,7 +315,17 @@ async fn streams_incrementally_across_http_body_chunks() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(names, vec!["start", "text_start", "text_delta", "text_delta", "text_end", "done"]);
+    assert_eq!(
+        names,
+        vec![
+            "start",
+            "text_start",
+            "text_delta",
+            "text_delta",
+            "text_end",
+            "done"
+        ]
+    );
     match collected.last().unwrap().as_ref().unwrap() {
         AssistantEvent::Done { message, .. } => {
             assert_eq!(message.response_id.as_deref(), Some("resp_streamed"));

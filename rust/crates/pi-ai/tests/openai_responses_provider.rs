@@ -108,7 +108,9 @@ async fn dispatches_github_copilot_with_dynamic_headers() {
         system_prompt: Some("sys".into()),
         messages: vec![Message::User {
             content: vec![
-                UserContent::Text { text: "describe".into() },
+                UserContent::Text {
+                    text: "describe".into(),
+                },
                 UserContent::Image {
                     data: "ZmFrZQ==".into(),
                     mime_type: "image/png".into(),

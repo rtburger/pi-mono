@@ -94,13 +94,20 @@ pub enum ResponsesInputItem {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponsesContentPart {
-    InputText { text: String },
-    InputImage { detail: String, image_url: String },
+    InputText {
+        text: String,
+    },
+    InputImage {
+        detail: String,
+        image_url: String,
+    },
     OutputText {
         text: String,
         annotations: Vec<Value>,
     },
-    Refusal { refusal: String },
+    Refusal {
+        refusal: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -267,11 +274,12 @@ pub fn convert_openai_responses_messages(
                             });
                         }
                         AssistantContent::Thinking {
-                            thinking_signature,
-                            ..
+                            thinking_signature, ..
                         } => {
                             if let Some(thinking_signature) = thinking_signature {
-                                if let Ok(reasoning_item) = serde_json::from_str::<ResponsesInputItem>(thinking_signature) {
+                                if let Ok(reasoning_item) =
+                                    serde_json::from_str::<ResponsesInputItem>(thinking_signature)
+                                {
                                     items.push(reasoning_item);
                                 }
                             }
@@ -442,7 +450,8 @@ fn transform_messages_for_openai_responses(
                             } else {
                                 normalize_tool_call_id(
                                     &id,
-                                    provider != model.provider.as_str() || api != model.api.as_str(),
+                                    provider != model.provider.as_str()
+                                        || api != model.api.as_str(),
                                     target_provider_supports_openai_tool_ids,
                                 )
                             };
@@ -453,7 +462,11 @@ fn transform_messages_for_openai_responses(
                                 id: normalized_id,
                                 name,
                                 arguments,
-                                thought_signature: if is_same_model { thought_signature } else { None },
+                                thought_signature: if is_same_model {
+                                    thought_signature
+                                } else {
+                                    None
+                                },
                             });
                         }
                     }
@@ -770,7 +783,9 @@ impl OpenAiResponsesSseDecoder {
             None => line,
         };
         let line = std::str::from_utf8(line).map_err(|error| {
-            crate::AiError::Message(format!("Invalid UTF-8 in OpenAI Responses SSE stream: {error}"))
+            crate::AiError::Message(format!(
+                "Invalid UTF-8 in OpenAI Responses SSE stream: {error}"
+            ))
         })?;
 
         if line.is_empty() {
@@ -822,7 +837,8 @@ struct OpenAiResponsesStreamState {
 
 impl OpenAiResponsesStreamState {
     fn new(model: &Model) -> Self {
-        let mut output = AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone());
+        let mut output =
+            AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone());
         output.timestamp = now_ms();
         Self {
             output,
@@ -988,7 +1004,8 @@ impl OpenAiResponsesStreamState {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    if let Some(AssistantContent::Text { text, .. }) = self.output.content.get_mut(index)
+                    if let Some(AssistantContent::Text { text, .. }) =
+                        self.output.content.get_mut(index)
                     {
                         text.push_str(&delta);
                     }
@@ -1066,14 +1083,19 @@ impl OpenAiResponsesStreamState {
                             let content = message_item_text(&item)
                                 .or_else(|| text_content(&self.output, index))
                                 .unwrap_or_default();
-                            if let Some(AssistantContent::Text { text, text_signature }) =
-                                self.output.content.get_mut(index)
+                            if let Some(AssistantContent::Text {
+                                text,
+                                text_signature,
+                            }) = self.output.content.get_mut(index)
                             {
                                 *text = content.clone();
-                                *text_signature = item
-                                    .get("id")
-                                    .and_then(Value::as_str)
-                                    .map(|id| encode_text_signature_v1(id, item.get("phase").and_then(Value::as_str)));
+                                *text_signature =
+                                    item.get("id").and_then(Value::as_str).map(|id| {
+                                        encode_text_signature_v1(
+                                            id,
+                                            item.get("phase").and_then(Value::as_str),
+                                        )
+                                    });
                             }
                             emitted.push(AssistantEvent::TextEnd {
                                 content_index: index,
@@ -1576,7 +1598,10 @@ fn thinking_content(output: &AssistantMessage, index: usize) -> Option<String> {
 }
 
 fn is_terminal_event(event: &AssistantEvent) -> bool {
-    matches!(event, AssistantEvent::Done { .. } | AssistantEvent::Error { .. })
+    matches!(
+        event,
+        AssistantEvent::Done { .. } | AssistantEvent::Error { .. }
+    )
 }
 
 #[derive(Default)]
@@ -1653,8 +1678,14 @@ fn build_runtime_request_headers(
 
 fn build_copilot_dynamic_headers(messages: &[Message]) -> BTreeMap<String, String> {
     let mut headers = BTreeMap::from([
-        ("X-Initiator".to_string(), infer_copilot_initiator(messages).to_string()),
-        ("Openai-Intent".to_string(), "conversation-edits".to_string()),
+        (
+            "X-Initiator".to_string(),
+            infer_copilot_initiator(messages).to_string(),
+        ),
+        (
+            "Openai-Intent".to_string(),
+            "conversation-edits".to_string(),
+        ),
     ]);
 
     if has_copilot_vision_input(messages) {
