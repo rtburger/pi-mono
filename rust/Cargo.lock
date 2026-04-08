@@ -1283,6 +1283,7 @@ version = "0.1.0"
 dependencies = [
  "pi-ai",
  "pi-coding-agent-cli",
+ "pi-coding-agent-core",
  "tokio",
 ]
 
@@ -1336,11 +1337,14 @@ dependencies = [
 name = "pi-coding-agent-core"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
+ "futures",
  "globset",
  "pi-agent",
  "pi-ai",
  "pi-coding-agent-tools",
  "pi-events",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

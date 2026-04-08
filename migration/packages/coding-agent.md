@@ -718,3 +718,147 @@ Still deferred for the CLI/model/auth surface:
 - OAuth-driven model mutation parity such as GitHub Copilot enterprise base-url rewriting
 - settings-manager/session-manager-backed startup defaults and resource-loader integration
 - JSON/session wrapper parity and interactive coding-agent/TUI integration
+
+## Milestone 15 update: startup OAuth refresh + Copilot model mutation parity
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/ai/src/utils/oauth/anthropic.ts`
+- `packages/ai/src/utils/oauth/google-gemini-cli.ts`
+- `packages/ai/src/utils/oauth/google-antigravity.ts`
+- `packages/ai/src/utils/oauth/openai-codex.ts`
+- `packages/ai/test/anthropic-oauth.test.ts`
+- `packages/ai/test/openai-codex-stream.test.ts`
+- `packages/ai/test/github-copilot-oauth.test.ts`
+- `packages/ai/src/providers/openai-responses.ts`
+- `packages/ai/src/providers/github-copilot-headers.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-core/src/auth.rs`
+- `rust/crates/pi-coding-agent-core/src/model_registry.rs`
+- `rust/crates/pi-coding-agent-core/tests/auth.rs`
+- `rust/crates/pi-coding-agent-core/tests/model_registry.rs`
+- `rust/apps/pi/src/main.rs`
+
+### Behavior summary
+
+New TS-compatible startup auth/model behaviors now covered in Rust:
+- `rust/apps/pi` now refreshes expired built-in OAuth credentials from `auth.json` before constructing the runtime auth chain
+- startup refresh now covers the built-in providers that do not require session-manager wiring:
+  - `anthropic`
+  - `github-copilot`
+  - `google-gemini-cli`
+  - `google-antigravity`
+  - `openai-codex`
+- refreshed `auth.json` entries now preserve the provider-specific fields that TS refresh returns:
+  - `enterpriseUrl` for Copilot
+  - `projectId` for Google providers
+  - `accountId` for OpenAI Codex
+- startup refresh remains non-fatal; refresh failures do not crash the Rust app, matching the TS startup goal of letting the user continue and re-authenticate later
+- GitHub Copilot model mutation parity is now in place at registry load time:
+  - if the stored Copilot access token contains `proxy-ep=...`, Rust rewrites all `github-copilot` model `base_url`s to the derived API host
+  - otherwise Rust falls back to `enterpriseUrl` -> `https://copilot-api.<domain>`
+  - the mutation applies after `models.json` merge/override handling, so it affects both built-in and custom Copilot models
+
+### Rust design summary
+
+Expanded auth slice in `pi-coding-agent-core::auth`:
+- `refresh_auth_file_oauth()` remains the public startup entry point
+- internal refresh dispatch now routes per provider to small explicit refresh helpers rather than a single Copilot-only path
+- provider-specific refresh helpers now mirror the TS request shapes:
+  - Anthropic refresh uses JSON POST with no `scope`
+  - Google refresh uses form POST with provider-specific client id/secret and carries forward `projectId`
+  - OpenAI Codex refresh uses form POST and extracts `accountId` from the refreshed access token JWT payload
+  - GitHub Copilot refresh keeps the existing token endpoint + enterprise-domain handling
+- `AuthSource::model_base_url()` continues to carry provider-specific model mutation without pulling session-manager or dynamic OAuth provider registration into Rust yet
+
+### Validation summary
+
+New Rust coverage added for:
+- Anthropic startup refresh request shape and `auth.json` rewrite
+- GitHub Copilot startup refresh request shape and `auth.json` rewrite
+- Google Gemini CLI startup refresh request shape and `auth.json` rewrite
+- Google Antigravity startup refresh request shape and `auth.json` rewrite
+- OpenAI Codex startup refresh request shape, JWT `accountId` extraction, and `auth.json` rewrite
+- existing Copilot model base-url mutation coverage remains in `tests/auth.rs` and `tests/model_registry.rs`
+
+Validation run results:
+- `cd rust && cargo test -p pi-coding-agent-core` passed
+- `cd rust && cargo test` passed
+- `npm run check` still fails in this environment before repo checks run because `biome` is not installed (`sh: biome: command not found`)
+
+### Remaining gaps after this milestone
+
+Still deferred for the CLI/model/auth surface:
+- auth-file locking/merge semantics for startup refresh (current Rust startup refresh is single-process best-effort only)
+- surfacing startup refresh errors to the user instead of silently swallowing them in `rust/apps/pi`
+- full TS runtime OAuth refresh-on-demand parity in the Rust auth source path (today Rust refreshes at app startup, not per request)
+- settings-manager/session-manager-backed startup defaults and interactive/TUI integration
+
+## Milestone 16 update: request-time OAuth refresh parity for non-interactive runtime
+
+### Files analyzed
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-core/src/auth.rs`
+- `rust/crates/pi-coding-agent-core/src/model_registry.rs`
+- `rust/crates/pi-coding-agent-core/src/runtime.rs`
+- `rust/crates/pi-coding-agent-core/tests/runtime.rs`
+- `rust/crates/pi-coding-agent-core/tests/auth.rs`
+- `rust/crates/pi-coding-agent-cli/src/auth.rs`
+
+Relevant TypeScript behavior already grounding this slice:
+- `packages/coding-agent/src/core/auth-storage.ts`
+- `packages/coding-agent/src/core/model-registry.ts`
+
+### Behavior summary
+
+New TS-compatible request-time auth behavior now covered in Rust:
+- runtime request auth resolution is no longer limited to the sync stored-value path
+- expired OAuth credentials can now refresh on demand at request time, not just during app startup
+- the request-time refresh path preserves auth-source precedence:
+  - runtime override
+  - `auth.json`
+  - environment variables
+- concurrent request-time refreshes now serialize through a simple `auth.json.lock` file, so a second caller waits and re-reads updated credentials instead of blindly refreshing again
+- if another process refreshed the credential first, Rust now re-reads the locked file and uses the fresh token
+- `RegistryBackedStreamer` now uses async request auth resolution before dispatching to `pi-ai`, so non-interactive runs can recover from expired OAuth state without restarting the app
+
+### Rust design summary
+
+Expanded auth/runtime slices:
+- `pi-coding-agent-core::AuthSource`
+  - new async-style `get_api_key_for_request()` hook with a sync default fallback
+- `AuthFileSource`
+  - new request-time path that refreshes expired OAuth credentials on demand
+  - targeted refresh updates only the requested provider entry using the existing provider-specific refresh helpers
+  - simple lock-file coordination via `auth.json.lock`
+- `ChainedAuthSource`
+  - now awaits each source's request-time API-key resolution in order
+- `OverlayAuthSource`
+  - now preserves CLI runtime override precedence for async request-time resolution too
+- `ModelRegistry`
+  - new `get_api_key_and_headers_async()` for runtime request auth resolution
+  - sync `get_api_key_and_headers()` remains for the existing startup/config-only callers
+- `RegistryBackedStreamer`
+  - now resolves request auth asynchronously inside the returned event stream before calling `pi_ai::stream_response()`
+
+### Validation summary
+
+New Rust coverage added for:
+- runtime proof that async request auth resolution is actually used by the coding-agent streamer path
+- existing `auth.rs` unit coverage continues to validate provider-specific refresh request shapes and `auth.json` rewrites for all built-in OAuth providers
+
+Validation run results:
+- `cd rust && cargo test -p pi-coding-agent-core` passed
+- `cd rust && cargo test` passed
+- `npm run check` still fails in this environment before repo checks run because `biome` is not installed (`sh: biome: command not found`)
+
+### Remaining gaps after this milestone
+
+Still deferred for the CLI/model/auth surface:
+- lock-file semantics are intentionally minimal and still trail TS `proper-lockfile` behavior (no stale-lock recovery or compromised-lock reporting)
+- request-time auth refresh errors are still returned as missing-auth/runtime failures rather than being accumulated in an `AuthStorage`-style error buffer
+- startup refresh in `rust/apps/pi` is still best-effort and silent
+- settings-manager/session-manager-backed startup defaults and interactive/TUI integration

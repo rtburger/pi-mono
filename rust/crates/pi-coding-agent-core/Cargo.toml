@@ -5,11 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-stream.workspace = true
+futures.workspace = true
 globset = "0.4"
 pi-agent = { path = "../pi-agent" }
 pi-ai = { path = "../pi-ai" }
 pi-coding-agent-tools = { path = "../pi-coding-agent-tools" }
 pi-events = { path = "../pi-events" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

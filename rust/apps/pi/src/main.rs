@@ -2,6 +2,7 @@ use pi_ai::{StreamOptions, built_in_models};
 use pi_coding_agent_cli::{
     AuthFileSource, ChainedAuthSource, EnvAuthSource, RunCommandOptions, run_command,
 };
+use pi_coding_agent_core::refresh_auth_file_oauth;
 use std::{
     env,
     io::{self, IsTerminal as _, Read as _},
@@ -26,12 +27,15 @@ async fn main() -> ExitCode {
         }
     };
 
+    let auth_path = get_auth_path();
+    refresh_auth_file_oauth(&auth_path).await;
+
     let result = run_command(RunCommandOptions {
         args: env::args().skip(1).collect(),
         stdin_is_tty,
         stdin_content,
         auth_source: Arc::new(ChainedAuthSource::new(vec![
-            Arc::new(AuthFileSource::new(get_auth_path())),
+            Arc::new(AuthFileSource::new(auth_path)),
             Arc::new(EnvAuthSource::new()),
         ])),
         built_in_models: built_in_models().to_vec(),

@@ -2,6 +2,8 @@ use crate::{
     AuthSource, BootstrapDiagnostic, ModelRegistry, SessionBootstrapOptions, bootstrap_session,
     convert_to_llm,
 };
+use async_stream::stream;
+use futures::StreamExt;
 use pi_agent::{Agent, AgentState, AgentTool, AssistantStreamer};
 use pi_ai::{AiError, AssistantEventStream, StreamOptions, stream_response};
 use pi_coding_agent_tools::create_coding_tools;
@@ -135,20 +137,36 @@ impl AssistantStreamer for RegistryBackedStreamer {
         &self,
         model: Model,
         context: Context,
-        mut options: StreamOptions,
+        options: StreamOptions,
     ) -> Result<AssistantEventStream, AiError> {
-        let auth = self
-            .model_registry
-            .get_api_key_and_headers(&model)
-            .map_err(AiError::Message)?;
+        let model_registry = self.model_registry.clone();
+        Ok(Box::pin(stream! {
+            let auth = match model_registry.get_api_key_and_headers_async(&model).await {
+                Ok(auth) => auth,
+                Err(error) => {
+                    yield Err(AiError::Message(error));
+                    return;
+                }
+            };
 
-        options.api_key = auth.api_key;
-        if auth.headers.is_some() || !options.headers.is_empty() {
-            let mut merged_headers = auth.headers.unwrap_or_default();
-            merged_headers.extend(options.headers);
-            options.headers = merged_headers;
-        }
+            let mut stream_options = options;
+            stream_options.api_key = auth.api_key;
+            if auth.headers.is_some() || !stream_options.headers.is_empty() {
+                let mut merged_headers = auth.headers.unwrap_or_default();
+                merged_headers.extend(stream_options.headers);
+                stream_options.headers = merged_headers;
+            }
 
-        stream_response(model, context, options)
+            match stream_response(model, context, stream_options) {
+                Ok(mut inner) => {
+                    while let Some(event) = inner.next().await {
+                        yield event;
+                    }
+                }
+                Err(error) => {
+                    yield Err(error);
+                }
+            }
+        }))
     }
 }

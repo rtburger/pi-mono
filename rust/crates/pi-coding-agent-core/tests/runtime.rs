@@ -1,19 +1,24 @@
+use async_stream::stream;
 use pi_agent::ThinkingLevel;
 use pi_ai::{
-    FauxModelDefinition, FauxResponse, RegisterFauxProviderOptions, StreamOptions,
-    register_faux_provider,
+    AiProvider, AssistantEventStream, FauxModelDefinition, FauxResponse,
+    RegisterFauxProviderOptions, StreamOptions, register_faux_provider, register_provider,
+    unregister_provider,
 };
 use pi_coding_agent_core::{
-    CodingAgentCoreError, CodingAgentCoreOptions, MemoryAuthStorage, SessionBootstrapOptions,
-    create_coding_agent_core,
+    AuthApiKeyFuture, AuthSource, CodingAgentCoreError, CodingAgentCoreOptions, MemoryAuthStorage,
+    SessionBootstrapOptions, create_coding_agent_core,
 };
-use pi_events::{AssistantContent, Message, StopReason, UserContent};
+use pi_events::{
+    AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason,
+    UserContent,
+};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -38,6 +43,69 @@ fn assistant_text(message: &Message) -> Option<&str> {
             _ => None,
         }),
         _ => None,
+    }
+}
+
+fn unique_name(prefix: &str) -> String {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{prefix}-{unique}")
+}
+
+#[derive(Clone)]
+struct AsyncOnlyAuthSource {
+    provider: String,
+    api_key: String,
+}
+
+impl AuthSource for AsyncOnlyAuthSource {
+    fn has_auth(&self, provider: &str) -> bool {
+        provider == self.provider
+    }
+
+    fn get_api_key(&self, _provider: &str) -> Option<String> {
+        None
+    }
+
+    fn get_api_key_for_request<'a>(&'a self, provider: &'a str) -> AuthApiKeyFuture<'a> {
+        let api_key = (provider == self.provider).then(|| self.api_key.clone());
+        Box::pin(async move { api_key })
+    }
+}
+
+#[derive(Clone)]
+struct RecordingProvider {
+    recorded_api_key: Arc<Mutex<Option<String>>>,
+}
+
+impl AiProvider for RecordingProvider {
+    fn stream(
+        &self,
+        model: Model,
+        _context: Context,
+        options: StreamOptions,
+    ) -> AssistantEventStream {
+        let recorded_api_key = self.recorded_api_key.clone();
+        Box::pin(stream! {
+            *recorded_api_key.lock().unwrap() = options.api_key.clone();
+
+            let partial = AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone());
+            let mut message = partial.clone();
+            message.content.push(AssistantContent::Text {
+                text: "async auth ok".into(),
+                text_signature: None,
+            });
+            message.stop_reason = StopReason::Stop;
+            message.timestamp = 1;
+
+            yield Ok(AssistantEvent::Start { partial });
+            yield Ok(AssistantEvent::Done {
+                reason: StopReason::Stop,
+                message,
+            });
+        })
     }
 }
 
@@ -367,6 +435,62 @@ async fn runtime_executes_edit_tool_calls_with_legacy_old_text_arguments() {
     );
 
     faux.unregister();
+}
+
+#[tokio::test]
+async fn runtime_uses_async_request_auth_resolution() {
+    let api = unique_name("runtime-async-auth-api");
+    let provider = unique_name("runtime-async-auth-provider");
+    let model_id = unique_name("runtime-async-auth-model");
+    let recorded_api_key = Arc::new(Mutex::new(None));
+    register_provider(
+        api.clone(),
+        Arc::new(RecordingProvider {
+            recorded_api_key: recorded_api_key.clone(),
+        }),
+    );
+
+    let created = create_coding_agent_core(CodingAgentCoreOptions {
+        auth_source: Arc::new(AsyncOnlyAuthSource {
+            provider: provider.clone(),
+            api_key: "refreshed-token".into(),
+        }),
+        built_in_models: vec![Model {
+            id: model_id.clone(),
+            name: "Async Auth Model".into(),
+            api: api.clone(),
+            provider: provider.clone(),
+            base_url: "https://example.com/v1".into(),
+            reasoning: false,
+            input: vec!["text".into()],
+            context_window: 128_000,
+            max_tokens: 16_384,
+        }],
+        models_json_path: None,
+        cwd: None,
+        tools: None,
+        system_prompt: String::new(),
+        bootstrap: SessionBootstrapOptions::default(),
+        stream_options: StreamOptions::default(),
+    })
+    .unwrap();
+
+    created.core.prompt_text("Hi").await.unwrap();
+
+    assert_eq!(
+        recorded_api_key.lock().unwrap().as_deref(),
+        Some("refreshed-token")
+    );
+    let state = created.core.state();
+    let last = state
+        .messages
+        .last()
+        .unwrap()
+        .as_standard_message()
+        .unwrap();
+    assert_eq!(assistant_text(last), Some("async auth ok"));
+
+    unregister_provider(&api);
 }
 
 #[test]

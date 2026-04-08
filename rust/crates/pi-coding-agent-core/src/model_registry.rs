@@ -69,7 +69,8 @@ impl ModelRegistry {
         }
 
         let built_in_models = self.load_built_in_models(&custom.overrides, &custom.model_overrides);
-        self.models = merge_custom_models(built_in_models, custom.models);
+        let combined = merge_custom_models(built_in_models, custom.models);
+        self.models = self.apply_auth_model_mutations(combined);
     }
 
     pub fn get_error(&self) -> Option<&str> {
@@ -133,6 +134,40 @@ impl ModelRegistry {
                 .flatten()
         });
 
+        self.finalize_request_auth(model, provider_config, api_key)
+    }
+
+    pub async fn get_api_key_and_headers_async(
+        &self,
+        model: &Model,
+    ) -> Result<RequestAuth, String> {
+        let provider_config = self.provider_request_configs.get(&model.provider);
+        let api_key = match self
+            .auth_source
+            .get_api_key_for_request(&model.provider)
+            .await
+        {
+            Some(api_key) => Some(api_key),
+            None => provider_config
+                .and_then(|config| config.api_key.as_deref())
+                .map(|value| {
+                    resolve_config_value_or_err(
+                        value,
+                        &format!("API key for provider \"{}\"", model.provider),
+                    )
+                })
+                .transpose()?,
+        };
+
+        self.finalize_request_auth(model, provider_config, api_key)
+    }
+
+    fn finalize_request_auth(
+        &self,
+        model: &Model,
+        provider_config: Option<&ProviderRequestConfig>,
+        api_key: Option<String>,
+    ) -> Result<RequestAuth, String> {
         if provider_config
             .and_then(|config| config.api_key.as_deref())
             .is_some()
@@ -202,6 +237,23 @@ impl ModelRegistry {
                 }
 
                 next
+            })
+            .collect()
+    }
+
+    fn apply_auth_model_mutations(&self, models: Vec<Model>) -> Vec<Model> {
+        let mut provider_base_urls = BTreeMap::<String, Option<String>>::new();
+
+        models
+            .into_iter()
+            .map(|mut model| {
+                let base_url = provider_base_urls
+                    .entry(model.provider.clone())
+                    .or_insert_with(|| self.auth_source.model_base_url(&model.provider));
+                if let Some(base_url) = base_url.as_ref() {
+                    model.base_url = base_url.clone();
+                }
+                model
             })
             .collect()
     }

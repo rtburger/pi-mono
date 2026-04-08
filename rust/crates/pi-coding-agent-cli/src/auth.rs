@@ -40,6 +40,19 @@ impl AuthSource for OverlayAuthSource {
             .cloned()
             .or_else(|| self.base.get_api_key(provider))
     }
+
+    fn get_api_key_for_request<'a>(
+        &'a self,
+        provider: &'a str,
+    ) -> pi_coding_agent_core::AuthApiKeyFuture<'a> {
+        Box::pin(async move {
+            let runtime_key = self.runtime_api_keys.lock().unwrap().get(provider).cloned();
+            match runtime_key {
+                Some(runtime_key) => Some(runtime_key),
+                None => self.base.get_api_key_for_request(provider).await,
+            }
+        })
+    }
 }
 
 #[derive(Debug, Default, Clone)]
