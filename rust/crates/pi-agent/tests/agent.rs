@@ -1,7 +1,8 @@
 use async_stream::try_stream;
 use futures::stream;
 use pi_agent::{
-    Agent, AgentError, AgentEvent, AgentState, AgentTool, AgentToolError, AgentToolResult,
+    Agent, AgentError, AgentEvent, AgentMessage, AgentState, AgentTool, AgentToolError,
+    AgentToolResult, CustomAgentMessage, QueueMode,
 };
 use pi_ai::{AiError, AssistantEventStream, StreamOptions};
 use pi_events::{
@@ -41,6 +42,55 @@ fn user_message(text: &str, timestamp: u64) -> Message {
         }],
         timestamp,
     }
+}
+
+fn message_has_user_text(message: &AgentMessage, expected: &str) -> bool {
+    match message {
+        AgentMessage::Standard(Message::User { content, .. }) => {
+            content.iter().any(|block| match block {
+                UserContent::Text { text } => text == expected,
+                _ => false,
+            })
+        }
+        _ => false,
+    }
+}
+
+fn is_standard_user_message(message: &AgentMessage) -> bool {
+    matches!(message, AgentMessage::Standard(Message::User { .. }))
+}
+
+fn is_standard_assistant_message(message: &AgentMessage) -> bool {
+    matches!(message, AgentMessage::Standard(Message::Assistant { .. }))
+}
+
+fn is_standard_tool_result_message(message: &AgentMessage) -> bool {
+    matches!(message, AgentMessage::Standard(Message::ToolResult { .. }))
+}
+
+fn convert_custom_text_messages_to_llm(messages: Vec<AgentMessage>) -> Vec<Message> {
+    messages
+        .into_iter()
+        .filter_map(|message| match message {
+            AgentMessage::Standard(message) => Some(message),
+            AgentMessage::Custom(CustomAgentMessage {
+                role,
+                payload,
+                timestamp,
+            }) if role == "custom" => {
+                payload
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(|text| Message::User {
+                        content: vec![UserContent::Text {
+                            text: text.to_string(),
+                        }],
+                        timestamp,
+                    })
+            }
+            AgentMessage::Custom(_) => None,
+        })
+        .collect()
 }
 
 fn assistant_message(text: &str, stop_reason: StopReason, timestamp: u64) -> AssistantMessage {
@@ -221,11 +271,11 @@ async fn abort_marks_signal_and_records_aborted_message() {
     assert!(!state.is_streaming);
     assert_eq!(state.messages.len(), 2);
     match state.messages.last().unwrap() {
-        Message::Assistant {
+        AgentMessage::Standard(Message::Assistant {
             stop_reason,
             error_message,
             ..
-        } => {
+        }) => {
             assert_eq!(stop_reason, &StopReason::Aborted);
             assert_eq!(error_message.as_deref(), Some("Request was aborted"));
         }
@@ -252,15 +302,360 @@ async fn continue_uses_existing_state_and_updates_transcript() {
     );
 
     let mut initial_state = AgentState::new(model());
-    initial_state.messages.push(user_message("resume", 10));
+    initial_state
+        .messages
+        .push(user_message("resume", 10).into());
     let agent = Agent::with_parts(initial_state, streamer, StreamOptions::default());
 
     agent.r#continue().await.unwrap();
 
     let state = agent.state();
     assert_eq!(state.messages.len(), 2);
-    assert!(matches!(state.messages[0], Message::User { .. }));
-    assert!(matches!(state.messages[1], Message::Assistant { .. }));
+    assert!(is_standard_user_message(&state.messages[0]));
+    assert!(is_standard_assistant_message(&state.messages[1]));
+}
+
+#[tokio::test]
+async fn queue_helpers_do_not_touch_transcript_until_drained() {
+    let agent = Agent::new(AgentState::new(model()));
+
+    assert_eq!(agent.steering_mode(), QueueMode::OneAtATime);
+    assert_eq!(agent.follow_up_mode(), QueueMode::OneAtATime);
+
+    agent.set_steering_mode(QueueMode::All);
+    agent.set_follow_up_mode(QueueMode::All);
+    assert_eq!(agent.steering_mode(), QueueMode::All);
+    assert_eq!(agent.follow_up_mode(), QueueMode::All);
+
+    agent.steer(user_message("steering", 1));
+    agent.follow_up(user_message("follow up", 2));
+
+    assert!(agent.has_queued_messages());
+    assert!(agent.state().messages.is_empty());
+
+    agent.clear_steering_queue();
+    assert!(agent.has_queued_messages());
+
+    agent.clear_follow_up_queue();
+    assert!(!agent.has_queued_messages());
+}
+
+#[tokio::test]
+async fn continue_drains_all_steering_messages_when_mode_is_all() {
+    let response_count = Arc::new(Mutex::new(0usize));
+    let streamer = Arc::new({
+        let response_count = response_count.clone();
+        move |_model: Model,
+              _context: Context,
+              _options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            let response_count = response_count.clone();
+            Ok(Box::pin(try_stream! {
+                let next_count = {
+                    let mut response_count = response_count.lock().unwrap();
+                    *response_count += 1;
+                    *response_count
+                };
+                let message = assistant_message(
+                    &format!("processed {next_count}"),
+                    StopReason::Stop,
+                    20 + next_count as u64,
+                );
+                yield AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                };
+            }))
+        }
+    });
+
+    let mut initial_state = AgentState::new(model());
+    initial_state
+        .messages
+        .push(user_message("initial", 10).into());
+    initial_state.messages.push(
+        Message::Assistant {
+            content: vec![AssistantContent::Text {
+                text: "initial response".into(),
+                text_signature: None,
+            }],
+            api: "faux:test".into(),
+            provider: "faux".into(),
+            model: "mock".into(),
+            response_id: None,
+            usage: usage(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 11,
+        }
+        .into(),
+    );
+    let agent = Agent::with_parts(initial_state, streamer, StreamOptions::default());
+
+    agent.set_steering_mode(QueueMode::All);
+    agent.steer(user_message("steering 1", 12));
+    agent.steer(user_message("steering 2", 13));
+
+    agent.r#continue().await.unwrap();
+
+    let state = agent.state();
+    assert_eq!(*response_count.lock().unwrap(), 1);
+    assert_eq!(state.messages.len(), 5);
+    assert!(message_has_user_text(&state.messages[2], "steering 1"));
+    assert!(message_has_user_text(&state.messages[3], "steering 2"));
+    assert!(is_standard_assistant_message(&state.messages[4]));
+}
+
+#[tokio::test]
+async fn continue_uses_queued_follow_up_messages_from_assistant_tail() {
+    let streamer = Arc::new(
+        |_model: Model,
+         _context: Context,
+         _options: StreamOptions|
+         -> Result<AssistantEventStream, AiError> {
+            let message = assistant_message("processed", StopReason::Stop, 20);
+            Ok(Box::pin(try_stream! {
+                yield AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                };
+            }))
+        },
+    );
+
+    let mut initial_state = AgentState::new(model());
+    initial_state
+        .messages
+        .push(user_message("initial", 10).into());
+    initial_state.messages.push(
+        Message::Assistant {
+            content: vec![AssistantContent::Text {
+                text: "initial response".into(),
+                text_signature: None,
+            }],
+            api: "faux:test".into(),
+            provider: "faux".into(),
+            model: "mock".into(),
+            response_id: None,
+            usage: usage(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 11,
+        }
+        .into(),
+    );
+    let agent = Agent::with_parts(initial_state, streamer, StreamOptions::default());
+
+    agent.follow_up(user_message("queued follow up", 12));
+
+    agent.r#continue().await.unwrap();
+
+    let state = agent.state();
+    assert_eq!(state.messages.len(), 4);
+    assert!(message_has_user_text(
+        &state.messages[2],
+        "queued follow up"
+    ));
+    assert!(is_standard_assistant_message(&state.messages[3]));
+}
+
+#[tokio::test]
+async fn continue_keeps_steering_queue_one_at_a_time_from_assistant_tail() {
+    let response_count = Arc::new(Mutex::new(0usize));
+    let streamer = Arc::new({
+        let response_count = response_count.clone();
+        move |_model: Model,
+              _context: Context,
+              _options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            let response_count = response_count.clone();
+            Ok(Box::pin(try_stream! {
+                let next_count = {
+                    let mut response_count = response_count.lock().unwrap();
+                    *response_count += 1;
+                    *response_count
+                };
+                let message = assistant_message(
+                    &format!("processed {next_count}"),
+                    StopReason::Stop,
+                    20 + next_count as u64,
+                );
+                yield AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                };
+            }))
+        }
+    });
+
+    let mut initial_state = AgentState::new(model());
+    initial_state
+        .messages
+        .push(user_message("initial", 10).into());
+    initial_state.messages.push(
+        Message::Assistant {
+            content: vec![AssistantContent::Text {
+                text: "initial response".into(),
+                text_signature: None,
+            }],
+            api: "faux:test".into(),
+            provider: "faux".into(),
+            model: "mock".into(),
+            response_id: None,
+            usage: usage(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 11,
+        }
+        .into(),
+    );
+    let agent = Agent::with_parts(initial_state, streamer, StreamOptions::default());
+
+    agent.steer(user_message("steering 1", 12));
+    agent.steer(user_message("steering 2", 13));
+
+    agent.r#continue().await.unwrap();
+
+    let state = agent.state();
+    assert_eq!(*response_count.lock().unwrap(), 2);
+    assert_eq!(state.messages.len(), 6);
+    assert!(message_has_user_text(&state.messages[2], "steering 1"));
+    assert!(is_standard_assistant_message(&state.messages[3]));
+    assert!(message_has_user_text(&state.messages[4], "steering 2"));
+    assert!(is_standard_assistant_message(&state.messages[5]));
+}
+
+#[tokio::test]
+async fn prompt_drains_all_follow_up_messages_when_mode_is_all() {
+    let response_count = Arc::new(Mutex::new(0usize));
+    let saw_follow_ups_in_context = Arc::new(Mutex::new(false));
+    let streamer = Arc::new({
+        let response_count = response_count.clone();
+        let saw_follow_ups_in_context = saw_follow_ups_in_context.clone();
+        move |_model: Model,
+              context: Context,
+              _options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            let response_count = response_count.clone();
+            let saw_follow_ups_in_context = saw_follow_ups_in_context.clone();
+            Ok(Box::pin(try_stream! {
+                let next_count = {
+                    let mut response_count = response_count.lock().unwrap();
+                    *response_count += 1;
+                    *response_count
+                };
+                if next_count == 2 {
+                    *saw_follow_ups_in_context.lock().unwrap() = context
+                        .messages
+                        .iter()
+                        .any(|message| matches!(message, Message::User { content, .. } if content.iter().any(|block| matches!(block, UserContent::Text { text } if text == "follow up 1"))))
+                        && context
+                            .messages
+                            .iter()
+                            .any(|message| matches!(message, Message::User { content, .. } if content.iter().any(|block| matches!(block, UserContent::Text { text } if text == "follow up 2"))));
+                }
+                let message = assistant_message(
+                    &format!("processed {next_count}"),
+                    StopReason::Stop,
+                    20 + next_count as u64,
+                );
+                yield AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                };
+            }))
+        }
+    });
+
+    let agent = Agent::with_parts(AgentState::new(model()), streamer, StreamOptions::default());
+    agent.set_follow_up_mode(QueueMode::All);
+    agent.follow_up(user_message("follow up 1", 11));
+    agent.follow_up(user_message("follow up 2", 12));
+
+    agent.prompt_text("start").await.unwrap();
+
+    let state = agent.state();
+    assert_eq!(*response_count.lock().unwrap(), 2);
+    assert!(*saw_follow_ups_in_context.lock().unwrap());
+    assert_eq!(state.messages.len(), 5);
+    assert!(is_standard_user_message(&state.messages[0]));
+    assert!(is_standard_assistant_message(&state.messages[1]));
+    assert!(message_has_user_text(&state.messages[2], "follow up 1"));
+    assert!(message_has_user_text(&state.messages[3], "follow up 2"));
+    assert!(is_standard_assistant_message(&state.messages[4]));
+}
+
+#[tokio::test]
+async fn wrapper_forwards_transform_context_and_convert_to_llm_for_custom_messages() {
+    let seen_llm_messages = Arc::new(Mutex::new(Vec::new()));
+    let streamer = Arc::new({
+        let seen_llm_messages = seen_llm_messages.clone();
+        move |_model: Model,
+              context: Context,
+              _options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            *seen_llm_messages.lock().unwrap() = context.messages.clone();
+            Ok(Box::pin(try_stream! {
+                yield AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message: assistant_message("done", StopReason::Stop, 20),
+                };
+            }))
+        }
+    });
+
+    let mut initial_state = AgentState::new(model());
+    initial_state
+        .messages
+        .push(user_message("old user", 1).into());
+    initial_state.messages.push(
+        Message::Assistant {
+            content: vec![AssistantContent::Text {
+                text: "old assistant".into(),
+                text_signature: None,
+            }],
+            api: "faux:test".into(),
+            provider: "faux".into(),
+            model: "mock".into(),
+            response_id: None,
+            usage: usage(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 2,
+        }
+        .into(),
+    );
+    let agent = Agent::with_parts(initial_state, streamer, StreamOptions::default());
+    agent.set_transform_context(|messages, _signal| async move {
+        messages.into_iter().skip(2).collect()
+    });
+    agent.set_convert_to_llm(
+        |messages| async move { convert_custom_text_messages_to_llm(messages) },
+    );
+
+    agent
+        .prompt(CustomAgentMessage::new(
+            "custom",
+            json!({ "text": "from wrapper custom" }),
+            10,
+        ))
+        .await
+        .unwrap();
+
+    let llm_messages = seen_llm_messages.lock().unwrap().clone();
+    assert_eq!(llm_messages.len(), 1);
+    assert!(matches!(
+        &llm_messages[0],
+        Message::User { content, .. }
+            if content.iter().any(|block| matches!(block, UserContent::Text { text } if text == "from wrapper custom"))
+    ));
+
+    let state = agent.state();
+    assert_eq!(state.messages.len(), 4);
+    assert!(
+        matches!(&state.messages[2], AgentMessage::Custom(CustomAgentMessage { role, .. }) if role == "custom")
+    );
+    assert!(is_standard_assistant_message(&state.messages[3]));
 }
 
 #[tokio::test]
@@ -282,11 +677,11 @@ async fn prompt_materializes_internal_stream_errors_as_assistant_failure_message
     let state = agent.state();
     assert_eq!(state.messages.len(), 2);
     match state.messages.last().unwrap() {
-        Message::Assistant {
+        AgentMessage::Standard(Message::Assistant {
             stop_reason,
             error_message,
             ..
-        } => {
+        }) => {
             assert_eq!(stop_reason, &StopReason::Error);
             assert_eq!(error_message.as_deref(), Some("boom"));
         }
@@ -400,10 +795,106 @@ async fn wrapper_runs_tool_flow_and_tracks_pending_tool_calls() {
     );
     assert!(state.pending_tool_calls.is_empty());
     assert_eq!(state.messages.len(), 4);
-    assert!(matches!(state.messages[0], Message::User { .. }));
-    assert!(matches!(state.messages[1], Message::Assistant { .. }));
-    assert!(matches!(state.messages[2], Message::ToolResult { .. }));
-    assert!(matches!(state.messages[3], Message::Assistant { .. }));
+    assert!(is_standard_user_message(&state.messages[0]));
+    assert!(is_standard_assistant_message(&state.messages[1]));
+    assert!(is_standard_tool_result_message(&state.messages[2]));
+    assert!(is_standard_assistant_message(&state.messages[3]));
+}
+
+#[tokio::test]
+async fn wrapper_forwards_tool_execution_updates_to_listeners() {
+    let calls = Arc::new(Mutex::new(VecDeque::from([
+        assistant_tool_call_message(
+            "tool-1",
+            "echo",
+            serde_json::Map::from_iter([(String::from("value"), Value::String("hello".into()))]),
+            20,
+        ),
+        assistant_message("done", StopReason::Stop, 30),
+    ])));
+
+    let streamer = Arc::new({
+        let calls = calls.clone();
+        move |_model: Model,
+              _context: Context,
+              _options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            let message = calls
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("expected scripted assistant message");
+            let reason = message.stop_reason.clone();
+            Ok(Box::pin(try_stream! {
+                yield AssistantEvent::Done { reason, message };
+            }))
+        }
+    });
+
+    let mut initial_state = AgentState::new(model());
+    initial_state.tools.push(AgentTool::new_with_updates(
+        ToolDefinition {
+            name: "echo".into(),
+            description: "Echo with streamed updates".into(),
+            parameters: json!({ "type": "object" }),
+        },
+        |_tool_call_id, args, _signal, on_update| async move {
+            let value = args
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if let Some(on_update) = on_update {
+                on_update(AgentToolResult {
+                    content: vec![UserContent::Text {
+                        text: format!("partial: {value}"),
+                    }],
+                    details: json!({ "step": 1 }),
+                });
+            }
+            Ok(AgentToolResult {
+                content: vec![UserContent::Text {
+                    text: format!("final: {value}"),
+                }],
+                details: json!({ "done": true }),
+            })
+        },
+    ));
+    let agent = Agent::with_parts(initial_state, streamer, StreamOptions::default());
+
+    let update_snapshots = Arc::new(Mutex::new(Vec::new()));
+    let update_snapshots_listener = update_snapshots.clone();
+    let update_agent = agent.clone();
+    agent.subscribe(move |event, _signal| {
+        let update_snapshots_listener = update_snapshots_listener.clone();
+        let update_agent = update_agent.clone();
+        async move {
+            if let AgentEvent::ToolExecutionUpdate { partial_result, .. } = event {
+                let pending_ids = update_agent
+                    .state()
+                    .pending_tool_calls
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                update_snapshots_listener
+                    .lock()
+                    .unwrap()
+                    .push((pending_ids, partial_result));
+            }
+        }
+    });
+
+    agent.prompt_text("run tool").await.unwrap();
+
+    let update_snapshots = update_snapshots.lock().unwrap().clone();
+    assert_eq!(update_snapshots.len(), 1);
+    assert_eq!(update_snapshots[0].0, vec![String::from("tool-1")]);
+    assert_eq!(
+        update_snapshots[0].1.content,
+        vec![UserContent::Text {
+            text: String::from("partial: hello"),
+        }]
+    );
 }
 
 #[tokio::test]
@@ -488,9 +979,9 @@ async fn wrapper_forwards_before_and_after_tool_hooks() {
         .messages
         .iter()
         .find_map(|message| match message {
-            Message::ToolResult {
+            AgentMessage::Standard(Message::ToolResult {
                 content, is_error, ..
-            } => Some((content.clone(), *is_error)),
+            }) => Some((content.clone(), *is_error)),
             _ => None,
         })
         .expect("expected tool result message");

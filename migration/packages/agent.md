@@ -1,6 +1,6 @@
 # packages/agent migration inventory
 
-Status: milestone 4 scaffold + minimal loop/state slice + minimal Agent wrapper slice + sequential tool execution + tool prepare/before/after hook slice
+Status: milestone 8 scaffold + minimal loop/state slice + minimal Agent wrapper slice + sequential tool execution + tool prepare/before/after hook slice + steering/follow-up queue slice + queue mode configuration slice + custom-message/convert/transform slice + tool progress update slice
 Target crate: `rust/crates/pi-agent`
 
 ## 1. Files analyzed
@@ -99,13 +99,23 @@ Confirmed from TS source/tests:
 ## 8. Compatibility notes for the current Rust slice
 
 Implemented now:
-- `AgentState` and `AgentContext` data model
+- `AgentMessage` abstraction with:
+  - `AgentMessage::Standard(Message)`
+  - `AgentMessage::Custom(CustomAgentMessage)` backed by JSON payloads
+- `AgentState` and `AgentContext` data model over `AgentMessage`
 - minimal `AgentEvent` stream for prompt + continue flows
 - passthrough to `pi-ai` streaming with partial assistant updates
 - default streamer via `pi_ai::stream_response`
 - injectable streamer for deterministic tests
+- low-level context shaping support with:
+  - `transform_context` hook over `Vec<AgentMessage>`
+  - `convert_to_llm` hook from `Vec<AgentMessage>` to `Vec<Message>`
+  - default conversion that passes through standard LLM-visible messages and filters custom messages
 - minimal `Agent` wrapper with:
-  - `prompt_text`, `prompt_messages`, `continue`
+  - generic `prompt(...)`, `prompt_messages(...)`, `continue`
+  - `steer`, `follow_up`, queue clear helpers, and queue presence check
+  - `set_transform_context(...)` / `clear_transform_context()`
+  - `set_convert_to_llm(...)` / `clear_convert_to_llm()`
   - `abort`
   - `wait_for_idle`
   - ordered awaited listeners
@@ -114,11 +124,17 @@ Implemented now:
 - minimal executable tool runtime with:
   - `AgentTool`
   - optional `prepare_arguments`
+  - optional streamed partial tool updates via `AgentTool::new_with_updates(...)`
   - sequential tool execution
-  - `tool_execution_start` / `tool_execution_end`
+  - `tool_execution_start` / `tool_execution_update` / `tool_execution_end`
   - `toolResult` message emission
   - next-turn continuation after tool results
-  - pending-tool-call state tracking
+  - pending-tool-call state tracking during updates
+- minimal queue-aware loop control with:
+  - low-level steering polling before assistant turns
+  - low-level follow-up polling after the agent would otherwise stop
+  - assistant-tail `continue()` recovery via queued steering/follow-up messages
+  - wrapper queue mode configuration for `All` vs `OneAtATime`
 - minimal hook support with:
   - low-level `before_tool_call` and `after_tool_call` hooks
   - wrapper forwarding via `Agent::set_before_tool_call(...)` and `Agent::set_after_tool_call(...)`
@@ -126,11 +142,7 @@ Implemented now:
   - after-hook content/details/error overrides
 
 Deferred explicitly:
-- custom agent messages and `convertToLlm`
-- `transformContext`
 - JSON-schema validation parity with TS `validateToolArguments`
-- streaming tool progress updates
-- steering/follow-up queues
 - proxy reconstruction
 - direct mutable state API parity with TS property-style mutation
 - parallel tool execution
@@ -138,37 +150,52 @@ Deferred explicitly:
 ## 9. Rust target design (`pi-agent`)
 
 Current modules:
+- `message.rs`: `AgentMessage`, `CustomAgentMessage`, message helpers
 - `error.rs`: crate error type and `pi-ai` error bridging
 - `state.rs`: `ThinkingLevel`, `AgentContext`, `AgentState`, event-state reduction helpers
-- `tool.rs`: `AgentTool`, `AgentToolResult`, `AgentToolError`, optional argument preparation
-- `loop.rs`: `AgentLoopConfig`, `AssistantStreamer`, `agent_loop`, `agent_loop_continue`, `AgentEvent`, tool hook types
+- `tool.rs`: `AgentTool`, `AgentToolResult`, `AgentToolError`, optional argument preparation, optional tool update callbacks
+- `loop.rs`: `AgentLoopConfig`, `AssistantStreamer`, `agent_loop`, `agent_loop_continue`, `AgentEvent`, tool hook types, tool progress event streaming
 - `agent.rs`: minimal stateful `Agent` wrapper
 - `lib.rs`: re-exports
 
-Public API available after milestone 4:
+Public API available after milestone 7:
+- `CustomAgentMessage::new(...)`
+- `AgentMessage::{Standard, Custom}` and helpers (`custom`, `role`, `timestamp`, `is_assistant`, standard-message accessors)
 - `AgentState::new(model)`
 - `AgentState::context_snapshot()`
 - `AgentState::begin_run()` / `apply_event()` / `finish_run()`
 - `AgentLoopConfig::new(model)` with injectable streamer override
+- `AgentLoopConfig::with_convert_to_llm(...)`
+- `AgentLoopConfig::with_transform_context(...)`
 - `AgentLoopConfig::with_before_tool_call(...)`
 - `AgentLoopConfig::with_after_tool_call(...)`
 - `agent_loop(prompts, context, config)`
 - `agent_loop_continue(context, config)`
 - `AgentTool::new(definition, executor)`
+- `AgentTool::new_with_updates(definition, executor)`
 - `AgentTool::with_prepare_arguments(...)`
-- `AgentTool::execute(...)`
+- `AgentTool::execute(...)` / `AgentTool::execute_with_updates(...)`
+- `AgentToolUpdateCallback`
+- `QueueMode::{All, OneAtATime}`
 - `Agent::new(initial_state)`
 - `Agent::with_parts(initial_state, streamer, stream_options)`
 - `Agent::state()` / `Agent::update_state(...)`
 - `Agent::subscribe(...)` / `Agent::unsubscribe(...)`
+- `Agent::set_convert_to_llm(...)` / `Agent::clear_convert_to_llm()`
+- `Agent::set_transform_context(...)` / `Agent::clear_transform_context()`
 - `Agent::set_before_tool_call(...)` / `Agent::clear_before_tool_call()`
 - `Agent::set_after_tool_call(...)` / `Agent::clear_after_tool_call()`
-- `Agent::prompt_text(...)` / `Agent::prompt_messages(...)` / `Agent::continue()`
+- `Agent::set_steering_mode(...)` / `Agent::steering_mode()`
+- `Agent::set_follow_up_mode(...)` / `Agent::follow_up_mode()`
+- `Agent::steer(...)` / `Agent::follow_up(...)`
+- `Agent::clear_steering_queue()` / `Agent::clear_follow_up_queue()` / `Agent::clear_all_queues()`
+- `Agent::has_queued_messages()`
+- `Agent::prompt_text(...)` / `Agent::prompt(...)` / `Agent::prompt_messages(...)` / `Agent::continue()`
 - `Agent::abort()` / `Agent::wait_for_idle()`
 
 ## 10. Validation plan
 
-Milestone 4 validation target:
+Milestone 8 validation target:
 - deterministic scripted-stream tests for prompt/continue event order
 - state reduction test driven by emitted events
 - one faux-provider integration test through `pi-ai` default streaming path
@@ -180,13 +207,13 @@ Milestone 4 validation target:
 
 ## 11. Known risks
 
-- the current Rust slice only supports standard `pi-events::Message` values, not TS custom agent messages
+- custom agent messages are now supported via `CustomAgentMessage`, but the current representation is intentionally JSON-backed and not declaration-merge style like TS
 - tool execution is still sequential-only
 - JSON-schema validation parity is still missing; current Rust supports `prepare_arguments` but does not yet replicate TS `validateToolArguments` behavior or AJV coercion
-- streaming tool progress updates are not implemented yet
-- the wrapper has awaited listeners and idle barriers, but does not yet expose TS-equivalent steering/follow-up queue behavior
+- tool progress updates are now implemented for sequential execution only; parallel execution parity is still missing with the broader parallel tool slice
+- the wrapper has awaited listeners, idle barriers, queue-mode configuration, transform/convert hooks, and custom messages, but still uses Rust method-based APIs rather than TS property-style setters/getters
 - the wrapper currently uses explicit methods plus `update_state(...)`, not full TS property-style mutable state parity
 
 ## 12. Recommended follow-up after this milestone
 
-Next increment should add steering/follow-up queues on top of the current sequential tool loop, or add argument validation/tool-progress events if staying focused on tool parity first.
+Next increment should stay on `packages/agent` and add JSON-schema validation parity, or begin the first `packages/coding-agent` core integration layer on top of the now-more-complete `pi-agent` API.

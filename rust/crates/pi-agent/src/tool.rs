@@ -4,9 +4,13 @@ use std::{fmt, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::watch;
 
 pub type ToolFuture = Pin<Box<dyn Future<Output = Result<AgentToolResult, AgentToolError>> + Send>>;
+pub type AgentToolUpdateCallback = Arc<dyn Fn(AgentToolResult) + Send + Sync>;
 
-type ToolExecutor =
-    Arc<dyn Fn(String, Value, Option<watch::Receiver<bool>>) -> ToolFuture + Send + Sync>;
+type ToolExecutor = Arc<
+    dyn Fn(String, Value, Option<watch::Receiver<bool>>, Option<AgentToolUpdateCallback>) -> ToolFuture
+        + Send
+        + Sync,
+>;
 type ToolArgPreparer = Arc<dyn Fn(Value) -> Value + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -40,10 +44,23 @@ impl AgentTool {
         F: Fn(String, Value, Option<watch::Receiver<bool>>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<AgentToolResult, AgentToolError>> + Send + 'static,
     {
+        Self::new_with_updates(definition, move |tool_call_id, args, signal, _on_update| {
+            executor(tool_call_id, args, signal)
+        })
+    }
+
+    pub fn new_with_updates<F, Fut>(definition: ToolDefinition, executor: F) -> Self
+    where
+        F: Fn(String, Value, Option<watch::Receiver<bool>>, Option<AgentToolUpdateCallback>) -> Fut
+            + Send
+            + Sync
+            + 'static,
+        Fut: Future<Output = Result<AgentToolResult, AgentToolError>> + Send + 'static,
+    {
         Self {
             definition,
-            executor: Arc::new(move |tool_call_id, args, signal| {
-                Box::pin(executor(tool_call_id, args, signal))
+            executor: Arc::new(move |tool_call_id, args, signal, on_update| {
+                Box::pin(executor(tool_call_id, args, signal, on_update))
             }),
             prepare_arguments: None,
         }
@@ -70,7 +87,17 @@ impl AgentTool {
         args: Value,
         signal: Option<watch::Receiver<bool>>,
     ) -> Result<AgentToolResult, AgentToolError> {
-        (self.executor)(tool_call_id, args, signal).await
+        self.execute_with_updates(tool_call_id, args, signal, None).await
+    }
+
+    pub async fn execute_with_updates(
+        &self,
+        tool_call_id: String,
+        args: Value,
+        signal: Option<watch::Receiver<bool>>,
+        on_update: Option<AgentToolUpdateCallback>,
+    ) -> Result<AgentToolResult, AgentToolError> {
+        (self.executor)(tool_call_id, args, signal, on_update).await
     }
 }
 
