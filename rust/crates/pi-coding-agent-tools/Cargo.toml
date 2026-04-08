@@ -5,4 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+base64 = "0.22"
+pi-agent = { path = "../pi-agent" }
+pi-events = { path = "../pi-events" }
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true

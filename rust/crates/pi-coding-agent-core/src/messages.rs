@@ -1,0 +1,246 @@
+use pi_agent::AgentMessage;
+use pi_events::{Message, UserContent};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub const COMPACTION_SUMMARY_PREFIX: &str = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
+pub const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
+
+pub const BRANCH_SUMMARY_PREFIX: &str =
+    "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n";
+pub const BRANCH_SUMMARY_SUFFIX: &str = "</summary>";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BashExecutionMessage {
+    pub command: String,
+    pub output: String,
+    pub exit_code: Option<i64>,
+    pub cancelled: bool,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_output_path: Option<String>,
+    #[serde(default)]
+    pub exclude_from_context: bool,
+}
+
+impl BashExecutionMessage {
+    pub fn into_agent_message(self, timestamp: u64) -> AgentMessage {
+        custom_agent_message("bashExecution", self, timestamp)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CustomMessageContent {
+    Text(String),
+    Blocks(Vec<UserContent>),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomMessage {
+    pub custom_type: String,
+    pub content: CustomMessageContent,
+    pub display: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+}
+
+impl CustomMessage {
+    pub fn into_agent_message(self, timestamp: u64) -> AgentMessage {
+        custom_agent_message("custom", self, timestamp)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchSummaryMessage {
+    pub summary: String,
+    pub from_id: String,
+}
+
+impl BranchSummaryMessage {
+    pub fn into_agent_message(self, timestamp: u64) -> AgentMessage {
+        custom_agent_message("branchSummary", self, timestamp)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionSummaryMessage {
+    pub summary: String,
+    pub tokens_before: u64,
+}
+
+impl CompactionSummaryMessage {
+    pub fn into_agent_message(self, timestamp: u64) -> AgentMessage {
+        custom_agent_message("compactionSummary", self, timestamp)
+    }
+}
+
+pub fn create_bash_execution_message(
+    command: impl Into<String>,
+    output: impl Into<String>,
+    exit_code: Option<i64>,
+    cancelled: bool,
+    truncated: bool,
+    full_output_path: Option<String>,
+    exclude_from_context: bool,
+    timestamp: u64,
+) -> AgentMessage {
+    BashExecutionMessage {
+        command: command.into(),
+        output: output.into(),
+        exit_code,
+        cancelled,
+        truncated,
+        full_output_path,
+        exclude_from_context,
+    }
+    .into_agent_message(timestamp)
+}
+
+pub fn create_custom_message(
+    custom_type: impl Into<String>,
+    content: CustomMessageContent,
+    display: bool,
+    details: Option<Value>,
+    timestamp: u64,
+) -> AgentMessage {
+    CustomMessage {
+        custom_type: custom_type.into(),
+        content,
+        display,
+        details,
+    }
+    .into_agent_message(timestamp)
+}
+
+pub fn create_branch_summary_message(
+    summary: impl Into<String>,
+    from_id: impl Into<String>,
+    timestamp: u64,
+) -> AgentMessage {
+    BranchSummaryMessage {
+        summary: summary.into(),
+        from_id: from_id.into(),
+    }
+    .into_agent_message(timestamp)
+}
+
+pub fn create_compaction_summary_message(
+    summary: impl Into<String>,
+    tokens_before: u64,
+    timestamp: u64,
+) -> AgentMessage {
+    CompactionSummaryMessage {
+        summary: summary.into(),
+        tokens_before,
+    }
+    .into_agent_message(timestamp)
+}
+
+pub fn bash_execution_to_text(message: &BashExecutionMessage) -> String {
+    let mut text = format!("Ran `{}`\n", message.command);
+    if message.output.is_empty() {
+        text.push_str("(no output)");
+    } else {
+        text.push_str(&format!("```\n{}\n```", message.output));
+    }
+
+    if message.cancelled {
+        text.push_str("\n\n(command cancelled)");
+    } else if let Some(exit_code) = message.exit_code.filter(|exit_code| *exit_code != 0) {
+        text.push_str(&format!("\n\nCommand exited with code {exit_code}"));
+    }
+
+    if message.truncated {
+        if let Some(full_output_path) = &message.full_output_path {
+            text.push_str(&format!(
+                "\n\n[Output truncated. Full output: {full_output_path}]"
+            ));
+        }
+    }
+
+    text
+}
+
+pub fn convert_to_llm(messages: Vec<AgentMessage>) -> Vec<Message> {
+    messages
+        .into_iter()
+        .filter_map(convert_message_to_llm)
+        .collect()
+}
+
+fn convert_message_to_llm(message: AgentMessage) -> Option<Message> {
+    match message {
+        AgentMessage::Standard(message) => Some(message),
+        AgentMessage::Custom(message) => convert_custom_message_to_llm(message),
+    }
+}
+
+fn convert_custom_message_to_llm(message: pi_agent::CustomAgentMessage) -> Option<Message> {
+    let timestamp = message.timestamp;
+
+    match message.role.as_str() {
+        "bashExecution" => {
+            let payload: BashExecutionMessage = serde_json::from_value(message.payload).ok()?;
+            if payload.exclude_from_context {
+                return None;
+            }
+            Some(Message::User {
+                content: vec![UserContent::Text {
+                    text: bash_execution_to_text(&payload),
+                }],
+                timestamp,
+            })
+        }
+        "custom" => {
+            let payload: CustomMessage = serde_json::from_value(message.payload).ok()?;
+            let content = match payload.content {
+                CustomMessageContent::Text(text) => vec![UserContent::Text { text }],
+                CustomMessageContent::Blocks(content) => content,
+            };
+            Some(Message::User { content, timestamp })
+        }
+        "branchSummary" => {
+            let payload: BranchSummaryMessage = serde_json::from_value(message.payload).ok()?;
+            Some(Message::User {
+                content: vec![UserContent::Text {
+                    text: format!(
+                        "{BRANCH_SUMMARY_PREFIX}{}{BRANCH_SUMMARY_SUFFIX}",
+                        payload.summary
+                    ),
+                }],
+                timestamp,
+            })
+        }
+        "compactionSummary" => {
+            let payload: CompactionSummaryMessage = serde_json::from_value(message.payload).ok()?;
+            Some(Message::User {
+                content: vec![UserContent::Text {
+                    text: format!(
+                        "{COMPACTION_SUMMARY_PREFIX}{}{COMPACTION_SUMMARY_SUFFIX}",
+                        payload.summary
+                    ),
+                }],
+                timestamp,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn custom_agent_message(
+    payload_role: &str,
+    payload: impl Serialize,
+    timestamp: u64,
+) -> AgentMessage {
+    AgentMessage::custom(
+        payload_role,
+        serde_json::to_value(payload)
+            .expect("coding-agent message payload should always serialize"),
+        timestamp,
+    )
+}

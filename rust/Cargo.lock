@@ -1197,6 +1197,7 @@ version = "0.1.0"
 dependencies = [
  "pi-agent",
  "pi-ai",
+ "pi-coding-agent-tools",
  "pi-events",
  "serde",
  "serde_json",
@@ -1208,7 +1209,13 @@ dependencies = [
 name = "pi-coding-agent-tools"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "pi-agent",
+ "pi-events",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

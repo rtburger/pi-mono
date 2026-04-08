@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod bootstrap;
 pub mod config_value;
+pub mod messages;
 pub mod model_registry;
 pub mod model_resolver;
 pub mod runtime;
@@ -9,6 +10,12 @@ pub use auth::{AuthSource, MemoryAuthStorage};
 pub use bootstrap::{
     BootstrapDiagnostic, BootstrapDiagnosticLevel, ExistingSessionSelection,
     SessionBootstrapOptions, SessionBootstrapResult, bootstrap_session,
+};
+pub use messages::{
+    BRANCH_SUMMARY_PREFIX, BRANCH_SUMMARY_SUFFIX, BashExecutionMessage, BranchSummaryMessage,
+    COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, CompactionSummaryMessage, CustomMessage,
+    CustomMessageContent, bash_execution_to_text, convert_to_llm, create_bash_execution_message,
+    create_branch_summary_message, create_compaction_summary_message, create_custom_message,
 };
 pub use model_registry::{ModelRegistry, RequestAuth};
 pub use model_resolver::{
