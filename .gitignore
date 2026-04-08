@@ -33,6 +33,7 @@ out.jsonl
 pi-*.html
 out.html
 packages/coding-agent/binaries/
+.codex
 .codex/
 rust/target/
 todo.md
