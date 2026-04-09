@@ -1,4 +1,4 @@
-use pi_coding_agent_core::{AuthFileSource, MemoryAuthStorage, ModelRegistry, RequestAuth};
+use pi_coding_agent_core::{MemoryAuthStorage, ModelRegistry, RequestAuth};
 use pi_events::Model;
 use serde_json::json;
 use std::{
@@ -249,73 +249,6 @@ fn refresh_reloads_models_json_from_disk() {
             .base_url,
         "https://second.example.com/v1"
     );
-}
-
-#[test]
-fn oauth_model_base_url_mutation_rewrites_github_copilot_models_after_models_json_overrides() {
-    let temp_dir = unique_temp_dir("oauth-model-mutation");
-    let auth_path = temp_dir.join("auth.json");
-    fs::write(
-        &auth_path,
-        serde_json::json!({
-            "github-copilot": {
-                "type": "oauth",
-                "access": "tid=test;proxy-ep=proxy.enterprise.githubcopilot.com;",
-                "refresh": "refresh-token",
-                "expires": i64::MAX,
-                "enterpriseUrl": "ghe.example.com"
-            }
-        })
-        .to_string(),
-    )
-    .unwrap();
-
-    let models_json_path = temp_dir.join("models.json");
-    write_models_json(
-        &models_json_path,
-        json!({
-            "providers": {
-                "github-copilot": {
-                    "baseUrl": "https://proxy.example.com/v1",
-                    "apiKey": "unused-for-availability",
-                    "api": "openai-responses",
-                    "models": [
-                        {
-                            "id": "custom-copilot-model",
-                            "name": "Custom Copilot Model"
-                        }
-                    ]
-                }
-            }
-        }),
-    );
-
-    let registry = ModelRegistry::new(
-        Arc::new(AuthFileSource::new(auth_path)),
-        vec![Model {
-            id: "gpt-4o".into(),
-            name: "GPT-4o".into(),
-            api: "openai-responses".into(),
-            provider: "github-copilot".into(),
-            base_url: "https://api.individual.githubcopilot.com".into(),
-            reasoning: false,
-            input: vec!["text".into()],
-            context_window: 128_000,
-            max_tokens: 16_384,
-        }],
-        Some(models_json_path),
-    );
-
-    let built_in = registry.find("github-copilot", "gpt-4o").unwrap();
-    let custom = registry
-        .find("github-copilot", "custom-copilot-model")
-        .unwrap();
-
-    assert_eq!(
-        built_in.base_url,
-        "https://api.enterprise.githubcopilot.com"
-    );
-    assert_eq!(custom.base_url, "https://api.enterprise.githubcopilot.com");
 }
 
 #[test]

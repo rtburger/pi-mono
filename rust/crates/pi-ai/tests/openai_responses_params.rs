@@ -1,6 +1,6 @@
 use pi_ai::openai_responses::{
-    OpenAiResponsesConvertOptions, OpenAiResponsesParamsOptions, ResponsesInputItem,
-    ResponsesToolDefinition, build_openai_responses_request_params,
+    OpenAiResponsesConvertOptions, OpenAiResponsesParamsOptions, OpenAiResponsesReasoning,
+    ResponsesInputItem, ResponsesToolDefinition, build_openai_responses_request_params,
 };
 use pi_events::{Context, Message, Model, ToolDefinition, UserContent};
 use serde_json::{Value, json};
@@ -32,39 +32,31 @@ fn simple_context() -> Context {
 }
 
 #[test]
-fn omits_reasoning_for_copilot_when_not_requested() {
-    let expected: Value = serde_json::from_str(
-        &fs::read_to_string(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("tests")
-                .join("fixtures")
-                .join("openai_responses_params_copilot.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-
+fn defaults_reasoning_for_openai_reasoning_models_when_not_requested() {
     let params = build_openai_responses_request_params(
-        &model("github-copilot", "gpt-5-mini", true),
+        &model("openai", "gpt-5-mini", true),
         &simple_context(),
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions::default(),
         OpenAiResponsesParamsOptions::default(),
     );
 
-    assert_eq!(params.model, expected["model"].as_str().unwrap());
-    assert_eq!(params.stream, expected["stream"].as_bool().unwrap());
-    assert_eq!(params.store, expected["store"].as_bool().unwrap());
+    assert_eq!(params.model, "gpt-5-mini");
+    assert!(params.stream);
+    assert!(!params.store);
     assert_eq!(
-        params.reasoning.is_some(),
-        expected["has_reasoning"].as_bool().unwrap()
+        params.reasoning,
+        Some(OpenAiResponsesReasoning {
+            effort: "none".into(),
+            summary: "auto".into(),
+        })
     );
 
     let first_role = match params.input.first().unwrap() {
         ResponsesInputItem::Message { role, .. } => role.as_str(),
         _ => panic!("expected first input item to be a message"),
     };
-    assert_eq!(first_role, expected["first_role"].as_str().unwrap());
+    assert_eq!(first_role, "developer");
 }
 
 #[test]
@@ -83,7 +75,7 @@ fn uses_system_role_for_non_reasoning_models() {
     let params = build_openai_responses_request_params(
         &model("openai", "gpt-4o-mini", false),
         &simple_context(),
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions::default(),
         OpenAiResponsesParamsOptions::default(),
     );
@@ -111,7 +103,7 @@ fn includes_tools_in_request_params_when_present() {
     let params = build_openai_responses_request_params(
         &model("openai", "gpt-5-mini", true),
         &context,
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions::default(),
         OpenAiResponsesParamsOptions::default(),
     );
@@ -137,7 +129,7 @@ fn enables_reasoning_and_prompt_cache_for_openai_when_requested() {
     let params = build_openai_responses_request_params(
         &model("openai", "gpt-5-mini", true),
         &simple_context(),
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions::default(),
         OpenAiResponsesParamsOptions {
             reasoning_effort: Some("high".into()),

@@ -423,7 +423,7 @@ pub fn stream_anthropic_http(
             return;
         }
 
-        let use_bearer_auth = model.provider == "github-copilot" || is_oauth_token;
+        let use_bearer_auth = is_oauth_token;
         let mut request_builder = reqwest::Client::new()
             .post(format!("{}/messages", model.base_url.trim_end_matches('/')))
             .header("accept", "text/event-stream");
@@ -1052,7 +1052,7 @@ impl AiProvider for AnthropicMessagesProvider {
         };
 
         let anthropic_options = anthropic_options_from_stream_options(&model, &options);
-        let is_oauth_token = model.provider != "github-copilot" && is_oauth_token(&api_key);
+        let is_oauth_token = is_oauth_token(&api_key);
         let params =
             build_anthropic_request_params(&model, &context, is_oauth_token, &anthropic_options);
         let request_headers = build_runtime_request_headers(
@@ -1108,7 +1108,7 @@ fn anthropic_options_from_stream_options(
 
 fn build_runtime_request_headers(
     model: &Model,
-    context: &Context,
+    _context: &Context,
     option_headers: &BTreeMap<String, String>,
     interleaved_thinking: bool,
     is_oauth_token: bool,
@@ -1124,16 +1124,7 @@ fn build_runtime_request_headers(
         headers.extend(model_headers);
     }
 
-    if model.provider == "github-copilot" {
-        headers.extend(build_copilot_dynamic_headers(&context.messages));
-        let mut betas = Vec::new();
-        if interleaved_thinking && !supports_adaptive_thinking(&model.id) {
-            betas.push("interleaved-thinking-2025-05-14");
-        }
-        if !betas.is_empty() {
-            headers.insert("anthropic-beta".into(), betas.join(","));
-        }
-    } else if is_oauth_token {
+    if is_oauth_token {
         let mut betas = vec![
             "claude-code-20250219",
             "oauth-2025-04-20",
@@ -1157,41 +1148,6 @@ fn build_runtime_request_headers(
 
     headers.extend(option_headers.clone());
     headers
-}
-
-fn build_copilot_dynamic_headers(messages: &[Message]) -> BTreeMap<String, String> {
-    let mut headers = BTreeMap::from([
-        (
-            "X-Initiator".to_string(),
-            if messages
-                .last()
-                .is_some_and(|message| !matches!(message, Message::User { .. }))
-            {
-                "agent".to_string()
-            } else {
-                "user".to_string()
-            },
-        ),
-        (
-            "Openai-Intent".to_string(),
-            "conversation-edits".to_string(),
-        ),
-    ]);
-
-    if messages.iter().any(message_has_images) {
-        headers.insert("Copilot-Vision-Request".to_string(), "true".to_string());
-    }
-
-    headers
-}
-
-fn message_has_images(message: &Message) -> bool {
-    match message {
-        Message::User { content, .. } | Message::ToolResult { content, .. } => content
-            .iter()
-            .any(|content| matches!(content, UserContent::Image { .. })),
-        Message::Assistant { .. } => false,
-    }
 }
 
 fn provider_label(model: &Model) -> &'static str {

@@ -138,27 +138,8 @@ impl AuthSource for AuthFileSource {
         Box::pin(async move { self.get_api_key_for_request_impl(provider).await })
     }
 
-    fn model_base_url(&self, provider: &str) -> Option<String> {
-        if provider != "github-copilot" {
-            return None;
-        }
-
-        let mut data = self.load()?;
-        let credential = data.remove(provider)?;
-        match credential {
-            AuthFileCredential::OAuth {
-                access,
-                enterprise_url,
-                ..
-            } => {
-                let domain = enterprise_url.as_deref().and_then(normalize_domain);
-                Some(get_github_copilot_base_url(
-                    access.as_deref().filter(|value| !value.is_empty()),
-                    domain.as_deref(),
-                ))
-            }
-            _ => None,
-        }
+    fn model_base_url(&self, _provider: &str) -> Option<String> {
+        None
     }
 }
 
@@ -249,8 +230,6 @@ enum AuthFileCredential {
     OAuth {
         access: Option<String>,
         expires: Option<i64>,
-        #[serde(rename = "enterpriseUrl")]
-        enterprise_url: Option<String>,
         #[serde(rename = "projectId")]
         project_id: Option<String>,
     },
@@ -262,8 +241,6 @@ struct AuthFileOAuthCredentialView {
     credential_type: String,
     refresh: Option<String>,
     expires: Option<i64>,
-    #[serde(rename = "enterpriseUrl")]
-    enterprise_url: Option<String>,
     #[serde(rename = "projectId")]
     project_id: Option<String>,
 }
@@ -280,7 +257,6 @@ struct RefreshedOAuthCredentials {
     refresh: String,
     access: String,
     expires: i64,
-    enterprise_url: Option<String>,
     project_id: Option<String>,
     account_id: Option<String>,
 }
@@ -291,15 +267,9 @@ impl RefreshedOAuthCredentials {
             refresh,
             access,
             expires,
-            enterprise_url: None,
             project_id: None,
             account_id: None,
         }
-    }
-
-    fn with_enterprise_url(mut self, enterprise_url: Option<String>) -> Self {
-        self.enterprise_url = enterprise_url;
-        self
     }
 
     fn with_project_id(mut self, project_id: impl Into<String>) -> Self {
@@ -321,9 +291,6 @@ impl RefreshedOAuthCredentials {
             "expires".into(),
             Value::Number(serde_json::Number::from(self.expires)),
         );
-        if let Some(enterprise_url) = self.enterprise_url {
-            object.insert("enterpriseUrl".into(), Value::String(enterprise_url));
-        }
         if let Some(project_id) = self.project_id {
             object.insert("projectId".into(), Value::String(project_id));
         }
@@ -349,12 +316,6 @@ struct GoogleTokenResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct GitHubCopilotTokenResponse {
-    token: String,
-    expires_at: i64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 struct OpenAiCodexTokenResponse {
     access_token: String,
     refresh_token: String,
@@ -364,7 +325,6 @@ struct OpenAiCodexTokenResponse {
 #[derive(Debug, Default, Clone, Copy)]
 struct OAuthRefreshOverrides<'a> {
     anthropic_token_url: Option<&'a str>,
-    github_copilot_token_url: Option<&'a str>,
     google_gemini_cli_token_url: Option<&'a str>,
     google_antigravity_token_url: Option<&'a str>,
     openai_codex_token_url: Option<&'a str>,
@@ -383,12 +343,6 @@ const GOOGLE_ANTIGRAVITY_CLIENT_SECRET: &str = "GOCSPX-K58FWR486LdLJ1mLB8sXC4z6q
 const OPENAI_CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_CODEX_AUTH_CLAIM: &str = "https://api.openai.com/auth";
-const GITHUB_COPILOT_HEADERS: [(&str, &str); 4] = [
-    ("User-Agent", "GitHubCopilotChat/0.35.0"),
-    ("Editor-Version", "vscode/1.107.0"),
-    ("Editor-Plugin-Version", "copilot-chat/0.35.0"),
-    ("Copilot-Integration-Id", "vscode-chat"),
-];
 const AUTH_FILE_LOCK_RETRIES: usize = 10;
 const AUTH_FILE_LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
 
@@ -453,14 +407,6 @@ async fn refresh_auth_provider(
 ) -> Result<RefreshedOAuthCredentials, String> {
     match provider {
         "anthropic" => refresh_anthropic_token(refresh_token, overrides.anthropic_token_url).await,
-        "github-copilot" => {
-            refresh_github_copilot_token(
-                refresh_token,
-                credential.enterprise_url.as_deref(),
-                overrides.github_copilot_token_url,
-            )
-            .await
-        }
         "google-gemini-cli" => {
             let project_id = credential
                 .project_id
@@ -670,53 +616,6 @@ async fn refresh_google_token(
     .with_project_id(project_id))
 }
 
-async fn refresh_github_copilot_token(
-    refresh_token: &str,
-    enterprise_domain: Option<&str>,
-    token_url_override: Option<&str>,
-) -> Result<RefreshedOAuthCredentials, String> {
-    let domain = enterprise_domain.and_then(normalize_domain);
-    let token_url = token_url_override
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| github_copilot_token_url(domain.as_deref()));
-
-    let client = oauth_http_client()?;
-    let mut request = client
-        .get(token_url)
-        .header("accept", "application/json")
-        .header("authorization", format!("Bearer {refresh_token}"));
-    for (name, value) in GITHUB_COPILOT_HEADERS {
-        request = request.header(name, value);
-    }
-
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("HTTP request failed: {error}"))?;
-
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        if body.is_empty() {
-            return Err(format!("HTTP request failed with status {status}"));
-        }
-        return Err(format!("HTTP request failed with status {status}: {body}"));
-    }
-
-    let payload = serde_json::from_str::<GitHubCopilotTokenResponse>(&body)
-        .map_err(|error| format!("Invalid Copilot token response: {error}"))?;
-
-    Ok(RefreshedOAuthCredentials::new(
-        refresh_token.to_string(),
-        payload.token,
-        payload
-            .expires_at
-            .saturating_mul(1000)
-            .saturating_sub(5 * 60 * 1000),
-    )
-    .with_enterprise_url(domain))
-}
-
 async fn refresh_openai_codex_token(
     refresh_token: &str,
     token_url_override: Option<&str>,
@@ -753,51 +652,6 @@ async fn refresh_openai_codex_token(
         now_ms().saturating_add(payload.expires_in.saturating_mul(1000)),
     )
     .with_account_id(account_id))
-}
-
-fn github_copilot_token_url(enterprise_domain: Option<&str>) -> String {
-    let domain = enterprise_domain.unwrap_or("github.com");
-    format!("https://api.{domain}/copilot_internal/v2/token")
-}
-
-fn normalize_domain(input: &str) -> Option<String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let url = if trimmed.contains("://") {
-        reqwest::Url::parse(trimmed).ok()?
-    } else {
-        reqwest::Url::parse(&format!("https://{trimmed}")).ok()?
-    };
-
-    Some(url.host_str()?.to_string())
-}
-
-fn get_base_url_from_copilot_token(token: &str) -> Option<String> {
-    let proxy_host = token
-        .split(';')
-        .find_map(|part| part.strip_prefix("proxy-ep="))?;
-    let api_host = match proxy_host.strip_prefix("proxy.") {
-        Some(suffix) => format!("api.{suffix}"),
-        None => proxy_host.to_string(),
-    };
-    Some(format!("https://{api_host}"))
-}
-
-fn get_github_copilot_base_url(token: Option<&str>, enterprise_domain: Option<&str>) -> String {
-    if let Some(token) = token
-        && let Some(base_url) = get_base_url_from_copilot_token(token)
-    {
-        return base_url;
-    }
-
-    if let Some(enterprise_domain) = enterprise_domain {
-        return format!("https://copilot-api.{enterprise_domain}");
-    }
-
-    "https://api.individual.githubcopilot.com".into()
 }
 
 fn extract_openai_codex_account_id(token: &str) -> Option<String> {
@@ -840,7 +694,7 @@ fn decode_base64_token_component(input: &str) -> Option<Vec<u8>> {
 
 fn oauth_api_key(provider: &str, access: &str, project_id: Option<&str>) -> Option<String> {
     match provider {
-        "anthropic" | "github-copilot" | "openai-codex" => Some(access.to_string()),
+        "anthropic" | "openai-codex" => Some(access.to_string()),
         "google-gemini-cli" | "google-antigravity" => Some(
             serde_json::json!({
                 "token": access,
@@ -1061,75 +915,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_auth_file_oauth_updates_expired_github_copilot_credentials() {
-        let (token_url, server) = spawn_single_response_server(
-            |request| {
-                let request_lower = request.to_ascii_lowercase();
-                assert!(request_lower.starts_with("get /token http/1.1"));
-                assert!(request_lower.contains("authorization: bearer refresh-token"));
-            },
-            serde_json::json!({
-                "token": "tid=test;exp=9999999999;proxy-ep=proxy.enterprise.githubcopilot.com;",
-                "expires_at": 9_999_999_999_i64,
-            })
-            .to_string(),
-            "application/json",
-        );
-
-        let temp_dir = unique_temp_dir("copilot-refresh");
-        let auth_path = temp_dir.join("auth.json");
-        fs::write(
-            &auth_path,
-            serde_json::json!({
-                "github-copilot": {
-                    "type": "oauth",
-                    "refresh": "refresh-token",
-                    "access": "expired-token",
-                    "expires": 0,
-                    "enterpriseUrl": "ghe.example.com",
-                    "extra": "dropped"
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let errors = refresh_auth_file_oauth_inner(
-            &auth_path,
-            &OAuthRefreshOverrides {
-                github_copilot_token_url: Some(&token_url),
-                ..OAuthRefreshOverrides::default()
-            },
-        )
-        .await;
-
-        assert!(errors.is_empty(), "unexpected refresh errors: {errors:?}");
-
-        let refreshed: Value =
-            serde_json::from_str(&fs::read_to_string(&auth_path).unwrap()).unwrap();
-        let credential = refreshed.get("github-copilot").unwrap();
-        assert_eq!(
-            credential.get("access").and_then(Value::as_str),
-            Some("tid=test;exp=9999999999;proxy-ep=proxy.enterprise.githubcopilot.com;")
-        );
-        assert_eq!(
-            credential.get("refresh").and_then(Value::as_str),
-            Some("refresh-token")
-        );
-        assert_eq!(
-            credential.get("enterpriseUrl").and_then(Value::as_str),
-            Some("ghe.example.com")
-        );
-        assert!(credential.get("extra").is_none());
-        assert!(
-            credential.get("expires").and_then(Value::as_i64).unwrap() > now_ms(),
-            "expected refreshed expiry to be in the future"
-        );
-
-        server.join().unwrap();
-    }
-
-    #[tokio::test]
     async fn refresh_auth_file_oauth_updates_expired_google_gemini_cli_credentials() {
         let (token_url, server) = spawn_single_response_server(
             |request| {
@@ -1330,20 +1115,5 @@ mod tests {
         );
 
         server.join().unwrap();
-    }
-
-    #[test]
-    fn github_copilot_base_url_prefers_proxy_endpoint_in_token() {
-        let base_url = get_github_copilot_base_url(
-            Some("tid=test;proxy-ep=proxy.enterprise.githubcopilot.com;"),
-            Some("ghe.example.com"),
-        );
-        assert_eq!(base_url, "https://api.enterprise.githubcopilot.com");
-    }
-
-    #[test]
-    fn github_copilot_base_url_falls_back_to_enterprise_domain() {
-        let base_url = get_github_copilot_base_url(None, Some("ghe.example.com"));
-        assert_eq!(base_url, "https://copilot-api.ghe.example.com");
     }
 }

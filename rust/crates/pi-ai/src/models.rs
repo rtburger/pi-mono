@@ -106,6 +106,10 @@ fn load_catalog() -> BuiltInModelCatalog {
     let mut all_models = Vec::new();
 
     for (provider, models) in raw_catalog {
+        if provider == "github-copilot" {
+            continue;
+        }
+
         providers.push(provider.clone());
         let mut provider_entries = Vec::with_capacity(models.len());
         let mut provider_header_entries = BTreeMap::new();

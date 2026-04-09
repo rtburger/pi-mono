@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 pub const DEFAULT_THINKING_LEVEL: ThinkingLevel = ThinkingLevel::Medium;
 
-pub const DEFAULT_MODELS: [(&str, &str); 23] = [
+pub const DEFAULT_MODELS: [(&str, &str); 22] = [
     ("amazon-bedrock", "us.anthropic.claude-opus-4-6-v1"),
     ("anthropic", "claude-opus-4-6"),
     ("openai", "gpt-5.4"),
@@ -15,7 +15,6 @@ pub const DEFAULT_MODELS: [(&str, &str); 23] = [
     ("google-gemini-cli", "gemini-2.5-pro"),
     ("google-antigravity", "gemini-3.1-pro-high"),
     ("google-vertex", "gemini-3-pro-preview"),
-    ("github-copilot", "gpt-4o"),
     ("openrouter", "openai/gpt-5.1-codex"),
     ("vercel-ai-gateway", "anthropic/claude-opus-4-6"),
     ("xai", "grok-4-fast-non-reasoning"),

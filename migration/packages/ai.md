@@ -457,3 +457,103 @@ Still deferred in `pi-ai`:
 - carrying static built-in headers directly on the Rust `Model` value instead of side-channel catalog lookup
 - full TS `streamSimple` / `completeSimple` API parity
 - next provider slice after Anthropic / header extraction, likely `openai-completions`
+
+## Milestone 10 update: OpenAI Completions request-shaping slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/ai/src/providers/openai-completions.ts`
+- `packages/ai/src/providers/transform-messages.ts`
+- `packages/ai/test/openai-completions-tool-choice.test.ts`
+- `packages/ai/test/openai-completions-tool-result-images.test.ts`
+- targeted references from broader suites where `openai-completions` behavior is exercised:
+  - `packages/ai/test/stream.test.ts`
+  - `packages/ai/test/abort.test.ts`
+  - `packages/ai/test/tool-call-without-result.test.ts`
+  - `packages/ai/test/image-tool-result.test.ts`
+  - `packages/ai/test/tokens.test.ts`
+  - `packages/ai/test/total-tokens.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/src/lib.rs`
+- `rust/crates/pi-ai/src/openai_responses.rs`
+- `rust/crates/pi-ai/src/anthropic_messages.rs`
+- `rust/crates/pi-ai/tests/openai_responses_payload.rs`
+- `rust/crates/pi-ai/tests/openai_responses_params.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- first `openai-completions` migration slice exists in `pi-ai` as a request-shaping/module-level compatibility layer
+- Rust now ports the message replay shaping needed before a runtime transport lands:
+  - system prompt role selection (`developer` vs `system`)
+  - user text/image conversion
+  - assistant text/tool-call replay
+  - synthetic orphaned tool results (`No result provided`)
+  - consecutive tool-result image batching into a follow-up user image message
+  - optional assistant bridge insertion after tool results for compat-constrained providers
+- Rust now ports the first `openai-completions` compat/detection slice from TS:
+  - Groq `qwen/qwen3-32b` reasoning-effort remap to `default`
+  - OpenRouter reasoning-object shaping
+  - z.ai `tool_stream` detection for the current TS-backed model ids (`glm-5`, `glm-4.7`, `glm-4.7-flash`, `glm-4.6v`)
+  - Chutes `max_tokens` field detection
+  - strict-tool-definition omission when compat disables `strict`
+- Rust request param shaping now covers:
+  - `tool_choice`
+  - `stream_options.include_usage`
+  - `store: false` when supported
+  - `max_completion_tokens` vs `max_tokens`
+  - OpenAI/OpenRouter/z.ai thinking parameter differences for the migrated slice
+
+Intentional limitation of this milestone:
+- this is not yet a runtime provider registration slice; no Rust `openai-completions` HTTP/SSE transport has been added yet
+- token-cost calculation, abort/runtime streaming parity, and `streamSimple()` / `completeSimple()` parity remain deferred until the transport path lands
+
+### Rust design summary
+
+New Rust module added:
+- `rust/crates/pi-ai/src/openai_completions.rs`
+
+Public surface added in that module:
+- `ReasoningEffort`
+- `OpenAiCompletionsCompat`
+- `OpenAiCompletionsRequestOptions`
+- `OpenAiCompletionsToolChoice`
+- `OpenAiCompletionsRequestParams`
+- `OpenAiCompletionsMessageParam`
+- `detect_openai_completions_compat()`
+- `build_openai_completions_request_params()`
+- `convert_openai_completions_messages()`
+- `normalize_openai_completions_tool_call_id()`
+
+Integration change:
+- `rust/crates/pi-ai/src/lib.rs` now exposes `pub mod openai_completions`
+
+### Validation summary
+
+New Rust coverage added for:
+- tool-result image batching for `openai-completions` message conversion
+- synthetic orphaned tool-result insertion
+- reasoning-model system-prompt role selection
+- assistant-bridge insertion after tool results when compat requires it
+- tool-choice passthrough and default `strict: false`
+- strict omission when compat disables strict mode
+- OpenRouter reasoning-object shaping
+- Groq Qwen reasoning-effort remapping
+- z.ai `tool_stream` + `enable_thinking` shaping
+- Chutes `max_tokens` field detection
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-ai` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- `openai-completions` runtime transport/stream parsing and provider registration
+- token/cost accounting parity for `openai-completions` streamed chunks
+- broader compat override plumbing from TS model metadata (`model.compat`) instead of only the current Rust detection/request-option surface
+- next provider/runtime slice should stay on `openai-completions` and add the actual HTTP/SSE stream path before moving on to another provider

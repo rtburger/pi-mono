@@ -231,7 +231,7 @@ fn normalizes_foreign_tool_call_ids_for_anthropic_messages() {
                     thought_signature: None,
                 }],
                 api: "openai-responses".into(),
-                provider: "github-copilot".into(),
+                provider: "openai-codex".into(),
                 model: "gpt-5.3-codex".into(),
                 response_id: None,
                 usage: Usage::default(),

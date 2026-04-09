@@ -153,13 +153,11 @@ pub fn build_openai_responses_request_params(
                 effort: options.reasoning_effort.unwrap_or_else(|| "medium".into()),
                 summary: options.reasoning_summary.unwrap_or_else(|| "auto".into()),
             })
-        } else if model.provider != "github-copilot" {
+        } else {
             Some(OpenAiResponsesReasoning {
                 effort: "none".into(),
                 summary: "auto".into(),
             })
-        } else {
-            None
         }
     } else {
         None
@@ -1667,54 +1665,15 @@ pub fn register_openai_responses_provider() {
 
 fn build_runtime_request_headers(
     model: &Model,
-    context: &Context,
+    _context: &Context,
     option_headers: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
     let mut headers = get_model_headers(&model.provider, &model.id)
         .or_else(|| get_provider_headers(&model.provider))
         .unwrap_or_default();
 
-    if model.provider == "github-copilot" {
-        headers.extend(build_copilot_dynamic_headers(&context.messages));
-    }
-
     headers.extend(option_headers.clone());
     headers
-}
-
-fn build_copilot_dynamic_headers(messages: &[Message]) -> BTreeMap<String, String> {
-    let mut headers = BTreeMap::from([
-        (
-            "X-Initiator".to_string(),
-            infer_copilot_initiator(messages).to_string(),
-        ),
-        (
-            "Openai-Intent".to_string(),
-            "conversation-edits".to_string(),
-        ),
-    ]);
-
-    if has_copilot_vision_input(messages) {
-        headers.insert("Copilot-Vision-Request".to_string(), "true".to_string());
-    }
-
-    headers
-}
-
-fn infer_copilot_initiator(messages: &[Message]) -> &'static str {
-    match messages.last() {
-        Some(Message::User { .. }) | None => "user",
-        _ => "agent",
-    }
-}
-
-fn has_copilot_vision_input(messages: &[Message]) -> bool {
-    messages.iter().any(|message| match message {
-        Message::User { content, .. } | Message::ToolResult { content, .. } => content
-            .iter()
-            .any(|part| matches!(part, UserContent::Image { .. })),
-        Message::Assistant { .. } => false,
-    })
 }
 
 fn now_ms() -> u64 {

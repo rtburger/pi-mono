@@ -401,5 +401,5 @@ fn exports_current_default_model_ids() {
         Some("anthropic/claude-opus-4-6")
     );
     assert_eq!(default_model_id_for_provider("zai"), Some("glm-5"));
-    assert_eq!(DEFAULT_MODELS.len(), 23);
+    assert_eq!(DEFAULT_MODELS.len(), 22);
 }

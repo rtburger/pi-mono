@@ -77,60 +77,6 @@ fn auth_file_source_translates_google_gemini_cli_oauth_credentials() {
 }
 
 #[test]
-fn auth_file_source_derives_github_copilot_model_base_url_from_token() {
-    let temp_dir = unique_temp_dir("copilot-base-url-token");
-    let auth_path = temp_dir.join("auth.json");
-    fs::write(
-        &auth_path,
-        serde_json::json!({
-            "github-copilot": {
-                "type": "oauth",
-                "access": "tid=test;proxy-ep=proxy.enterprise.githubcopilot.com;",
-                "refresh": "oauth-refresh-token",
-                "expires": 0,
-                "enterpriseUrl": "ghe.example.com"
-            }
-        })
-        .to_string(),
-    )
-    .unwrap();
-
-    let auth = AuthFileSource::new(auth_path);
-
-    assert_eq!(
-        auth.model_base_url("github-copilot").as_deref(),
-        Some("https://api.enterprise.githubcopilot.com")
-    );
-}
-
-#[test]
-fn auth_file_source_derives_github_copilot_model_base_url_from_enterprise_domain() {
-    let temp_dir = unique_temp_dir("copilot-base-url-enterprise");
-    let auth_path = temp_dir.join("auth.json");
-    fs::write(
-        &auth_path,
-        serde_json::json!({
-            "github-copilot": {
-                "type": "oauth",
-                "access": "token-without-proxy-endpoint",
-                "refresh": "oauth-refresh-token",
-                "expires": 0,
-                "enterpriseUrl": "https://ghe.example.com"
-            }
-        })
-        .to_string(),
-    )
-    .unwrap();
-
-    let auth = AuthFileSource::new(auth_path);
-
-    assert_eq!(
-        auth.model_base_url("github-copilot").as_deref(),
-        Some("https://copilot-api.ghe.example.com")
-    );
-}
-
-#[test]
 fn chained_auth_source_falls_back_to_later_sources() {
     let chained = ChainedAuthSource::new(vec![
         Arc::new(AuthFileSource::new(

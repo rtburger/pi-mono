@@ -6,7 +6,7 @@ use pi_events::{AssistantContent, Context, Message, Model, StopReason, Usage, Us
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
 
-const COPILOT_RAW_TOOL_CALL_ID: &str = "call_4VnzVawQXPB9MgYib7CiQFEY|I9b95oN1wD/cHXKTw3PpRkL6KkCtzTJhUxMouMWYwHeTo2j3htzfSk7YPx2vifiIM4g3A8XXyOj8q4Bt6SLUG7gqY1E3ELkrkVQNHglRfUmWj84lqxJY+Puieb3VKyX0FB+83TUzn91cDMF/4gzt990IzqVrc+nIb9RRscRD070Du16q1glydVjWR0SBJsE6TbY/esOjFpqplogQqrajm1eI++f3eLi73R6q7hVusY0QbeFySVxABCjhN0lXB04caBe1rzHjYzul6MAXj7uq+0r17VLq+yrtyYhN12wkmFqHeqTyEei6EFPbMy24Nc+IbJlkP0OCg02W+gOnyBFcbi2ctvJFSOhSjt1CqBdqCnnhwUqXjbWiT0wh3DmLScRgTHmGkaI+oAcQQjfic65nxj+TnEkReA==";
+const RAW_TOOL_CALL_ID: &str = "call_4VnzVawQXPB9MgYib7CiQFEY|I9b95oN1wD/cHXKTw3PpRkL6KkCtzTJhUxMouMWYwHeTo2j3htzfSk7YPx2vifiIM4g3A8XXyOj8q4Bt6SLUG7gqY1E3ELkrkVQNHglRfUmWj84lqxJY+Puieb3VKyX0FB+83TUzn91cDMF/4gzt990IzqVrc+nIb9RRscRD070Du16q1glydVjWR0SBJsE6TbY/esOjFpqplogQqrajm1eI++f3eLi73R6q7hVusY0QbeFySVxABCjhN0lXB04caBe1rzHjYzul6MAXj7uq+0r17VLq+yrtyYhN12wkmFqHeqTyEei6EFPbMy24Nc+IbJlkP0OCg02W+gOnyBFcbi2ctvJFSOhSjt1CqBdqCnnhwUqXjbWiT0wh3DmLScRgTHmGkaI+oAcQQjfic65nxj+TnEkReA==";
 
 fn model(provider: &str, id: &str) -> Model {
     Model {
@@ -39,7 +39,7 @@ fn normalizes_foreign_tool_call_ids_for_openai_responses() {
     )
     .unwrap();
 
-    let normalized = normalize_tool_call_id(COPILOT_RAW_TOOL_CALL_ID, true, true);
+    let normalized = normalize_tool_call_id(RAW_TOOL_CALL_ID, true, true);
     let (call_id, item_id) = normalized.split_once('|').unwrap();
 
     assert_eq!(call_id, expected["call_id"].as_str().unwrap());
@@ -65,13 +65,13 @@ fn converts_foreign_assistant_tool_call_to_function_call() {
             },
             Message::Assistant {
                 content: vec![AssistantContent::ToolCall {
-                    id: COPILOT_RAW_TOOL_CALL_ID.into(),
+                    id: RAW_TOOL_CALL_ID.into(),
                     name: "edit".into(),
                     arguments: tool_call_arguments(&[("path", json!("src/styles/app.css"))]),
                     thought_signature: None,
                 }],
                 api: "openai-responses".into(),
-                provider: "github-copilot".into(),
+                provider: "openai".into(),
                 model: "gpt-5.3-codex".into(),
                 response_id: None,
                 usage: usage(),
@@ -285,7 +285,7 @@ fn converts_different_model_thinking_to_assistant_output_text() {
                 redacted: false,
             }],
             api: "openai-responses".into(),
-            provider: "github-copilot".into(),
+            provider: "openai".into(),
             model: "gpt-5-mini".into(),
             response_id: None,
             usage: usage(),

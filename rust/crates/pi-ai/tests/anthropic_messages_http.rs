@@ -87,7 +87,7 @@ async fn dispatches_anthropic_messages_through_registry() {
 }
 
 #[tokio::test]
-async fn dispatches_github_copilot_with_dynamic_headers() {
+async fn dispatches_anthropic_oauth_with_claude_code_headers() {
     let server = MockServer::start();
     let sse = concat!(
         "event: message_start\n",
@@ -105,39 +105,23 @@ async fn dispatches_github_copilot_with_dynamic_headers() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/messages")
-            .header("authorization", "Bearer test-key")
-            .header("x-initiator", "user")
-            .header("openai-intent", "conversation-edits")
-            .header("copilot-vision-request", "true")
-            .header("user-agent", "GitHubCopilotChat/0.35.0")
-            .header("copilot-integration-id", "vscode-chat");
+            .header("authorization", "Bearer sk-ant-oat-test-key")
+            .header("user-agent", "claude-cli/2.1.75")
+            .header("x-app", "cli")
+            .header(
+                "anthropic-beta",
+                "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
+            );
         then.status(200)
             .header("content-type", "text/event-stream")
             .body(sse);
     });
 
-    let context = Context {
-        system_prompt: Some("sys".into()),
-        messages: vec![Message::User {
-            content: vec![
-                UserContent::Text {
-                    text: "describe".into(),
-                },
-                UserContent::Image {
-                    data: "ZmFrZQ==".into(),
-                    mime_type: "image/png".into(),
-                },
-            ],
-            timestamp: 1,
-        }],
-        tools: vec![],
-    };
-
     let response = complete(
-        model_with("github-copilot", server.base_url(), vec!["text", "image"]),
-        context,
+        model(server.base_url()),
+        context(),
         StreamOptions {
-            api_key: Some("test-key".into()),
+            api_key: Some("sk-ant-oat-test-key".into()),
             ..Default::default()
         },
     )

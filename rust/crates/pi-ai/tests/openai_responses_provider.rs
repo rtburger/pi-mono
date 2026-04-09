@@ -82,7 +82,7 @@ async fn dispatches_openai_responses_through_registry() {
 }
 
 #[tokio::test]
-async fn dispatches_github_copilot_with_dynamic_headers() {
+async fn passes_custom_headers_for_openai_provider() {
     let server = MockServer::start();
     let sse = concat!(
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n",
@@ -96,66 +96,6 @@ async fn dispatches_github_copilot_with_dynamic_headers() {
         when.method(POST)
             .path("/responses")
             .header("authorization", "Bearer test-key")
-            .header("user-agent", "GitHubCopilotChat/0.35.0")
-            .header("editor-version", "vscode/1.107.0")
-            .header("editor-plugin-version", "copilot-chat/0.35.0")
-            .header("copilot-integration-id", "vscode-chat")
-            .header("x-initiator", "user")
-            .header("openai-intent", "conversation-edits")
-            .header("copilot-vision-request", "true");
-        then.status(200)
-            .header("content-type", "text/event-stream")
-            .body(sse);
-    });
-
-    let context = Context {
-        system_prompt: Some("sys".into()),
-        messages: vec![Message::User {
-            content: vec![
-                UserContent::Text {
-                    text: "describe".into(),
-                },
-                UserContent::Image {
-                    data: "ZmFrZQ==".into(),
-                    mime_type: "image/png".into(),
-                },
-            ],
-            timestamp: 1,
-        }],
-        tools: vec![],
-    };
-
-    let response = complete(
-        model_with("github-copilot", server.base_url(), vec!["text", "image"]),
-        context,
-        StreamOptions {
-            api_key: Some("test-key".into()),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-
-    mock.assert();
-    assert_eq!(response.response_id.as_deref(), Some("resp_1"));
-}
-
-#[tokio::test]
-async fn merges_custom_headers_after_copilot_defaults() {
-    let server = MockServer::start();
-    let sse = concat!(
-        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n",
-        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}\n\n",
-        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
-        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\"}]}}\n\n",
-        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n"
-    );
-
-    let mock = server.mock(|when, then| {
-        when.method(POST)
-            .path("/responses")
-            .header("authorization", "Bearer test-key")
-            .header("x-initiator", "agent")
             .header("openai-intent", "custom-intent")
             .header("x-test-header", "present");
         then.status(200)
@@ -163,25 +103,9 @@ async fn merges_custom_headers_after_copilot_defaults() {
             .body(sse);
     });
 
-    let context = Context {
-        system_prompt: Some("sys".into()),
-        messages: vec![Message::Assistant {
-            content: vec![],
-            api: "openai-responses".into(),
-            provider: "github-copilot".into(),
-            model: "gpt-5-mini".into(),
-            response_id: None,
-            usage: Default::default(),
-            stop_reason: pi_events::StopReason::Stop,
-            error_message: None,
-            timestamp: 1,
-        }],
-        tools: vec![],
-    };
-
     let response = complete(
-        model_with("github-copilot", server.base_url(), vec!["text"]),
-        context,
+        model(server.base_url()),
+        context(),
         StreamOptions {
             api_key: Some("test-key".into()),
             headers: BTreeMap::from([

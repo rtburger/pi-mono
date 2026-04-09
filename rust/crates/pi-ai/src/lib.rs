@@ -1,5 +1,6 @@
 pub mod anthropic_messages;
 pub mod models;
+pub mod openai_completions;
 pub mod openai_responses;
 
 pub use models::{
@@ -87,9 +88,6 @@ pub fn unregister_provider(api: &str) {
 
 pub fn get_env_api_key(provider: &str) -> Option<String> {
     match provider {
-        "github-copilot" => env_var("COPILOT_GITHUB_TOKEN")
-            .or_else(|| env_var("GH_TOKEN"))
-            .or_else(|| env_var("GITHUB_TOKEN")),
         "anthropic" => env_var("ANTHROPIC_OAUTH_TOKEN").or_else(|| env_var("ANTHROPIC_API_KEY")),
         "google-vertex" => env_var("GOOGLE_CLOUD_API_KEY").or_else(vertex_adc_placeholder),
         "amazon-bedrock" => bedrock_placeholder(),
