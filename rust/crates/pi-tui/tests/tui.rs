@@ -719,6 +719,80 @@ fn non_capturing_overlay_unhide_does_not_auto_focus() {
 }
 
 #[test]
+fn overlay_handle_focus_unfocus_and_hidden_state_follow_tui_overlay_controls() {
+    let terminal = MockTerminal::new(40, 8);
+    let mut tui = Tui::new(terminal);
+    let (editor, editor_probe) = FocusableComponent::new(["EDITOR"]);
+    let editor_id = tui.add_child(Box::new(editor));
+    assert!(tui.set_focus_child(editor_id));
+
+    let (overlay, overlay_probe) = FocusableComponent::new(["OVERLAY"]);
+    let handle = tui.show_overlay_handle(
+        Box::new(overlay),
+        OverlayOptions {
+            non_capturing: true,
+            ..OverlayOptions::default()
+        },
+    );
+
+    assert!(!handle.is_hidden(&tui));
+    assert!(!handle.is_focused(&tui));
+    assert!(handle.focus(&mut tui));
+    assert!(handle.is_focused(&tui));
+    assert!(overlay_probe.focused());
+    assert!(!editor_probe.focused());
+
+    assert!(handle.unfocus(&mut tui));
+    assert!(tui.is_child_focused(editor_id));
+    assert!(editor_probe.focused());
+    assert!(!overlay_probe.focused());
+
+    assert!(handle.set_hidden(&mut tui, true));
+    assert!(handle.is_hidden(&tui));
+    assert!(editor_probe.focused());
+    assert!(!overlay_probe.focused());
+
+    assert!(handle.set_hidden(&mut tui, false));
+    assert!(!handle.is_hidden(&tui));
+    assert!(editor_probe.focused());
+    assert!(!handle.is_focused(&tui));
+}
+
+#[test]
+fn overlay_handle_focus_on_hidden_overlay_and_after_hide_are_no_ops() {
+    let terminal = MockTerminal::new(40, 8);
+    let mut tui = Tui::new(terminal);
+    let (editor, editor_probe) = FocusableComponent::new(["EDITOR"]);
+    let editor_id = tui.add_child(Box::new(editor));
+    assert!(tui.set_focus_child(editor_id));
+
+    let (overlay, overlay_probe) = FocusableComponent::new(["OVERLAY"]);
+    let handle = tui.show_overlay_handle(
+        Box::new(overlay),
+        OverlayOptions {
+            non_capturing: true,
+            ..OverlayOptions::default()
+        },
+    );
+
+    assert!(handle.set_hidden(&mut tui, true));
+    assert!(!handle.focus(&mut tui));
+    assert!(handle.is_hidden(&tui));
+    assert!(editor_probe.focused());
+    assert!(!overlay_probe.focused());
+
+    assert!(handle.set_hidden(&mut tui, false));
+    assert!(handle.focus(&mut tui));
+    assert!(handle.hide(&mut tui));
+    assert!(editor_probe.focused());
+    assert!(!overlay_probe.focused());
+
+    assert!(!handle.focus(&mut tui));
+    assert!(!handle.unfocus(&mut tui));
+    assert!(!handle.is_focused(&tui));
+}
+
+#[test]
 fn input_listeners_transform_consume_and_can_be_removed() {
     let terminal = MockTerminal::new(40, 8);
     let mut tui = Tui::new(terminal);

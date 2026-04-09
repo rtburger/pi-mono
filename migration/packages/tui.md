@@ -1183,3 +1183,173 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui` / `rust/crates/pi-tui` and continue with the next smallest interaction slice that unlocks coding-agent integration without overbuilding:
 - either add the first-class overlay-handle API still deferred from the control path
 - or port the next minimal supporting widgets (`Text` / `Spacer`) plus a thin coding-agent shell layer that can actually use the new `Input`
+
+## Milestone 14 update: first-class overlay-handle API slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/tui.ts`
+- `packages/tui/src/index.ts`
+- `packages/tui/test/overlay-non-capturing.test.ts`
+- `packages/tui/test/overlay-options.test.ts`
+- `packages/tui/test/overlay-short-content.test.ts`
+- `packages/tui/test/tui-render.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/src/tui.rs`
+- `rust/crates/pi-tui/tests/tui.rs`
+- `migration/packages/tui.md`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- `pi-tui` now exposes a first-class `OverlayHandle` surface on top of the existing id-based overlay controls
+- the handle now covers the current TypeScript overlay-control behaviors needed by coding-agent selector/dialog work:
+  - hide an overlay
+  - toggle temporary hidden state
+  - query hidden state
+  - focus an overlay
+  - unfocus an overlay
+  - query focused state
+- non-capturing overlay behavior remains aligned with the earlier Rust focus work while now being addressable through the new handle API:
+  - focusing a non-capturing overlay explicitly transfers focus
+  - unfocusing restores the previous target
+  - rehiding/unhiding a non-capturing overlay does not auto-focus it
+- handle no-op guard behavior is now covered in Rust for the migrated slice:
+  - focusing a hidden overlay is a no-op
+  - focusing or unfocusing a removed overlay handle is a no-op
+
+Current intentional compatibility limitation for this slice:
+- unlike the TypeScript object handle, the Rust `OverlayHandle` methods require an explicit `&mut Tui<_>` or `&Tui<_>` parameter instead of closing over the owning `Tui`
+- stale Rust handles do not preserve their own independent hidden-state shadow after removal; once an overlay is removed, handle queries fall back to `false`
+
+### Rust design summary
+
+Expanded `pi-tui::tui` with:
+- `OverlayHandle`
+- `Tui::show_overlay_handle(...)`
+- `Tui::is_overlay_hidden(...)`
+
+Design choices for this slice:
+- keep the existing id-based overlay API intact and layer the handle API on top, so the migration does not force a broader `Tui` ownership redesign in the same milestone
+- use a lightweight handle keyed by `OverlayId` instead of introducing shared interior-mutability between `Tui` and overlay handles
+- keep handle operations as thin delegations to the already-validated overlay focus/visibility machinery
+
+### Validation summary
+
+New Rust coverage added for:
+- handle-driven focus/unfocus and hidden-state transitions on a non-capturing overlay
+- handle-driven no-op behavior for hidden overlays and removed overlays
+- existing overlay/focus/render tests continue to validate the shared underlying overlay machinery
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test tui` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` to be re-run after this milestone; current repo history indicates it may pass, but validation for this slice should report the actual result from the current worktree
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- differential rendering parity is still partial relative to TS `packages/tui/src/tui.ts`
+- richer widget surface still missing (`Text`, `Spacer`, multiline editor, autocomplete, markdown/select/settings/image widgets)
+- no thin coding-agent interactive shell has been wired on top of the current Rust `Input`, startup-header, and overlay foundations yet
+- immediate terminal-callback processing still uses the current explicit queued-drain bridge instead of a more direct event path
+
+### Recommended next step
+
+Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
+- port the next smallest layout/widget slice that can actually consume the new overlay handles in coding-agent
+- the best next candidate is a minimal `Text` / `Spacer` + shell composition layer for a Rust interactive startup view, keeping multiline editor and transcript work deferred until that shell exists
+
+## Milestone 15 update: minimal `Text` + `Spacer` widget slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/components/text.ts`
+- `packages/tui/src/components/spacer.ts`
+- `packages/tui/src/utils.ts` (background-application helper section)
+- `packages/tui/src/index.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`
+- `packages/coding-agent/src/modes/interactive/components/visual-truncate.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/src/utils.rs`
+- `rust/crates/pi-tui/tests/utils.rs`
+- `migration/packages/tui.md`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- `pi-tui` now exports first minimal `Text` and `Spacer` widgets
+- the Rust `Text` slice now preserves the current TypeScript behavior needed by coding-agent startup and status/message composition:
+  - blank/whitespace-only text renders no lines
+  - horizontal padding is applied before final width padding
+  - vertical padding inserts full-width blank lines above and below content
+  - tabs are normalized to three spaces before wrapping
+  - wrapped lines are padded to the requested width
+  - optional background styling can be applied to both content and trailing padding for each rendered line
+- the Rust `Spacer` now preserves the TS shape of rendering a configurable count of empty lines
+
+Current intentional compatibility limitation for this slice:
+- the Rust `Text` component does not yet port the TypeScript render cache; current behavior is recomputed on every render
+- no generic `applyBackgroundToLine(...)` helper was added to `pi-tui::utils` yet; the background-padding behavior currently lives inside the Rust `Text` component only
+
+### Rust design summary
+
+New Rust modules:
+- `pi-tui::text`
+  - `Text`
+- `pi-tui::spacer`
+  - `Spacer`
+
+Public API added in this milestone:
+- `Text::new(...)`
+- `Text::with_custom_bg_fn(...)`
+- `Text::set_text(...)`
+- `Text::set_custom_bg_fn(...)`
+- `Text::clear_custom_bg_fn()`
+- `Spacer::new(...)`
+- `Spacer::set_lines(...)`
+- crate exports via `pi_tui::Text` and `pi_tui::Spacer`
+
+Implementation choices for this slice:
+- keep the first Rust `Text` focused on the behavior coding-agent currently uses heavily (`Text(...)` with padding and optional background), rather than broadening into the more complex markdown/box/widget surfaces first
+- reuse the already-ported `wrap_text_with_ansi(...)` and `visible_width(...)` helpers instead of introducing a second text-layout path
+- keep the background function as an explicit closure stored on the component, matching the TS extensibility shape closely enough for later coding-agent message widgets
+
+### Validation summary
+
+New Rust coverage added for:
+- blank text rendering no lines
+- spacer rendering the requested number of empty lines
+- wrapped text with horizontal padding and full-width output
+- vertical padding behavior
+- tab normalization to three spaces
+- background application over both content and padding width
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test text` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- thin coding-agent shell composition on top of the now-ported `BuiltInHeaderComponent`, `Input`, `Text`, and `Spacer`
+- differential rendering parity remains partial relative to TS `packages/tui/src/tui.ts`
+- richer widgets are still missing (`TruncatedText`, multiline editor, autocomplete, markdown/select/settings/image widgets)
+- no Rust transcript/chat view has been composed yet from the currently available primitives
+
+### Recommended next step
+
+Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
+- build the first thin Rust interactive startup shell using the already-ported pieces (`BuiltInHeaderComponent`, `Input`, `Text`, `Spacer`, overlay handles, and `Tui`)
+- keep multiline editor, transcript rendering, and broader widget parity deferred until that shell is rendering and focusable end-to-end

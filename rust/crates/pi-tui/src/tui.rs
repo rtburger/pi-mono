@@ -69,6 +69,41 @@ pub struct ComponentId(u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OverlayId(u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OverlayHandle {
+    id: OverlayId,
+}
+
+impl OverlayHandle {
+    pub fn id(self) -> OverlayId {
+        self.id
+    }
+
+    pub fn hide<T: Terminal>(self, tui: &mut Tui<T>) -> bool {
+        tui.hide_overlay_by_id(self.id)
+    }
+
+    pub fn set_hidden<T: Terminal>(self, tui: &mut Tui<T>, hidden: bool) -> bool {
+        tui.set_overlay_hidden(self.id, hidden)
+    }
+
+    pub fn is_hidden<T: Terminal>(self, tui: &Tui<T>) -> bool {
+        tui.is_overlay_hidden(self.id)
+    }
+
+    pub fn focus<T: Terminal>(self, tui: &mut Tui<T>) -> bool {
+        tui.focus_overlay(self.id)
+    }
+
+    pub fn unfocus<T: Terminal>(self, tui: &mut Tui<T>) -> bool {
+        tui.unfocus_overlay(self.id)
+    }
+
+    pub fn is_focused<T: Terminal>(self, tui: &Tui<T>) -> bool {
+        tui.is_overlay_focused(self.id)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayAnchor {
     Center,
@@ -399,6 +434,16 @@ impl<T: Terminal> Tui<T> {
         id
     }
 
+    pub fn show_overlay_handle(
+        &mut self,
+        component: Box<dyn Component>,
+        options: OverlayOptions,
+    ) -> OverlayHandle {
+        OverlayHandle {
+            id: self.show_overlay(component, options),
+        }
+    }
+
     pub fn hide_overlay(&mut self) -> bool {
         let Some(mut entry) = self.overlays.pop() else {
             return false;
@@ -487,6 +532,14 @@ impl<T: Terminal> Tui<T> {
 
     pub fn is_overlay_focused(&self, id: OverlayId) -> bool {
         self.focused_target == Some(FocusTarget::Overlay(id))
+    }
+
+    pub fn is_overlay_hidden(&self, id: OverlayId) -> bool {
+        self.overlays
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.hidden)
+            .unwrap_or(false)
     }
 
     pub fn overlay_count(&self) -> usize {
