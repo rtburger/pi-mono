@@ -1,6 +1,7 @@
 mod keybinding_hints;
 mod keybindings;
 mod startup_header;
+mod startup_shell;
 
 pub use keybinding_hints::{KeyHintStyler, PlainKeyHintStyler, key_hint, key_text, raw_key_hint};
 pub use keybindings::{
@@ -12,6 +13,7 @@ pub use startup_header::{
     BuiltInHeaderComponent, StartupHeaderComponent, StartupHeaderStyler,
     build_condensed_changelog_notice, build_startup_header_text,
 };
+pub use startup_shell::StartupShellComponent;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodingAgentTuiError {

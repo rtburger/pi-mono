@@ -249,10 +249,6 @@ impl Component for BuiltInHeaderComponent {
             }
         }
 
-        if lines.is_empty() {
-            lines.push(String::new());
-        }
-
         lines
     }
 

@@ -271,3 +271,12 @@ fn built_in_header_component_in_quiet_mode_only_shows_condensed_notice() {
         ]
     );
 }
+
+#[test]
+fn built_in_header_component_in_quiet_mode_without_changelog_renders_no_lines() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let component =
+        BuiltInHeaderComponent::new("Pi", "1.2.3", &keybindings, &PlainStyler, true, None, false);
+
+    assert_eq!(component.render(80), Vec::<String>::new());
+}

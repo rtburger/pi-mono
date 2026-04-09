@@ -1595,3 +1595,86 @@ Still deferred for the coding-agent interactive header/startup surface:
 - no full generic Rust markdown widget yet; broader `packages/tui` markdown parity still remains deferred
 - no Rust interactive session/editor/footer integration yet
 - session-manager/resource-loader-backed interactive startup remains deferred
+
+## Milestone 27 update: minimal interactive startup shell slice
+
+### Files analyzed
+
+Additional TypeScript files reviewed for this slice:
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (constructor/startup layout section around header + editor wiring)
+- previously ported startup/header and keybinding sources remained the behavior baseline:
+  - `packages/coding-agent/src/core/keybindings.ts`
+  - `packages/coding-agent/src/modes/interactive/components/keybinding-hints.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/startup_header.rs`
+- `rust/crates/pi-coding-agent-tui/src/keybindings.rs`
+- `rust/crates/pi-coding-agent-tui/src/keybinding_hints.rs`
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/src/input.rs`
+- `rust/crates/pi-tui/src/tui.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_header.rs`
+
+### Behavior summary
+
+New TS-compatible interactive-startup behavior now covered in Rust:
+- `pi-coding-agent-tui` now exposes a first minimal `StartupShellComponent` that composes the already-ported built-in startup header with the already-ported single-line `pi-tui::Input`
+- the shell now follows the current TypeScript startup layout shape for the migrated subset:
+  - built-in header content above the prompt when startup is not quiet
+  - prompt-only layout when quiet startup has no changelog
+  - changelog/header content still rendered before the prompt through the existing `BuiltInHeaderComponent`
+- focus and input now flow through the composed shell when mounted in a `pi_tui::Tui`, so the prompt inherits the existing hardware-cursor / marker behavior from `pi-tui`
+- shell input submission and escape handling now reuse the same callback semantics already present on the Rust `Input`
+- the same coding-agent keybinding manager instance now drives both halves of the startup shell:
+  - header hints render resolved app keybindings
+  - input honors overridden TUI keybindings like a custom submit binding
+- quiet built-in header rendering without changelog now returns no lines, matching the TypeScript silent-startup path more closely than the previous placeholder empty-line behavior
+
+### Rust design summary
+
+New `pi-coding-agent-tui::startup_shell` module:
+- `StartupShellComponent`
+  - owns `BuiltInHeaderComponent`
+  - owns `pi_tui::Input`
+  - forwards `render`, `handle_input`, and `set_focused` through the composed shell surface
+  - exposes narrow prompt control hooks needed by the first integration slice:
+    - `set_on_submit(...)`
+    - `clear_on_submit()`
+    - `set_on_escape(...)`
+    - `clear_on_escape()`
+    - `input_value()`
+    - `set_input_value(...)`
+    - `clear_input()`
+    - `is_focused()`
+
+Compatibility choices for this slice:
+- keep the shell as a single `Component` instead of introducing a larger Rust interactive-mode/runtime wrapper yet
+- reuse the existing coding-agent `KeybindingsManager` and clone its resolved `pi_tui::KeybindingsManager` into the embedded input widget, preserving current keybinding semantics without adding new global state
+- keep chat transcript, footer, multiline editor, overlays, and session/runtime wiring deferred until this startup shell exists and is testable through the current Rust `Tui`
+
+### Validation summary
+
+New Rust coverage added for:
+- rendering startup header content above the prompt through `pi_tui::Tui`
+- quiet startup without changelog rendering the prompt on the first line
+- routing typed input and submit events through focused `Tui` input delivery into the startup shell
+- shared keybinding behavior across startup-header hints and prompt input bindings
+- quiet built-in header with no changelog rendering no lines
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test startup_shell` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test startup_header` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive shell surface:
+- no Rust multiline editor / custom-editor parity yet; the shell still uses the narrow single-line `Input` slice
+- no transcript/chat container composition yet above the prompt
+- no Rust footer integration yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
