@@ -379,3 +379,96 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui` / `rust/crates/pi-tui` and port the next concrete interactive foundation layer:
 - the minimal terminal/input path (`packages/tui/src/terminal.ts`)
 - or, if staying narrower, the first container/input widget slice needed by coding-agent interactive mode
+
+## Milestone 5 update: terminal control + protocol-state slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/terminal.ts`
+- `packages/tui/test/virtual-terminal.ts`
+- `packages/tui/test/tui-render.test.ts`
+- `packages/tui/test/overlay-non-capturing.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/Cargo.toml`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- exported terminal surface now exists in Rust with:
+  - `Terminal` trait
+  - `ProcessTerminal`
+- terminal output/control ANSI helpers now mirror the TS command shapes for:
+  - relative cursor movement
+  - cursor hide/show
+  - clear line / clear from cursor / full clear-screen
+  - terminal title setting
+- `ProcessTerminal::start()` now performs the same startup control writes for the migrated slice:
+  - enable bracketed paste
+  - query Kitty keyboard protocol support
+- `ProcessTerminal` now integrates the previously ported stdin buffer for protocol-aware input splitting in the migrated slice
+- Kitty protocol response handling now matches the TS shape:
+  - detect `CSI ? <flags> u`
+  - mark Kitty protocol active
+  - update global key-parser Kitty state
+  - emit the TS enable sequence (`CSI > 7 u`)
+  - do not forward the raw protocol response to the input handler
+- bracketed paste events from the stdin buffer are rewrapped and forwarded as the original TS input-handler shape (`\x1b[200~...\x1b[201~`)
+- modifyOtherKeys fallback state handling now exists for the migrated slice, including disable-on-drain/stop behavior
+- `drain_input()` and `stop()` now disable active input protocols in TS order for the implemented subset
+- terminal dimension accessors now exist with Rust-side fallback semantics
+
+Current intentional compatibility limitation for this slice:
+- Rust does not yet attach `ProcessTerminal` to real stdin/stdout event loops, raw-mode management, resize signals, Windows VT-input setup, or the timed modifyOtherKeys fallback timer. This milestone ports the terminal control/protocol state machine first, not the full OS integration path.
+
+### Rust design summary
+
+New `pi-tui::terminal` module added with:
+- `Terminal` trait
+- `ProcessTerminal`
+- internal stdout backend abstraction for testable write capture
+
+Implementation choices for this slice:
+- keep the migrated terminal logic centered on protocol/control behavior that can be validated deterministically without running an interactive app
+- reuse the existing `StdinBuffer` and Kitty global-state helpers instead of duplicating sequence handling
+- keep resize notification and modifyOtherKeys fallback as explicit internal hooks for now, so the future OS-integration layer can call them without redesigning the terminal surface again
+- widen `TuiError` to carry I/O failures from terminal write operations
+
+### Validation summary
+
+New Rust coverage added for:
+- startup writes for bracketed paste + Kitty query
+- Kitty protocol response handling and non-forwarding of the raw response
+- normal input forwarding and bracketed paste rewrapping
+- modifyOtherKeys fallback activation plus drain-time disable ordering
+- stop-time protocol disable ordering
+- ANSI helper output sequences
+- Kitty protocol response recognition helper behavior
+
+Validation run results:
+- `cd rust && cargo fmt` passed
+- `cd rust && cargo test -p pi-tui terminal` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` still fails in this environment before repo checks run because `biome` is not installed (`sh: biome: command not found`)
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- real process stdin event-loop wiring and raw-mode handling
+- real resize/signal integration
+- Windows VT-input setup parity
+- timed modifyOtherKeys fallback parity
+- render tree / container / overlay engine
+- width/ANSI helpers
+- input/editor/autocomplete widgets
+- markdown/select/settings/image widgets
+- coding-agent interactive integration
+
+### Recommended next step
+
+Stay in `packages/tui` / `rust/crates/pi-tui` and continue with the next smallest layer that reduces interactive-mode risk:
+- either complete the remaining OS-facing `ProcessTerminal` integration
+- or port the first render/container slice needed to make `Terminal` consumable by a Rust `TUI`
