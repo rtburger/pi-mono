@@ -1,10 +1,14 @@
 use pi_tui::{
-    Component, Container, OverlayAnchor, OverlayMargin, OverlayOptions, SizeValue, Terminal, Tui,
-    TuiError, visible_width,
+    CURSOR_MARKER, Component, Container, InputListenerResult, OverlayAnchor, OverlayMargin,
+    OverlayOptions, SizeValue, Terminal, Tui, TuiError, get_cell_dimensions, set_cell_dimensions,
+    visible_width,
 };
 use std::{
     cell::Cell,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -43,6 +47,88 @@ impl Component for StaticComponent {
     fn invalidate(&mut self) {}
 }
 
+#[derive(Default)]
+struct FocusableState {
+    focused: bool,
+    inputs: Vec<String>,
+}
+
+#[derive(Clone)]
+struct FocusableProbe {
+    state: Arc<Mutex<FocusableState>>,
+}
+
+impl FocusableProbe {
+    fn focused(&self) -> bool {
+        self.state
+            .lock()
+            .expect("focusable state mutex poisoned")
+            .focused
+    }
+
+    fn inputs(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("focusable state mutex poisoned")
+            .inputs
+            .clone()
+    }
+}
+
+struct FocusableComponent {
+    lines: Vec<String>,
+    state: Arc<Mutex<FocusableState>>,
+    wants_key_release: bool,
+}
+
+impl FocusableComponent {
+    fn new(lines: impl IntoIterator<Item = impl Into<String>>) -> (Self, FocusableProbe) {
+        Self::with_key_release(lines, false)
+    }
+
+    fn with_key_release(
+        lines: impl IntoIterator<Item = impl Into<String>>,
+        wants_key_release: bool,
+    ) -> (Self, FocusableProbe) {
+        let state = Arc::new(Mutex::new(FocusableState::default()));
+        (
+            Self {
+                lines: lines.into_iter().map(Into::into).collect(),
+                state: Arc::clone(&state),
+                wants_key_release,
+            },
+            FocusableProbe { state },
+        )
+    }
+}
+
+impl Component for FocusableComponent {
+    fn render(&self, _width: usize) -> Vec<String> {
+        self.lines.clone()
+    }
+
+    fn invalidate(&mut self) {}
+
+    fn handle_input(&mut self, data: &str) {
+        self.state
+            .lock()
+            .expect("focusable state mutex poisoned")
+            .inputs
+            .push(data.to_owned());
+    }
+
+    fn wants_key_release(&self) -> bool {
+        self.wants_key_release
+    }
+
+    fn set_focused(&mut self, focused: bool) {
+        self.state
+            .lock()
+            .expect("focusable state mutex poisoned")
+            .focused = focused;
+    }
+}
+
 #[derive(Clone)]
 struct MockTerminal {
     state: Arc<Mutex<MockTerminalState>>,
@@ -56,6 +142,8 @@ struct MockTerminalState {
     cursor_hidden: bool,
     columns: u16,
     rows: u16,
+    on_input: Option<Box<dyn FnMut(String) + Send>>,
+    on_resize: Option<Box<dyn FnMut() + Send>>,
 }
 
 impl MockTerminal {
@@ -67,6 +155,8 @@ impl MockTerminal {
             cursor_hidden: false,
             columns,
             rows,
+            on_input: None,
+            on_resize: None,
         };
         Self {
             state: Arc::new(Mutex::new(state)),
@@ -101,22 +191,42 @@ impl MockTerminal {
             .expect("mock terminal mutex poisoned")
             .cursor_hidden
     }
+
+    fn send_input(&self, data: &str) {
+        let mut state = self.state.lock().expect("mock terminal mutex poisoned");
+        if let Some(handler) = state.on_input.as_mut() {
+            handler(data.to_owned());
+        }
+    }
+
+    fn resize(&self, columns: u16, rows: u16) {
+        let mut state = self.state.lock().expect("mock terminal mutex poisoned");
+        state.columns = columns;
+        state.rows = rows;
+        if let Some(handler) = state.on_resize.as_mut() {
+            handler();
+        }
+    }
 }
 
 impl Terminal for MockTerminal {
     fn start(
         &mut self,
-        _on_input: Box<dyn FnMut(String) + Send>,
-        _on_resize: Box<dyn FnMut() + Send>,
+        on_input: Box<dyn FnMut(String) + Send>,
+        on_resize: Box<dyn FnMut() + Send>,
     ) -> Result<(), TuiError> {
         let mut state = self.state.lock().expect("mock terminal mutex poisoned");
         state.started += 1;
+        state.on_input = Some(on_input);
+        state.on_resize = Some(on_resize);
         Ok(())
     }
 
     fn stop(&mut self) -> Result<(), TuiError> {
         let mut state = self.state.lock().expect("mock terminal mutex poisoned");
         state.stopped += 1;
+        state.on_input = None;
+        state.on_resize = None;
         Ok(())
     }
 
@@ -382,6 +492,380 @@ fn overlay_lines_are_truncated_to_declared_width_and_terminal_width() {
 
     let lines = tui.render_for_size(20, 6);
     assert!(visible_width(&lines[0]) <= 20);
+}
+
+#[test]
+fn render_for_size_strips_cursor_marker_from_visible_output() {
+    let terminal = MockTerminal::new(20, 5);
+    let mut tui = Tui::new(terminal);
+    tui.add_child(Box::new(StaticComponent::new([
+        format!("ab{CURSOR_MARKER}cd"),
+        "tail".to_owned(),
+    ])));
+
+    let lines = tui.render_for_size(20, 5);
+    assert!(lines[0].contains("abcd"));
+    assert!(!lines[0].contains(CURSOR_MARKER));
+}
+
+#[test]
+fn start_positions_cursor_at_marker_and_shows_it_when_enabled() {
+    let terminal = MockTerminal::new(20, 5);
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    tui.add_child(Box::new(StaticComponent::new([
+        format!("ab{CURSOR_MARKER}cd"),
+        "tail".to_owned(),
+    ])));
+
+    assert!(!tui.show_hardware_cursor());
+    tui.set_show_hardware_cursor(true)
+        .expect("enabling hardware cursor should succeed");
+    assert!(tui.show_hardware_cursor());
+
+    tui.start().expect("start should succeed");
+
+    let writes = inspector.writes().join("");
+    assert!(writes.contains("\x1b[2J\x1b[Habcd"));
+    assert!(writes.contains("\x1b[1A\x1b[3G"));
+    assert!(!inspector.cursor_hidden());
+
+    tui.stop().expect("stop should succeed");
+}
+
+#[test]
+fn missing_cursor_marker_keeps_cursor_hidden_when_enabled() {
+    let terminal = MockTerminal::new(20, 5);
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    tui.add_child(Box::new(StaticComponent::new(["hello", "world"])));
+
+    tui.set_show_hardware_cursor(true)
+        .expect("enabling hardware cursor should succeed");
+    tui.start().expect("start should succeed");
+
+    assert!(inspector.cursor_hidden());
+
+    tui.stop().expect("stop should succeed");
+}
+
+#[test]
+fn capturing_and_non_capturing_overlays_manage_focus() {
+    let terminal = MockTerminal::new(40, 8);
+    let mut tui = Tui::new(terminal);
+    let (editor, editor_probe) = FocusableComponent::new(["EDITOR"]);
+    let editor_id = tui.add_child(Box::new(editor));
+    assert!(tui.set_focus_child(editor_id));
+    assert!(editor_probe.focused());
+
+    let (non_capturing, non_capturing_probe) = FocusableComponent::new(["NC"]);
+    let non_capturing_id = tui.show_overlay(
+        Box::new(non_capturing),
+        OverlayOptions {
+            non_capturing: true,
+            ..OverlayOptions::default()
+        },
+    );
+    assert!(tui.is_child_focused(editor_id));
+    assert!(editor_probe.focused());
+    assert!(!tui.is_overlay_focused(non_capturing_id));
+    assert!(!non_capturing_probe.focused());
+
+    let (capturing, capturing_probe) = FocusableComponent::new(["CAP"]);
+    let capturing_id = tui.show_overlay(Box::new(capturing), OverlayOptions::default());
+    assert!(tui.is_overlay_focused(capturing_id));
+    assert!(capturing_probe.focused());
+    assert!(!editor_probe.focused());
+    assert!(!non_capturing_probe.focused());
+}
+
+#[test]
+fn focus_and_unfocus_overlay_restore_previous_child_focus() {
+    let terminal = MockTerminal::new(40, 8);
+    let mut tui = Tui::new(terminal);
+    let (editor, editor_probe) = FocusableComponent::new(["EDITOR"]);
+    let editor_id = tui.add_child(Box::new(editor));
+    assert!(tui.set_focus_child(editor_id));
+
+    let (overlay, overlay_probe) = FocusableComponent::new(["OVERLAY"]);
+    let overlay_id = tui.show_overlay(
+        Box::new(overlay),
+        OverlayOptions {
+            non_capturing: true,
+            ..OverlayOptions::default()
+        },
+    );
+
+    assert!(tui.focus_overlay(overlay_id));
+    assert!(tui.is_overlay_focused(overlay_id));
+    assert!(overlay_probe.focused());
+    assert!(!editor_probe.focused());
+
+    assert!(tui.unfocus_overlay(overlay_id));
+    assert!(tui.is_child_focused(editor_id));
+    assert!(editor_probe.focused());
+    assert!(!overlay_probe.focused());
+
+    assert!(tui.focus_overlay(overlay_id));
+    assert!(tui.hide_overlay_by_id(overlay_id));
+    assert!(tui.is_child_focused(editor_id));
+    assert!(editor_probe.focused());
+    assert!(!overlay_probe.focused());
+}
+
+#[test]
+fn handle_input_redirects_away_from_invisible_overlay_and_skips_non_capturing() {
+    let terminal = MockTerminal::new(40, 8);
+    let mut tui = Tui::new(terminal);
+
+    let (editor, editor_probe) = FocusableComponent::new(["EDITOR"]);
+    let editor_id = tui.add_child(Box::new(editor));
+    assert!(tui.set_focus_child(editor_id));
+
+    let (fallback, fallback_probe) = FocusableComponent::new(["FALLBACK"]);
+    let fallback_id = tui.show_overlay(Box::new(fallback), OverlayOptions::default());
+    assert!(tui.is_overlay_focused(fallback_id));
+
+    let (non_capturing, non_capturing_probe) = FocusableComponent::new(["NC"]);
+    let _non_capturing_id = tui.show_overlay(
+        Box::new(non_capturing),
+        OverlayOptions {
+            non_capturing: true,
+            ..OverlayOptions::default()
+        },
+    );
+
+    let visible = Arc::new(AtomicBool::new(true));
+    let visible_for_overlay = Arc::clone(&visible);
+    let (primary, primary_probe) = FocusableComponent::new(["PRIMARY"]);
+    let primary_id = tui.show_overlay(
+        Box::new(primary),
+        OverlayOptions {
+            visible: Some(Box::new(move |_, _| {
+                visible_for_overlay.load(Ordering::Relaxed)
+            })),
+            ..OverlayOptions::default()
+        },
+    );
+    assert!(tui.is_overlay_focused(primary_id));
+
+    visible.store(false, Ordering::Relaxed);
+    tui.handle_input("x").expect("input routing should succeed");
+
+    assert_eq!(primary_probe.inputs(), Vec::<String>::new());
+    assert_eq!(non_capturing_probe.inputs(), Vec::<String>::new());
+    assert_eq!(fallback_probe.inputs(), vec!["x".to_owned()]);
+    assert!(tui.is_overlay_focused(fallback_id));
+    assert!(fallback_probe.focused());
+    assert!(!editor_probe.focused());
+}
+
+#[test]
+fn focus_overlay_bumps_visual_order_for_overlapping_overlays() {
+    let terminal = MockTerminal::new(20, 6);
+    let mut tui = Tui::new(terminal);
+    let lower = tui.show_overlay(
+        Box::new(StaticComponent::new(["A"])),
+        OverlayOptions {
+            row: Some(SizeValue::absolute(0)),
+            col: Some(SizeValue::absolute(0)),
+            width: Some(1.into()),
+            non_capturing: true,
+            ..OverlayOptions::default()
+        },
+    );
+    tui.show_overlay(
+        Box::new(StaticComponent::new(["B"])),
+        OverlayOptions {
+            row: Some(SizeValue::absolute(0)),
+            col: Some(SizeValue::absolute(0)),
+            width: Some(1.into()),
+            non_capturing: true,
+            ..OverlayOptions::default()
+        },
+    );
+
+    let lines = tui.render_for_size(20, 6);
+    assert!(lines[0].contains("B"));
+
+    assert!(tui.focus_overlay(lower));
+    assert!(tui.is_overlay_focused(lower));
+    let lines = tui.render_for_size(20, 6);
+    assert!(lines[0].contains("A"));
+}
+
+#[test]
+fn non_capturing_overlay_unhide_does_not_auto_focus() {
+    let terminal = MockTerminal::new(40, 8);
+    let mut tui = Tui::new(terminal);
+    let (editor, editor_probe) = FocusableComponent::new(["EDITOR"]);
+    let editor_id = tui.add_child(Box::new(editor));
+    assert!(tui.set_focus_child(editor_id));
+
+    let (overlay, overlay_probe) = FocusableComponent::new(["OVERLAY"]);
+    let overlay_id = tui.show_overlay(
+        Box::new(overlay),
+        OverlayOptions {
+            non_capturing: true,
+            ..OverlayOptions::default()
+        },
+    );
+
+    assert!(tui.set_overlay_hidden(overlay_id, true));
+    assert!(tui.set_overlay_hidden(overlay_id, false));
+    assert!(tui.is_child_focused(editor_id));
+    assert!(editor_probe.focused());
+    assert!(!overlay_probe.focused());
+}
+
+#[test]
+fn input_listeners_transform_consume_and_can_be_removed() {
+    let terminal = MockTerminal::new(40, 8);
+    let mut tui = Tui::new(terminal);
+    let (editor, editor_probe) = FocusableComponent::new(["EDITOR"]);
+    let editor_id = tui.add_child(Box::new(editor));
+    assert!(tui.set_focus_child(editor_id));
+
+    let transform_id = tui.add_input_listener(|data| {
+        if data == "x" {
+            InputListenerResult::replace("y")
+        } else {
+            InputListenerResult::passthrough()
+        }
+    });
+    let _consume_id = tui.add_input_listener(|data| {
+        if data == "stop" {
+            InputListenerResult::consume()
+        } else {
+            InputListenerResult::passthrough()
+        }
+    });
+
+    tui.handle_input("x")
+        .expect("transformed input should be delivered");
+    assert_eq!(editor_probe.inputs(), vec!["y".to_owned()]);
+
+    tui.handle_input("stop")
+        .expect("consumed input should succeed");
+    assert_eq!(editor_probe.inputs(), vec!["y".to_owned()]);
+
+    assert!(tui.remove_input_listener(transform_id));
+    tui.handle_input("x")
+        .expect("raw input should be delivered after removal");
+    assert_eq!(editor_probe.inputs(), vec!["y".to_owned(), "x".to_owned()]);
+}
+
+#[test]
+fn debug_handler_runs_before_focused_component() {
+    let terminal = MockTerminal::new(40, 8);
+    let mut tui = Tui::new(terminal);
+    let (editor, editor_probe) = FocusableComponent::new(["EDITOR"]);
+    let editor_id = tui.add_child(Box::new(editor));
+    assert!(tui.set_focus_child(editor_id));
+
+    let debug_count = Arc::new(Mutex::new(0u32));
+    let debug_count_for_handler = Arc::clone(&debug_count);
+    tui.set_debug_handler(move || {
+        *debug_count_for_handler
+            .lock()
+            .expect("debug counter mutex poisoned") += 1;
+    });
+
+    tui.handle_input("\x1b[27;6;100~")
+        .expect("debug key should be handled");
+    assert_eq!(
+        *debug_count.lock().expect("debug counter mutex poisoned"),
+        1
+    );
+    assert_eq!(editor_probe.inputs(), Vec::<String>::new());
+
+    tui.clear_debug_handler();
+    tui.handle_input("\x1b[27;6;100~")
+        .expect("raw input should reach the focused component once debug is cleared");
+    assert_eq!(editor_probe.inputs(), vec!["\x1b[27;6;100~".to_owned()]);
+}
+
+#[test]
+fn cell_size_responses_are_consumed_and_escape_is_forwarded() {
+    let terminal = MockTerminal::new(40, 8);
+    let mut tui = Tui::new(terminal);
+    let (editor, editor_probe) = FocusableComponent::new(["EDITOR"]);
+    let editor_id = tui.add_child(Box::new(editor));
+    assert!(tui.set_focus_child(editor_id));
+
+    set_cell_dimensions(pi_tui::CellDimensions {
+        width_px: 9,
+        height_px: 18,
+    });
+
+    tui.handle_input("\x1b")
+        .expect("bare escape should still be forwarded");
+    tui.handle_input("\x1b[6;20;10t")
+        .expect("cell size response should be consumed");
+    assert_eq!(editor_probe.inputs(), vec!["\x1b".to_owned()]);
+    assert_eq!(
+        get_cell_dimensions(),
+        pi_tui::CellDimensions {
+            width_px: 10,
+            height_px: 20,
+        }
+    );
+
+    tui.handle_input("q")
+        .expect("later user input should still be forwarded");
+    assert_eq!(
+        editor_probe.inputs(),
+        vec!["\x1b".to_owned(), "q".to_owned()]
+    );
+}
+
+#[test]
+fn terminal_input_callbacks_drain_into_existing_handle_input_pipeline() {
+    let terminal = MockTerminal::new(40, 8);
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    let (editor, editor_probe) = FocusableComponent::new(["EDITOR"]);
+    let editor_id = tui.add_child(Box::new(editor));
+    assert!(tui.set_focus_child(editor_id));
+    tui.add_input_listener(|data| {
+        if data == "x" {
+            InputListenerResult::replace("y")
+        } else {
+            InputListenerResult::passthrough()
+        }
+    });
+
+    tui.start().expect("start should succeed");
+    inspector.send_input("x");
+    tui.drain_terminal_events()
+        .expect("queued terminal input should drain successfully");
+
+    assert_eq!(editor_probe.inputs(), vec!["y".to_owned()]);
+    tui.stop().expect("stop should succeed");
+}
+
+#[test]
+fn terminal_resize_callbacks_trigger_rerender_when_drained() {
+    let terminal = MockTerminal::new(20, 5);
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    tui.add_child(Box::new(StaticComponent::new(["hello", "world"])));
+
+    tui.start().expect("start should succeed");
+    let writes_before = inspector.writes().len();
+
+    inspector.resize(30, 7);
+    tui.drain_terminal_events()
+        .expect("queued resize should drain successfully");
+
+    let writes_after = inspector.writes();
+    assert!(writes_after.len() > writes_before);
+    assert!(
+        writes_after
+            .last()
+            .is_some_and(|write| write.starts_with("\x1b[2J\x1b[H"))
+    );
+    tui.stop().expect("stop should succeed");
 }
 
 #[test]

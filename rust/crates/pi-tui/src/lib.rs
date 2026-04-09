@@ -3,6 +3,7 @@ pub mod keybindings;
 pub mod keys;
 pub mod stdin_buffer;
 pub mod terminal;
+pub mod terminal_image;
 pub mod tui;
 pub mod utils;
 
@@ -17,9 +18,13 @@ pub use keys::{
 };
 pub use stdin_buffer::{StdinBuffer, StdinBufferEvent, StdinBufferOptions};
 pub use terminal::{ProcessTerminal, Terminal};
+pub use terminal_image::{
+    CellDimensions, ImageProtocol, TerminalCapabilities, detect_capabilities, get_capabilities,
+    get_cell_dimensions, reset_capabilities_cache, set_cell_dimensions,
+};
 pub use tui::{
-    CURSOR_MARKER, Component, ComponentId, Container, OverlayAnchor, OverlayId, OverlayMargin,
-    OverlayOptions, SizeValue, Tui,
+    CURSOR_MARKER, Component, ComponentId, Container, InputListenerId, InputListenerResult,
+    OverlayAnchor, OverlayId, OverlayMargin, OverlayOptions, SizeValue, Tui,
 };
 pub use utils::{
     AnsiCode, ExtractSegmentsResult, SliceWithWidthResult, extract_ansi_code, extract_segments,

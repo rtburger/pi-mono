@@ -744,3 +744,336 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui` / `rust/crates/pi-tui` and continue with the next smallest renderer behavior slice:
 - port cursor-marker extraction plus hardware-cursor positioning from `packages/tui/src/tui.ts`
 - then add focus/input routing and only afterward attempt TS differential rendering parity
+
+## Milestone 9 update: cursor-marker extraction + hardware-cursor positioning slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/tui.ts`
+- `packages/tui/test/tui-render.test.ts`
+- `packages/tui/test/virtual-terminal.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/tui.rs`
+- `rust/crates/pi-tui/src/terminal.rs`
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/tests/tui.rs`
+- `migration/packages/tui.md`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- visible-viewport cursor-marker extraction now runs before line-reset suffixes are applied
+- cursor column calculation now uses ANSI-aware `visible_width(...)`, matching the TypeScript `extractCursorPosition()` behavior
+- full-frame rendering now strips the first bottom-most visible `CURSOR_MARKER` occurrence from rendered output and repositions the terminal cursor to that row/column after writing the frame
+- hardware-cursor visibility now follows the TS shape for the migrated slice:
+  - no marker => cursor hidden
+  - marker present + hardware cursor disabled => cursor positioned then hidden
+  - marker present + hardware cursor enabled => cursor positioned then shown
+- Rust `render_for_size()` now returns marker-stripped screen lines for the visible-marker slice, which keeps renderer tests aligned with actual on-screen output
+
+### Rust design summary
+
+Expanded `pi-tui::tui` with:
+- internal `CursorPosition`
+- internal `RenderedFrame`
+- `Tui::show_hardware_cursor()`
+- `Tui::set_show_hardware_cursor(bool)`
+- internal cursor extraction + post-frame cursor-positioning helpers
+
+Implementation choices for this slice:
+- keep the renderer on the existing simple full-frame redraw path; do not pull differential-render cursor tracking forward yet
+- keep cursor positioning local to `tui.rs` using ANSI writes after the frame instead of widening the terminal trait again for a one-slice need
+- default the Rust hardware-cursor flag from `PI_HARDWARE_CURSOR`, matching the TypeScript constructor/env shape closely enough for the current slice
+- keep focusable-component and input-routing parity deferred; components can already emit `CURSOR_MARKER`, but Rust still does not manage focus state yet
+
+### Validation summary
+
+New Rust coverage added for:
+- marker stripping from rendered output
+- post-frame cursor row/column positioning to a visible marker
+- hardware-cursor show/hide behavior with and without a marker
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test tui` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` fails outside this migration slice in `packages/web-ui` with existing TypeScript module-resolution / implicit-any errors; not in the allowed Rust migration scope
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- differential rendering from `packages/tui/src/tui.ts`
+- focusable component model and focus management
+- input routing and overlay handle parity (`focus()`, `unfocus()`, `setHidden()`, non-capturing overlays)
+- editor/input/autocomplete widgets
+- markdown/select/settings/image widgets
+- coding-agent interactive integration
+
+### Recommended next step
+
+Stay in `packages/tui` / `rust/crates/pi-tui` and continue with the next smallest interactive renderer slice:
+- port focusable-component state plus overlay focus/input routing from `packages/tui/src/tui.ts`
+- keep differential rendering deferred until focus, overlay-handle, and input-routing semantics are in place
+
+## Milestone 10 update: focus state + overlay focus/input-routing slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/tui.ts`
+- `packages/tui/test/overlay-non-capturing.test.ts`
+- `packages/tui/test/tui-render.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/tui.rs`
+- `rust/crates/pi-tui/tests/tui.rs`
+- `rust/crates/pi-tui/src/lib.rs`
+- `migration/packages/tui.md`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- components can now participate in focus and input handling through explicit component hooks on the Rust `Component` trait
+- the Rust `Tui` now tracks focused child/overlay state and updates component focus flags when focus changes
+- overlay focus behavior now matches the TypeScript shape for the migrated slice:
+  - capturing overlays auto-focus when shown if visible
+  - non-capturing overlays preserve existing focus when shown
+  - focusing an overlay bumps its visual order to the top
+  - unfocusing or hiding a focused overlay restores the previous capturing overlay or saved pre-focus target
+  - unhiding a non-capturing overlay does not auto-focus it
+- manual input routing now exists in Rust via `Tui::handle_input(...)`:
+  - input goes to the focused target
+  - key-release events are filtered unless the focused component opts in
+  - if the focused overlay becomes invisible, routing redirects to the next visible capturing overlay and skips non-capturing overlays
+
+Current intentional compatibility limitation for this slice:
+- Rust still does not wire `Tui::start()` to the routed input path. Input routing is now implemented and tested through the explicit `Tui::handle_input(...)` surface, while safe terminal-callback integration remains deferred.
+
+### Rust design summary
+
+Expanded `pi-tui::tui` with:
+- component hooks on `Component`:
+  - `handle_input(...)`
+  - `wants_key_release()`
+  - `set_focused(...)`
+- internal `FocusTarget`
+- `Tui::set_focus_child(...)`
+- `Tui::clear_focus()`
+- `Tui::is_child_focused(...)`
+- `Tui::focus_overlay(...)`
+- `Tui::unfocus_overlay(...)`
+- `Tui::is_overlay_focused(...)`
+- `Tui::has_overlay()`
+- `Tui::handle_input(...)`
+
+Implementation choices for this slice:
+- keep focus ownership inside `tui.rs` with ids over owned children/overlays rather than trying to port the full JS object-reference model immediately
+- keep input routing explicit and deterministic instead of forcing unsafe terminal callback capture into this milestone
+- preserve TS overlay pre-focus restoration and focus-order bump semantics closely, while still deferring full overlay-handle parity
+
+### Validation summary
+
+New Rust coverage added for:
+- capturing vs non-capturing overlay focus behavior
+- overlay focus/unfocus/hide restoration to the previous child focus target
+- redirecting input away from an invisible focused overlay while skipping non-capturing overlays
+- visual-order bumping when a lower overlay is focused
+- non-capturing unhide behavior not stealing focus
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test tui` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` fails outside this migration slice in `packages/web-ui` with existing TypeScript module-resolution / implicit-any errors; not in the allowed Rust migration scope
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- safe terminal-callback wiring from `Tui::start()` into the routed input path
+- input-listener pipeline, cell-size response consumption, and debug-key forwarding from TS `handleInput()`
+- full overlay-handle parity (`hide()`, `focus()`, `unfocus()`, `isFocused()`) as a first-class Rust type
+- differential rendering from `packages/tui/src/tui.ts`
+- editor/input/autocomplete widgets
+- markdown/select/settings/image widgets
+- coding-agent interactive integration
+
+### Recommended next step
+
+Stay in `packages/tui` / `rust/crates/pi-tui` and continue with the next smallest interactive-control slice:
+- port the TS `handleInput()` pre-routing pipeline (input listeners, cell-size response consumption, debug-key hook)
+- then decide whether to add safe terminal-callback wiring or move directly to a Rust overlay-handle API before differential rendering
+
+## Milestone 11 update: handleInput pre-routing + terminal-image state slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/tui.ts`
+- `packages/tui/src/terminal-image.ts`
+- `packages/tui/test/tui-cell-size-input.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/tui.rs`
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/tests/tui.rs`
+- `migration/packages/tui.md`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- the Rust `Tui::handle_input(...)` now includes the first TS pre-routing pipeline before focus-based dispatch:
+  - ordered input-listener processing
+  - consume/replace semantics
+  - empty-input short-circuiting
+  - cell-size response consumption
+  - debug-key interception for `shift+ctrl+d`
+- cell-size response handling now matches the TypeScript shape for the migrated slice:
+  - exact `ESC [ 6 ; <height> ; <width> t` responses are consumed
+  - valid responses update shared cell dimensions as `{ widthPx, heightPx }`
+  - zero/invalid-size responses are consumed without forwarding
+  - bare escape still forwards normally
+  - consumed cell-size responses trigger invalidation and a rerender in the current full-frame Rust path
+- Rust now has a minimal `terminal_image` state/config slice aligned with the TypeScript module for the behavior currently needed by `Tui`:
+  - terminal capability detection/cache
+  - shared cell-dimension storage
+- `Tui::start()` now sends the TS-style cell-size query (`CSI 16 t`) when the detected terminal image capabilities indicate image support
+
+Current intentional compatibility limitation for this slice:
+- `Tui::start()` still does not wire terminal callbacks into `Tui::handle_input(...)`; the pre-routing pipeline is implemented and validated through the explicit `handle_input(...)` API only.
+
+### Rust design summary
+
+New Rust module:
+- `pi-tui::terminal_image`
+  - `ImageProtocol`
+  - `TerminalCapabilities`
+  - `CellDimensions`
+  - `detect_capabilities()`
+  - `get_capabilities()`
+  - `reset_capabilities_cache()`
+  - `get_cell_dimensions()`
+  - `set_cell_dimensions()`
+
+Expanded `pi-tui::tui` with:
+- `InputListenerId`
+- `InputListenerResult`
+- `Tui::add_input_listener(...)`
+- `Tui::remove_input_listener(...)`
+- `Tui::clear_input_listeners()`
+- `Tui::set_debug_handler(...)`
+- `Tui::clear_debug_handler()`
+- internal `query_cell_size()`
+- internal `consume_cell_size_response(...)`
+
+Implementation choices for this slice:
+- keep listener/debug routing explicit on `Tui` instead of introducing a broader event-emitter abstraction
+- keep terminal-image support intentionally narrow to the shared state and detection needed for the current `Tui` behavior, not the full TS image-rendering stack yet
+- keep callback wiring deferred to avoid forcing a larger ownership redesign in the same milestone
+
+### Validation summary
+
+New Rust coverage added for:
+- input-listener transform/consume/remove behavior
+- debug-key interception before focused-component delivery
+- cell-size response consumption plus later-input forwarding
+- bare-escape forwarding regression for the cell-size-response path
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test tui` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` fails outside this migration slice in `packages/web-ui` with existing TypeScript module-resolution / implicit-any errors; not in the allowed Rust migration scope
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- safe terminal-callback wiring from `Tui::start()` into the routed input path
+- full overlay-handle parity (`hide()`, `focus()`, `unfocus()`, `isFocused()`) as a first-class Rust type
+- differential rendering from `packages/tui/src/tui.ts`
+- editor/input/autocomplete widgets
+- markdown/select/settings/image widgets
+- broader terminal-image rendering helpers and image widget parity
+- coding-agent interactive integration
+
+### Recommended next step
+
+Stay in `packages/tui` / `rust/crates/pi-tui` and continue with the next smallest control-path slice:
+- wire `Tui::start()` safely into the existing Rust `handle_input(...)` pipeline
+- then add a first-class Rust overlay-handle API before attempting differential rendering
+
+## Milestone 12 update: queued terminal-callback bridge slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/tui.ts`
+- `packages/tui/test/virtual-terminal.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/tui.rs`
+- `rust/crates/pi-tui/tests/tui.rs`
+- `migration/packages/tui.md`
+
+### Behavior summary
+
+New TS-adjacent behaviors now covered in Rust:
+- `Tui::start()` no longer drops terminal callbacks on the floor for the migrated slice
+- start-time terminal input and resize callbacks are now captured and queued in Rust instead of being ignored
+- the new queued callback path feeds terminal-originated input through the same Rust `handle_input(...)` pipeline already implemented in earlier milestones, so terminal input now honors:
+  - input listeners
+  - debug-key interception
+  - cell-size response consumption
+  - focus/input routing
+  - rerender-after-input behavior
+- queued resize callbacks now trigger rerenders when drained
+- `Tui::stop()` now clears queued terminal events for the migrated slice
+
+Current intentional compatibility limitation for this slice:
+- callback delivery is now wired safely through a queue, but draining is still explicit via `Tui::drain_terminal_events()`. Rust does not yet process terminal callbacks immediately/asynchronously the way the full TypeScript event path effectively does.
+
+### Rust design summary
+
+Expanded `pi-tui::tui` with:
+- internal `TerminalEvent::{Input, Resize}` queue
+- shared pending-event storage captured by `start()` callbacks
+- `Tui::drain_terminal_events()`
+
+Implementation choices for this slice:
+- choose a safe queued bridge over unsafe self-referential callback capture
+- keep the bridge minimal and explicit instead of redesigning the whole `Tui` ownership model in one milestone
+- reuse the existing `handle_input(...)` and render paths rather than introducing a second callback-only dispatch path
+
+### Validation summary
+
+New Rust coverage added for:
+- terminal input callbacks draining through the existing input pipeline
+- terminal resize callbacks triggering rerender on drain
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test tui` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` fails outside this migration slice in `packages/web-ui` with existing TypeScript module-resolution / implicit-any errors; not in the allowed Rust migration scope
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- immediate/asynchronous callback processing without an explicit drain step
+- full overlay-handle parity (`hide()`, `focus()`, `unfocus()`, `isFocused()`) as a first-class Rust type
+- differential rendering from `packages/tui/src/tui.ts`
+- editor/input/autocomplete widgets
+- markdown/select/settings/image widgets
+- broader terminal-image rendering helpers and image widget parity
+- coding-agent interactive integration
+
+### Recommended next step
+
+Stay in `packages/tui` / `rust/crates/pi-tui` and continue with the next smallest API/control slice:
+- add a first-class Rust overlay-handle API on top of the existing id-based overlay controls
+- then revisit whether queued callback draining is sufficient or whether a broader `Tui` ownership refactor is justified before differential rendering
