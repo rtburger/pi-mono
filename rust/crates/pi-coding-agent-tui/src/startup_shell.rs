@@ -1,12 +1,13 @@
 use crate::{
     BuiltInHeaderComponent, KeyHintStyler, KeybindingsManager, PendingMessagesComponent,
-    StartupHeaderStyler,
+    StartupHeaderStyler, TranscriptComponent,
 };
-use pi_tui::{Component, Input};
+use pi_tui::{Component, ComponentId, Input};
 use std::ops::Deref;
 
 pub struct StartupShellComponent {
     header: BuiltInHeaderComponent,
+    transcript: TranscriptComponent,
     pending_messages: PendingMessagesComponent,
     input: Input,
 }
@@ -31,6 +32,7 @@ impl StartupShellComponent {
                 changelog_markdown,
                 show_condensed_changelog,
             ),
+            transcript: TranscriptComponent::new(),
             pending_messages: PendingMessagesComponent::new(keybindings),
             input: Input::with_keybindings(keybindings.deref().clone()),
         }
@@ -70,6 +72,22 @@ impl StartupShellComponent {
         self.input.clear();
     }
 
+    pub fn add_transcript_item(&mut self, component: Box<dyn Component>) -> ComponentId {
+        self.transcript.add_item(component)
+    }
+
+    pub fn remove_transcript_item(&mut self, id: ComponentId) -> bool {
+        self.transcript.remove_item(id)
+    }
+
+    pub fn clear_transcript(&mut self) {
+        self.transcript.clear_items();
+    }
+
+    pub fn transcript_item_count(&self) -> usize {
+        self.transcript.item_count()
+    }
+
     pub fn set_pending_messages<I, J, S, T>(
         &mut self,
         styler: &impl KeyHintStyler,
@@ -101,6 +119,7 @@ impl StartupShellComponent {
 impl Component for StartupShellComponent {
     fn render(&self, width: usize) -> Vec<String> {
         let mut lines = self.header.render(width);
+        lines.extend(self.transcript.render(width));
         lines.extend(self.pending_messages.render(width));
         lines.extend(self.input.render(width));
         lines
@@ -108,6 +127,7 @@ impl Component for StartupShellComponent {
 
     fn invalidate(&mut self) {
         self.header.invalidate();
+        self.transcript.invalidate();
         self.pending_messages.invalidate();
         self.input.invalidate();
     }

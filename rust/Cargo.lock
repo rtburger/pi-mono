@@ -1492,6 +1492,7 @@ dependencies = [
 name = "pi-coding-agent-tui"
 version = "0.1.0"
 dependencies = [
+ "pi-coding-agent-core",
  "pi-tui",
  "serde_json",
  "tempfile",

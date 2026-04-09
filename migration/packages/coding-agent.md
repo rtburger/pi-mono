@@ -1772,3 +1772,184 @@ Still deferred for the coding-agent interactive shell surface:
 Stay in `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
 - use the startup shell + pending-message strip as the base for the first transcript/chat container slice
 - keep footer, multiline editor, and runtime/session wiring deferred until that transcript shell exists
+
+## Milestone 29 update: minimal transcript container slice in the Rust startup shell
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (layout order for `chatContainer`, `pendingMessagesContainer`, and editor)
+- `packages/tui/src/components/truncated-text.ts`
+- `packages/tui/test/truncated-text.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+- `rust/crates/pi-tui/src/tui.rs`
+- `migration/packages/coding-agent.md`
+
+### Behavior summary
+
+New TS-compatible interactive-shell behavior now covered in Rust:
+- `pi-coding-agent-tui` now has a first minimal transcript container slice corresponding to the current TypeScript `chatContainer` placement in interactive mode
+- the Rust startup shell now renders transcript content between the built-in header and the pending-message strip, matching the current TS layout order:
+  - header
+  - transcript/chat content
+  - queued pending messages
+  - prompt input
+- transcript child order is preserved, matching the current `Container`-driven append semantics in TypeScript interactive mode
+- transcript items can now be removed individually or cleared wholesale from the shell, which provides the minimum mutation surface needed before wiring real runtime/session message rendering
+- existing pending-message truncation behavior continues to hold when transcript content is present above it
+
+Current intentional limitation for this slice:
+- this is still only a generic transcript container; it does not yet port concrete coding-agent message widgets like user/assistant/tool/custom message components
+- transcript entries are managed manually through shell methods; they are not yet connected to a Rust `AgentSession` or interactive runtime
+- no scroll behavior or footer/status integration is wired yet
+
+### Rust design summary
+
+New `pi-coding-agent-tui::transcript` module:
+- `TranscriptComponent`
+  - owns a `pi_tui::Container`
+  - exposes:
+    - `add_item(...)`
+    - `remove_item(...)`
+    - `clear_items()`
+    - `item_count()`
+  - delegates rendering/invalidation to the underlying `Container`
+
+Expanded `pi-coding-agent-tui::startup_shell` with:
+- owned `TranscriptComponent`
+- new methods:
+  - `add_transcript_item(...)`
+  - `remove_transcript_item(...)`
+  - `clear_transcript()`
+  - `transcript_item_count()`
+- render order updated to:
+  - built-in header
+  - transcript
+  - pending messages
+  - prompt input
+
+Design choices for this slice:
+- keep the transcript surface generic and component-based so later user/assistant/tool widgets can plug in directly without redesigning the shell again
+- reuse `pi_tui::Container` rather than inventing a second list/render abstraction in `pi-coding-agent-tui`
+- keep message-widget parity deferred until the generic placement and mutation semantics are covered by tests
+
+### Validation summary
+
+New Rust coverage added for:
+- transcript rendering before pending messages and the prompt
+- transcript child order preservation
+- transcript item removal and full transcript clearing through the startup shell API
+- pending-message truncation continuing to respect terminal width when transcript content is also present
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test startup_shell` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive shell surface:
+- no concrete Rust transcript message widgets yet (`user-message`, `assistant-message`, `tool-execution`, `custom-message`, etc.)
+- no Rust multiline editor / custom-editor parity yet; the shell still uses the narrow single-line `Input` slice
+- no Rust footer integration yet
+- no scroll behavior or transcript viewport management yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- port the first concrete transcript widget on top of the new transcript container, preferably the smallest message component that does not require a full markdown or box framework
+- keep footer, multiline editor, scrolling, and runtime/session wiring deferred until at least one real transcript message type is renderable in Rust
+
+## Milestone 30 update: first concrete transcript widget (`BranchSummaryMessageComponent`) slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/branch-summary-message.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (branch-summary insertion path and transcript layout grounding)
+- `packages/coding-agent/src/core/messages.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-core/src/messages.rs`
+- `rust/crates/pi-coding-agent-tui/Cargo.toml`
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/transcript.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+
+### Behavior summary
+
+New TS-compatible interactive-transcript behavior now covered in Rust:
+- `pi-coding-agent-tui` now has its first concrete transcript message widget mirroring the current TypeScript `BranchSummaryMessageComponent`
+- the Rust widget preserves the current branch-summary interaction shape for the migrated slice:
+  - collapsed by default
+  - `[branch]` label
+  - collapsed summary line with the configured `app.tools.expand` keybinding hint
+  - expandable state via `set_expanded(...)`
+  - expanded rendering showing a `Branch Summary` header plus the stored summary text
+- the widget now plugs into the previously ported transcript container and startup shell, so a real coding-agent message component can render above pending messages and the prompt
+
+Current intentional compatibility limitation for this slice:
+- the Rust widget does not yet use the TS `Box`/theme background treatment
+- expanded rendering currently shows plain wrapped text through `pi_tui::Text`, not full markdown rendering through the TS `Markdown` widget
+- the label/content styling remains plain in Rust until the broader theme/widget surface is ported
+
+### Rust design summary
+
+New `pi-coding-agent-tui::branch_summary` module:
+- `BranchSummaryMessageComponent`
+  - backed by `pi_coding_agent_core::BranchSummaryMessage`
+  - stores collapsed/expanded state
+  - rebuilds an internal `pi_tui::Container` from:
+    - spacer
+    - label text
+    - spacer
+    - collapsed or expanded text body
+    - trailing spacer
+  - exposes `set_expanded(bool)`
+
+Crate-boundary change:
+- `pi-coding-agent-tui` now depends on `pi-coding-agent-core` so interactive widgets can consume the existing coding-agent message types directly instead of inventing duplicate Rust-side payload structs
+
+Design choices for this slice:
+- use the existing Rust `BranchSummaryMessage` type from core as the compatibility payload source of truth
+- keep the widget narrow and text-based for now instead of blocking on full `Box` and `Markdown` parity in `pi-tui`
+- validate integration through the existing startup-shell transcript path rather than building a separate transcript harness first
+
+### Validation summary
+
+New Rust coverage added for:
+- collapsed branch-summary rendering with expand hint text
+- expanded branch-summary rendering with header and summary text
+- startup-shell transcript integration with a real branch-summary widget above pending messages and the prompt
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test branch_summary` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive transcript surface:
+- no Rust theme/background parity yet for summary/custom transcript widgets
+- no full markdown rendering yet in transcript widgets that need it
+- no additional concrete message widgets yet (`compaction-summary`, `skill-invocation`, `user-message`, `assistant-message`, `tool-execution`, `custom-message`)
+- no Rust footer integration yet
+- no scroll behavior or transcript viewport management yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- port the next smallest transcript widget that can reuse the same text-first pattern, likely `CompactionSummaryMessageComponent` or `SkillInvocationMessageComponent`
+- keep full markdown, themed backgrounds, multiline editor parity, and runtime/session wiring deferred until there are a few concrete transcript widgets in place

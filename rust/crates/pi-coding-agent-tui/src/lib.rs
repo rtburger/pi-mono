@@ -1,9 +1,12 @@
+mod branch_summary;
 mod keybinding_hints;
 mod keybindings;
 mod pending_messages;
 mod startup_header;
 mod startup_shell;
+mod transcript;
 
+pub use branch_summary::BranchSummaryMessageComponent;
 pub use keybinding_hints::{KeyHintStyler, PlainKeyHintStyler, key_hint, key_text, raw_key_hint};
 pub use keybindings::{
     DEFAULT_APP_KEYBINDINGS, KeybindingsManager, MigrateKeybindingsConfigResult,
@@ -16,6 +19,7 @@ pub use startup_header::{
     build_condensed_changelog_notice, build_startup_header_text,
 };
 pub use startup_shell::StartupShellComponent;
+pub use transcript::TranscriptComponent;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodingAgentTuiError {

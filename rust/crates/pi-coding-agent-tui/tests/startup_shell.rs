@@ -1,5 +1,5 @@
 use pi_coding_agent_tui::{KeyId, KeybindingsManager, PlainKeyHintStyler, StartupShellComponent};
-use pi_tui::{Terminal, Tui, TuiError, visible_width};
+use pi_tui::{Terminal, Text, Tui, TuiError, visible_width};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -224,7 +224,7 @@ fn startup_shell_uses_shared_keybindings_for_header_and_input() {
 }
 
 #[test]
-fn startup_shell_renders_pending_messages_between_header_and_prompt() {
+fn startup_shell_renders_transcript_before_pending_messages_and_prompt() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let mut shell = StartupShellComponent::new(
         "Pi",
@@ -235,6 +235,8 @@ fn startup_shell_renders_pending_messages_between_header_and_prompt() {
         None,
         false,
     );
+    shell.add_transcript_item(Box::new(Text::new("first transcript item", 0, 0)));
+    shell.add_transcript_item(Box::new(Text::new("second transcript item", 0, 0)));
     shell.set_pending_messages(
         &PlainKeyHintStyler,
         ["queued steering message"],
@@ -246,27 +248,35 @@ fn startup_shell_renders_pending_messages_between_header_and_prompt() {
     assert!(tui.set_focus_child(shell_id));
 
     let lines = tui.render_for_size(60, 20);
+    let first_transcript = lines
+        .iter()
+        .position(|line| line.contains("first transcript item"))
+        .expect("first transcript line should render");
+    let second_transcript = lines
+        .iter()
+        .position(|line| line.contains("second transcript item"))
+        .expect("second transcript line should render");
+    let steering = lines
+        .iter()
+        .position(|line| line.contains("Steering: queued steering message"))
+        .expect("steering line should render");
+    let follow_up = lines
+        .iter()
+        .position(|line| line.contains("Follow-up: queued follow-up message"))
+        .expect("follow-up line should render");
+    let prompt = lines
+        .iter()
+        .position(|line| line.starts_with("> "))
+        .expect("prompt should render");
 
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("Steering: queued steering message"))
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("Follow-up: queued follow-up message"))
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("to edit all queued messages"))
-    );
-    assert!(lines.last().is_some_and(|line| line.starts_with("> ")));
+    assert!(first_transcript < second_transcript);
+    assert!(second_transcript < steering);
+    assert!(steering < follow_up);
+    assert!(follow_up < prompt);
 }
 
 #[test]
-fn startup_shell_truncates_and_can_clear_pending_messages() {
+fn startup_shell_truncates_pending_messages_and_can_remove_or_clear_transcript_items() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let mut shell = StartupShellComponent::new(
         "Pi",
@@ -277,12 +287,17 @@ fn startup_shell_truncates_and_can_clear_pending_messages() {
         None,
         false,
     );
+    let first_id = shell.add_transcript_item(Box::new(Text::new("first item", 0, 0)));
+    shell.add_transcript_item(Box::new(Text::new("second item", 0, 0)));
     shell.set_pending_messages(
         &PlainKeyHintStyler,
         ["this is a very long queued steering message that must be truncated"],
         std::iter::empty::<&str>(),
     );
+    assert_eq!(shell.transcript_item_count(), 2);
     assert!(shell.has_pending_messages());
+    assert!(shell.remove_transcript_item(first_id));
+    assert_eq!(shell.transcript_item_count(), 1);
 
     let mut tui = Tui::new(NoopTerminal);
     let shell_id = tui.add_child(Box::new(shell));
@@ -290,6 +305,8 @@ fn startup_shell_truncates_and_can_clear_pending_messages() {
 
     let lines = tui.render_for_size(24, 10);
     assert!(lines.iter().all(|line| visible_width(line) <= 24));
+    assert!(lines.iter().any(|line| line.contains("second item")));
+    assert!(!lines.iter().any(|line| line.contains("first item")));
     assert!(lines.iter().any(|line| line.contains("...")));
 
     let mut shell = StartupShellComponent::new(
@@ -301,12 +318,15 @@ fn startup_shell_truncates_and_can_clear_pending_messages() {
         None,
         false,
     );
+    shell.add_transcript_item(Box::new(Text::new("temporary transcript", 0, 0)));
     shell.set_pending_messages(
         &PlainKeyHintStyler,
         ["temporary queued message"],
         std::iter::empty::<&str>(),
     );
+    shell.clear_transcript();
     shell.clear_pending_messages();
+    assert_eq!(shell.transcript_item_count(), 0);
     assert!(!shell.has_pending_messages());
 
     let mut tui = Tui::new(NoopTerminal);
