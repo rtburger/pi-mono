@@ -7,6 +7,7 @@ pub mod stdin_buffer;
 pub mod terminal;
 pub mod terminal_image;
 pub mod text;
+pub mod truncated_text;
 pub mod tui;
 pub mod utils;
 
@@ -28,6 +29,7 @@ pub use terminal_image::{
     get_cell_dimensions, reset_capabilities_cache, set_cell_dimensions,
 };
 pub use text::Text;
+pub use truncated_text::TruncatedText;
 pub use tui::{
     CURSOR_MARKER, Component, ComponentId, Container, InputListenerId, InputListenerResult,
     OverlayAnchor, OverlayHandle, OverlayId, OverlayMargin, OverlayOptions, SizeValue, Tui,

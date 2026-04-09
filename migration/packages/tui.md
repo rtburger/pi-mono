@@ -1353,3 +1353,79 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
 - build the first thin Rust interactive startup shell using the already-ported pieces (`BuiltInHeaderComponent`, `Input`, `Text`, `Spacer`, overlay handles, and `Tui`)
 - keep multiline editor, transcript rendering, and broader widget parity deferred until that shell is rendering and focusable end-to-end
+
+## Milestone 16 update: `TruncatedText` widget slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/components/truncated-text.ts`
+- `packages/tui/test/truncated-text.test.ts`
+- `packages/tui/src/index.ts`
+- grounding call sites reviewed via existing interactive inventory in `packages/coding-agent/src/modes/interactive/interactive-mode.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/src/text.rs`
+- `rust/crates/pi-tui/src/spacer.rs`
+- `rust/crates/pi-tui/tests/text.rs`
+- `migration/packages/tui.md`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- `pi-tui` now exports a first minimal `TruncatedText` widget matching `packages/tui/src/components/truncated-text.ts`
+- the Rust widget preserves the current TypeScript behavior needed by coding-agent selectors, pending-message strips, and compact status rows:
+  - render only the first logical line of text
+  - stop at the first newline even when later lines exist
+  - ANSI-aware truncation using the already-ported width helpers
+  - exact-width output padding after truncation
+  - vertical padding lines rendered as full-width blanks
+  - empty text still renders a padded content line, unlike the existing Rust `Text` widget
+- styled/truncated output keeps ANSI sequences and reset-before-ellipsis behavior through the shared truncation helper
+
+### Rust design summary
+
+New Rust module:
+- `pi-tui::truncated_text`
+  - `TruncatedText`
+
+Public API added in this milestone:
+- `TruncatedText::new(...)`
+- `TruncatedText::set_text(...)`
+- crate export via `pi_tui::TruncatedText`
+
+Implementation choices for this slice:
+- reuse the already-ported `truncate_to_width(...)` and `visible_width(...)` helpers rather than adding a second truncation path
+- keep the widget intentionally narrow and single-line, matching the TS component instead of broadening into a generic text-layout abstraction
+- preserve the behavioral distinction from `Text`: `TruncatedText` always emits a content line, even for empty input
+
+### Validation summary
+
+New Rust coverage added for:
+- exact-width rendering with and without vertical padding
+- long-line truncation with ellipsis
+- ANSI-preserving rendering and reset-before-ellipsis behavior
+- empty-text rendering
+- newline stop behavior and truncation of only the first line
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test truncated_text` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- thin coding-agent transcript/chat composition on top of the current startup shell and text widgets
+- differential rendering parity remains partial relative to TS `packages/tui/src/tui.ts`
+- richer widgets are still missing (`Box`, multiline editor, autocomplete, markdown/select/settings/image widgets)
+- no Rust transcript/chat view has been composed yet from the currently available primitives
+
+### Recommended next step
+
+Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
+- use the new `TruncatedText` together with the existing startup-shell pieces to begin the first transcript/pending-message composition slice
+- keep multiline editor and broader selector/widget parity deferred until that transcript shell exists
