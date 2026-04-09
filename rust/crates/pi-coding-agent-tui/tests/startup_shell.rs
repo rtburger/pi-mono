@@ -1,5 +1,5 @@
 use pi_coding_agent_tui::{KeyId, KeybindingsManager, PlainKeyHintStyler, StartupShellComponent};
-use pi_tui::{Terminal, Tui, TuiError};
+use pi_tui::{Terminal, Tui, TuiError, visible_width};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -221,4 +221,99 @@ fn startup_shell_uses_shared_keybindings_for_header_and_input() {
             .as_deref(),
         Some("ok")
     );
+}
+
+#[test]
+fn startup_shell_renders_pending_messages_between_header_and_prompt() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_pending_messages(
+        &PlainKeyHintStyler,
+        ["queued steering message"],
+        ["queued follow-up message"],
+    );
+
+    let mut tui = Tui::new(NoopTerminal);
+    let shell_id = tui.add_child(Box::new(shell));
+    assert!(tui.set_focus_child(shell_id));
+
+    let lines = tui.render_for_size(60, 20);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Steering: queued steering message"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Follow-up: queued follow-up message"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("to edit all queued messages"))
+    );
+    assert!(lines.last().is_some_and(|line| line.starts_with("> ")));
+}
+
+#[test]
+fn startup_shell_truncates_and_can_clear_pending_messages() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_pending_messages(
+        &PlainKeyHintStyler,
+        ["this is a very long queued steering message that must be truncated"],
+        std::iter::empty::<&str>(),
+    );
+    assert!(shell.has_pending_messages());
+
+    let mut tui = Tui::new(NoopTerminal);
+    let shell_id = tui.add_child(Box::new(shell));
+    assert!(tui.set_focus_child(shell_id));
+
+    let lines = tui.render_for_size(24, 10);
+    assert!(lines.iter().all(|line| visible_width(line) <= 24));
+    assert!(lines.iter().any(|line| line.contains("...")));
+
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_pending_messages(
+        &PlainKeyHintStyler,
+        ["temporary queued message"],
+        std::iter::empty::<&str>(),
+    );
+    shell.clear_pending_messages();
+    assert!(!shell.has_pending_messages());
+
+    let mut tui = Tui::new(NoopTerminal);
+    let shell_id = tui.add_child(Box::new(shell));
+    assert!(tui.set_focus_child(shell_id));
+
+    let lines = tui.render_for_size(24, 10);
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].starts_with("> "));
 }

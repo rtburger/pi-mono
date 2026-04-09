@@ -1678,3 +1678,97 @@ Still deferred for the coding-agent interactive shell surface:
 - no Rust footer integration yet
 - no session-manager/resource-loader-backed interactive runtime wiring yet
 - no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- use the startup shell plus the newly ported `TruncatedText` widget to begin the first pending-message or transcript composition slice
+- keep multiline editor, footer, and runtime/session wiring deferred until that shell can show real interactive context above the prompt
+
+## Milestone 28 update: pending-message strip slice in the Rust startup shell
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (pending-messages container update path)
+- `packages/tui/src/components/truncated-text.ts`
+- `packages/tui/test/truncated-text.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+- `rust/crates/pi-tui/src/lib.rs`
+- `migration/packages/coding-agent.md`
+
+### Behavior summary
+
+New TS-compatible interactive-shell behavior now covered in Rust:
+- `pi-coding-agent-tui` now has a first pending-message strip slice derived from the current TypeScript `InteractiveMode.updatePendingMessagesDisplay()` behavior
+- the Rust shell now renders queued message summaries between header content and the prompt when pending messages exist
+- the rendered queued-message slice preserves the current TS output shape for the migrated subset:
+  - leading blank spacer before the pending-message list
+  - `Steering: ...` lines for steering messages
+  - `Follow-up: ...` lines for follow-up messages
+  - a final dequeue hint line using the configured `app.message.dequeue` binding text
+- pending-message lines now truncate through the already-ported Rust `pi_tui::TruncatedText` widget, matching the TS single-line queued-message strip behavior
+- clearing pending messages removes the strip entirely, restoring prompt-only output in the quiet-shell path
+
+Current intentional limitation for this slice:
+- this is still a startup-shell/prompt-shell subset, not full interactive transcript composition
+- pending messages are managed explicitly through startup-shell methods; they are not yet wired to a Rust session runtime or agent queue implementation
+- styling currently remains as whatever the supplied key-hint styler emits; full interactive theme parity is still deferred
+
+### Rust design summary
+
+New `pi-coding-agent-tui::pending_messages` module:
+- `PendingMessagesComponent`
+  - stores queued-message display lines
+  - reuses `key_text(...)` to resolve the dequeue binding once
+  - renders via `pi_tui::TruncatedText`
+
+Expanded `pi-coding-agent-tui::startup_shell` with:
+- owned `PendingMessagesComponent`
+- new methods:
+  - `set_pending_messages(...)`
+  - `clear_pending_messages()`
+  - `has_pending_messages()`
+- render order now follows the current migrated shell layout:
+  - built-in header
+  - pending-message strip
+  - prompt input
+
+Design choices for this slice:
+- keep pending-message rendering as a small focused component instead of jumping directly to a broader transcript container
+- reuse the existing startup shell rather than introducing a second shell type
+- keep queue display text preformatted in `pi-coding-agent-tui`, while leaving real queue ownership and runtime wiring deferred to later interactive milestones
+
+### Validation summary
+
+New Rust coverage added for:
+- rendering steering/follow-up lines plus the dequeue hint above the prompt
+- queued-message truncation within terminal width bounds
+- clearing pending messages back to prompt-only output
+- previously added startup-shell tests continue to validate header rendering and input routing
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test startup_shell` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive shell surface:
+- no Rust transcript/chat container composition yet above the prompt beyond the queued-message strip
+- no Rust multiline editor / custom-editor parity yet; the shell still uses the narrow single-line `Input` slice
+- no Rust footer integration yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- use the startup shell + pending-message strip as the base for the first transcript/chat container slice
+- keep footer, multiline editor, and runtime/session wiring deferred until that transcript shell exists
