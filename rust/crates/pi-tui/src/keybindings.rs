@@ -35,6 +35,12 @@ impl fmt::Display for KeyId {
     }
 }
 
+impl AsRef<str> for KeyId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeybindingDefinition {
     pub default_keys: Vec<KeyId>,

@@ -215,3 +215,167 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui` / `rust/crates/pi-tui` and continue with the next smallest slice needed by coding-agent interactive mode:
 - port raw key parsing + matching (`packages/tui/src/keys.ts`, `packages/tui/test/keys.test.ts`)
 - then port the minimal container/input/select foundation that coding-agent selectors and editor composition require
+
+## Milestone 3 update: raw key parsing + matching slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/keys.ts`
+- `packages/tui/test/keys.test.ts`
+- `packages/tui/test/key-tester.ts`
+- `packages/tui/src/index.ts`
+- `packages/tui/src/keybindings.ts`
+- `packages/coding-agent/src/core/keybindings.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/Cargo.toml`
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/src/keybindings.rs`
+- `rust/crates/pi-tui/tests/keybindings.rs`
+- `rust/crates/pi-tui/tests/fuzzy.rs`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- Kitty keyboard protocol global state tracking (`setKittyProtocolActive()` / `isKittyProtocolActive()` equivalent)
+- raw key matching against configured key IDs for:
+  - legacy control characters
+  - legacy escape-prefixed alt sequences
+  - legacy SS3 / CSI arrows, function keys, and rxvt-style modifier sequences
+  - Kitty CSI-u sequences
+  - xterm `modifyOtherKeys` sequences
+- Kitty alternate-key/base-layout handling for non-Latin keyboard layouts, while preserving direct codepoint authority for Latin letters and symbol keys on remapped layouts
+- Kitty keypad functional key normalization to logical digits, symbols, and navigation keys
+- mode-aware ambiguity handling preserved from TS:
+  - `\n` becomes `enter` in legacy mode and `shift+enter` when Kitty mode is active
+  - `\x1b\r` is `alt+enter` only outside Kitty mode
+  - legacy alt-prefixed printable sequences are ignored when Kitty mode is active
+- Windows Terminal raw `0x08` backspace heuristic parity for `backspace` vs `ctrl+backspace`
+- `parseKey()`-equivalent parsing into canonical key-id strings with TS-style modifier ordering (`shift+ctrl+...`)
+- `decodeKittyPrintable()` handling for printable CSI-u keypad input
+- `isKeyRelease()` / `isKeyRepeat()` fast detection with bracketed-paste false-positive suppression
+
+### Rust design summary
+
+New `pi-tui::keys` module added with:
+- `KeyEventType`
+- `set_kitty_protocol_active()` / `is_kitty_protocol_active()`
+- `matches_key()`
+- `parse_key()`
+- `decode_kitty_printable()`
+- `is_key_release()` / `is_key_repeat()`
+
+Implementation choices for this slice:
+- reuse the existing `KeyId` newtype from the keybinding slice rather than introducing a second key-id representation
+- keep protocol parsing explicit in one focused module instead of pulling in a larger terminal abstraction early
+- use a narrow regex-backed parser only for the structured Kitty / `modifyOtherKeys` escape formats; keep legacy sequence handling as direct string matching
+- preserve the current Rust keybinding manager API while making the lower-level raw key parser available for future input/terminal slices
+
+### Validation summary
+
+New Rust coverage added for:
+- non-Latin Kitty alternate-key matching/parsing
+- Kitty keypad normalization and shifted/event variants
+- `modifyOtherKeys` matching/parsing across enter/tab/backspace/space/symbol/digit cases
+- legacy ctrl/alt/symbol/backspace/function/arrow/rxvt behaviors
+- Kitty printable decoding
+- release/repeat detection false-positive regression cases
+
+Validation run results:
+- `cd rust && cargo fmt` passed
+- `cd rust && cargo test -p pi-tui --test keys` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` still fails in this environment before repo checks run because `biome` is not installed (`sh: biome: command not found`)
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- terminal abstraction and stdin batching parity (`terminal.ts`, `stdin-buffer.ts`)
+- differential rendering / overlay engine
+- text width and ANSI helper parity
+- input/editor/autocomplete widget parity
+- markdown/select/settings/image widget parity
+- coding-agent interactive integration
+
+### Recommended next step
+
+Stay in `packages/tui` / `rust/crates/pi-tui` and port the next smallest interactive foundation slice now that raw key parsing exists:
+- `packages/tui/src/stdin-buffer.ts` + `packages/tui/test/stdin-buffer.test.ts`
+- then the minimal container/input/select path needed by coding-agent selectors and editor composition
+
+## Milestone 4 update: stdin buffering slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/stdin-buffer.ts`
+- `packages/tui/test/stdin-buffer.test.ts`
+- `packages/tui/src/index.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/Cargo.toml`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- buffering of incomplete escape sequences across chunk boundaries
+- splitting mixed stdin batches into complete logical units for:
+  - plain characters
+  - CSI/SS3/meta sequences
+  - Kitty CSI-u sequences
+  - mouse SGR sequences
+  - old-style mouse `ESC[M` packets
+  - OSC / DCS / APC responses terminated by `BEL` or `ESC \\`
+- timeout-based flushing of incomplete buffered escape sequences
+- explicit `flush()`, `clear()`, `get_buffer()`, and `destroy()` behavior matching the TS shape for the migrated slice
+- bracketed paste handling with dedicated paste events and suppression of normal data events during pasted content
+- high-byte single-byte conversion parity from the TS `Buffer` path (`byte > 127` -> `ESC + (byte - 128)`)
+
+### Rust design summary
+
+New `pi-tui::stdin_buffer` module added with:
+- `StdinBuffer`
+- `StdinBufferOptions`
+- `StdinBufferEvent::{Data, Paste}`
+
+Implementation choices for this slice:
+- use an explicit event enum plus `subscribe()` channel registration instead of a JS-style EventEmitter API
+- keep batching/splitting logic synchronous and local to the buffer, with a small detached timeout thread for delayed flush behavior
+- preserve TS sequence-detection rules directly rather than introducing a broader terminal parser early
+
+### Validation summary
+
+New Rust coverage added for:
+- immediate plain-character pass-through
+- complete and partial escape sequence handling
+- mixed content and Kitty event batching
+- mouse SGR and old-style mouse packets
+- bracketed paste events and surrounding input preservation
+- empty input, lone escape timeout, flush/clear/destroy, and byte-input conversion
+- long CSI and OSC/DCS/APC terminal response handling
+
+Validation run results:
+- `cd rust && cargo fmt` passed
+- `cd rust && cargo test -p pi-tui --test stdin_buffer` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` still fails in this environment before repo checks run because `biome` is not installed (`sh: biome: command not found`)
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- terminal abstraction parity (`terminal.ts`)
+- render tree / container / overlay engine
+- width/ANSI helpers
+- input/editor/autocomplete widgets
+- markdown/select/settings/image widgets
+- coding-agent interactive integration
+
+### Recommended next step
+
+Stay in `packages/tui` / `rust/crates/pi-tui` and port the next concrete interactive foundation layer:
+- the minimal terminal/input path (`packages/tui/src/terminal.ts`)
+- or, if staying narrower, the first container/input widget slice needed by coding-agent interactive mode
