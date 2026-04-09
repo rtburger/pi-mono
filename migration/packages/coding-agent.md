@@ -1171,3 +1171,337 @@ Still deferred for the coding-agent image/settings surface:
 - no full Rust `SettingsManager` API yet
 - no interactive/TUI image settings workflow yet
 - broader session-manager-backed settings parity remains deferred
+
+## Milestone 21 update: coding-agent keybindings manager + legacy keybinding migration slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/core/keybindings.ts`
+- `packages/coding-agent/src/migrations.ts` (keybindings migration path)
+- `packages/coding-agent/test/keybindings-migration.test.ts`
+- `packages/coding-agent/docs/keybindings.md`
+- `packages/coding-agent/src/config.ts`
+- `packages/coding-agent/src/modes/interactive/components/keybinding-hints.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/Cargo.toml`
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-tui/Cargo.toml`
+- `rust/crates/pi-tui/src/keybindings.rs`
+- `rust/crates/pi-tui/tests/keybindings.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-coding-agent-tui` now has the coding-agent-specific keybinding registry layered on top of the existing Rust `pi-tui` defaults
+- app keybinding defaults now match the current TypeScript `KEYBINDINGS` table, including the platform split for `app.clipboard.pasteImage` (`alt+v` on Windows, `ctrl+v` elsewhere)
+- legacy pre-namespaced keybinding ids are now recognized and migrated in Rust using the same mapping as TypeScript
+- in-memory loading now accepts old keybinding names before any file rewrite, matching the TS manager behavior used during startup
+- on-disk migration now preserves the TypeScript conflict rule where an already-present namespaced key wins over its legacy alias
+- migrated file output now keeps known keybindings in the default table order before any unknown extra keys, matching the TS ordering intent from `orderKeybindingsConfig(...)`
+
+Current intentional limitation for this slice:
+- the new Rust keybindings migration/helper path lives in `pi-coding-agent-tui` and is not yet wired into the top-level Rust startup path; runtime usage will land with the first interactive-mode integration slice
+
+### Rust design summary
+
+New `pi-coding-agent-tui::keybindings` module:
+- `DEFAULT_APP_KEYBINDINGS`
+- `KeybindingsManager` (coding-agent wrapper over `pi_tui::KeybindingsManager`)
+- `MigrateKeybindingsConfigResult`
+- `migrate_keybindings_config(...)`
+- `migrate_keybindings_file(...)`
+
+Design choices for this slice:
+- reuse the already-ported `pi-tui` keybinding manager and extend it with coding-agent defaults instead of creating a second keybinding implementation
+- keep legacy-id migration data local to the coding-agent crate because those aliases are app-specific, not TUI-generic
+- preserve raw JSON values during file migration so non-keybinding values are renamed without being normalized away, while still normalizing valid string/array entries into Rust `KeybindingsConfig` for runtime use
+- keep file loading tolerant of malformed `keybindings.json`, matching the TS startup/migration behavior of ignoring malformed files instead of failing the app
+
+### Validation summary
+
+New Rust coverage added for:
+- rewriting legacy ids on disk to namespaced ids
+- keeping the namespaced value when both legacy and namespaced ids exist
+- loading legacy ids in memory before file migration runs
+- keeping migrated known keybindings ordered ahead of unknown extras on disk
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive/keybindings surface:
+- top-level Rust startup still does not invoke the new keybindings migration helper
+- no Rust port of `keybinding-hints.ts` / theme-formatted key-hint rendering yet
+- no interactive-mode `pi-coding-agent-tui` integration yet
+- session-manager/resource-loader-backed interactive startup remains deferred
+
+## Milestone 22 update: top-level Rust startup keybindings migration wiring
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/migrations.ts`
+- `packages/coding-agent/src/core/keybindings.ts`
+- `packages/coding-agent/test/keybindings-migration.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/apps/pi/Cargo.toml`
+- `rust/apps/pi/src/main.rs`
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/keybindings.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- the top-level Rust app startup path now runs the keybindings migration before non-interactive command handling
+- startup migration now silently rewrites legacy `keybindings.json` ids to namespaced ids, matching the TS `runMigrations()` behavior for the keybindings file
+- malformed `keybindings.json` remains non-fatal and is left untouched, matching the TS migration path that ignores malformed files during startup
+- missing `keybindings.json` remains a no-op
+
+Current intentional limitation for this slice:
+- startup wiring is currently in `rust/apps/pi`; alternative Rust entrypoints or future test harness launch paths would need to call the same helper explicitly until a shared startup bootstrap layer exists
+
+### Rust design summary
+
+Startup integration changes:
+- `rust/apps/pi` now depends on `pi-coding-agent-tui`
+- new local helper in `rust/apps/pi/src/main.rs`:
+  - `run_startup_migrations(agent_dir: &Path)`
+- current implementation intentionally stays narrow and only calls:
+  - `migrate_keybindings_file(agent_dir.join("keybindings.json"))`
+- errors from the migration helper are intentionally ignored at startup to preserve TS non-fatal migration behavior
+
+### Validation summary
+
+New Rust coverage added for:
+- startup helper rewrites a legacy `keybindings.json` file before command handling
+- startup helper ignores malformed `keybindings.json` without modifying it
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive/keybindings startup surface:
+- keybinding migration is only wired in the `rust/apps/pi` entrypoint, not yet behind a shared reusable bootstrap helper
+- no Rust port of `keybinding-hints.ts` / theme-formatted key-hint rendering yet
+- no interactive-mode `pi-coding-agent-tui` integration yet
+- session-manager/resource-loader-backed interactive startup remains deferred
+
+## Milestone 23 update: keybinding-hint formatting slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/keybinding-hints.ts`
+- `packages/coding-agent/src/modes/interactive/theme/theme.ts`
+- `packages/coding-agent/src/core/keybindings.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/keybindings.rs`
+- `rust/crates/pi-coding-agent-tui/Cargo.toml`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-coding-agent-tui` now exposes the keybinding-hint formatting helpers corresponding to the current TypeScript `keybinding-hints.ts` slice
+- key text formatting now matches TS behavior:
+  - no keys -> empty string
+  - one key -> that key as-is
+  - multiple keys -> `/`-joined
+- hint rendering now preserves the TS output shape of dimmed key text followed by muted description text with a leading space
+- raw key hints now format literal keys without keybinding lookup
+- the Rust slice is theme-agnostic by design: callers provide a `KeyHintStyler` instead of relying on a global interactive theme singleton
+- `PlainKeyHintStyler` now exists for unstyled or test usage
+
+Current intentional limitation for this slice:
+- there is still no Rust port of the interactive theme system, so this slice ports the formatting contract and styling interface, not the concrete theme implementation from TypeScript
+
+### Rust design summary
+
+New `pi-coding-agent-tui::keybinding_hints` module:
+- `KeyHintStyler`
+- `PlainKeyHintStyler`
+- `key_text(...)`
+- `key_hint(...)`
+- `raw_key_hint(...)`
+
+Design choices for this slice:
+- depend on the already-ported coding-agent `KeybindingsManager` instead of a global mutable keybinding registry
+- keep styling abstract via a small trait so a future Rust interactive theme can plug in directly without coupling `pi-coding-agent-tui` to a theme implementation yet
+- keep the string-shape parity with TS exact, including the description leading-space behavior
+
+### Validation summary
+
+New Rust coverage added for:
+- slash-joining multiple keys in `key_text(...)`
+- empty-string behavior for unbound actions
+- styled key-hint formatting with separate dim/muted channels
+- raw key-hint formatting without lookup
+- passthrough behavior from `PlainKeyHintStyler`
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive/keybinding-hint surface:
+- no Rust interactive theme implementation yet to back a real styled TUI usage path
+- no wiring from a Rust interactive header/startup component into these hint helpers yet
+- no interactive-mode `pi-coding-agent-tui` integration yet
+- session-manager/resource-loader-backed interactive startup remains deferred
+
+## Milestone 24 update: minimal interactive startup-header component slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (built-in header construction section)
+- `packages/coding-agent/src/modes/interactive/components/keybinding-hints.ts`
+- `packages/coding-agent/src/modes/interactive/theme/theme.ts`
+- `packages/coding-agent/src/core/keybindings.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/tui.rs`
+- `rust/crates/pi-tui/src/terminal.rs`
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/keybinding_hints.rs`
+- `rust/crates/pi-coding-agent-tui/src/keybindings.rs`
+- `rust/crates/pi-coding-agent-tui/Cargo.toml`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-coding-agent-tui` now has a first minimal built-in startup-header slice derived from the current TypeScript interactive header content
+- the Rust header text reproduces the current TS startup instruction list order and wording for the built-in header body:
+  - interrupt / clear / exit / suspend
+  - delete-to-end
+  - thinking/model controls
+  - tool/thinking/editor shortcuts
+  - command/bash/follow-up/paste-image/file-drop hints
+  - onboarding sentence
+- the header now resolves actual key text from the Rust coding-agent keybindings manager, so user overrides affect rendered startup instructions just like the TS path
+- quiet startup is now represented in the Rust slice by returning an empty header body
+- the new header component renders through the existing Rust `pi-tui` `Component`/`Tui` render path and wraps long lines using the already-ported ANSI-aware wrapping helpers
+
+Current intentional limitation for this slice:
+- changelog rendering, theme-driven styled output, and spacer/border composition are still deferred; this slice ports only the built-in startup-header text/content plus minimal renderable component behavior
+
+### Rust design summary
+
+New `pi-coding-agent-tui::startup_header` module:
+- `StartupHeaderStyler`
+- `build_startup_header_text(...)`
+- `StartupHeaderComponent`
+
+Design choices for this slice:
+- keep the header component focused on static built text instead of introducing a broader widget framework in `pi-coding-agent-tui`
+- reuse the already-ported keybinding-hint helpers and coding-agent keybindings manager directly
+- keep styling abstract with `StartupHeaderStyler` so a future Rust interactive theme can supply accent/bold behavior without forcing a theme subsystem into this milestone
+- use `pi_tui::wrap_text_with_ansi(...)` in the component render path to stay compatible with future styled output and the existing renderer semantics
+
+### Validation summary
+
+New Rust coverage added for:
+- exact startup-header text shape with default keybindings
+- startup-header response to keybinding overrides
+- quiet startup returning an empty header body
+- rendering the startup-header component through `pi_tui::Tui` with wrapped long lines
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive header/startup surface:
+- no Rust interactive theme implementation yet to produce TS-style colored/bold startup output
+- changelog/header-border/spacer composition from TS `InteractiveMode` is not yet ported
+- no Rust interactive session/editor/footer integration yet
+- session-manager/resource-loader-backed interactive startup remains deferred
+
+## Milestone 25 update: built-in header composition with condensed changelog notice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (built-in header layout / changelog section)
+- `packages/coding-agent/src/modes/interactive/components/dynamic-border.ts`
+- `packages/coding-agent/src/modes/interactive/components/keybinding-hints.ts`
+- `packages/coding-agent/src/modes/interactive/theme/theme.ts`
+- `packages/coding-agent/src/core/keybindings.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/startup_header.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_header.rs`
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-tui/src/tui.rs`
+- `rust/crates/pi-tui/src/terminal.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-coding-agent-tui` now has a first built-in header composition slice around the previously ported startup-header text
+- the Rust built-in header now reproduces the current TS structural behavior for the migrated subset:
+  - leading spacer before the built-in startup header
+  - trailing spacer after the built-in startup header
+  - condensed changelog notice rendering when requested
+  - quiet-startup path showing only the condensed changelog notice (with a spacer) when changelog content is present
+- condensed changelog notice text now matches the TS wording shape:
+  - `Updated to v<version>. Use /changelog to view full changelog.`
+- latest-version extraction now works from markdown headings like the TS regex path (`## [0.9.0]`)
+- non-quiet condensed changelog rendering now includes dynamic-width border lines using the same `─` repeat strategy as the TS `DynamicBorder` component
+- the new component renders directly through the existing Rust `Component` surface and stays compatible with the already-ported `pi-tui` renderer
+
+Current intentional limitation for this slice:
+- expanded changelog markdown rendering (`What's New` + markdown body + spacers) is still deferred; only the condensed changelog path is implemented in Rust so far
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::startup_header` with:
+- `build_condensed_changelog_notice(...)`
+- `BuiltInHeaderComponent`
+- internal semver extraction from changelog markdown headings
+
+Design choices for this slice:
+- keep the composition logic in the existing startup-header module instead of introducing a separate header/layout subsystem yet
+- keep changelog support narrow to the condensed path that is easiest to validate without a Rust markdown widget
+- reuse the existing startup-header component for the main body and layer structural spacing / borders / condensed notice on top
+- keep styling abstract through `StartupHeaderStyler`; concrete colored border/bold rendering remains deferred until the Rust interactive theme exists
+
+### Validation summary
+
+New Rust coverage added for:
+- extracting the latest version from changelog markdown into the condensed notice
+- rendering built-in-header spacers, borders, and condensed changelog notice in the non-quiet path
+- rendering quiet built-in-header output with only the condensed changelog notice and no borders
+- previously added startup-header body tests continue to validate the underlying instruction text and wrapped rendering
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive header/startup surface:
+- no Rust interactive theme implementation yet to produce TS-style colored/bold/border output
+- full changelog markdown rendering (`What's New` header + markdown body) is not yet ported
+- no Rust interactive session/editor/footer integration yet
+- session-manager/resource-loader-backed interactive startup remains deferred

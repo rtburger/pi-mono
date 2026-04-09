@@ -3,10 +3,11 @@ use pi_coding_agent_cli::{
     AuthFileSource, ChainedAuthSource, EnvAuthSource, RunCommandOptions, run_command,
 };
 use pi_coding_agent_core::refresh_auth_file_oauth;
+use pi_coding_agent_tui::migrate_keybindings_file;
 use std::{
     env,
     io::{self, IsTerminal as _, Read as _},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
 };
@@ -28,6 +29,7 @@ async fn main() -> ExitCode {
     };
 
     let agent_dir = get_agent_dir();
+    run_startup_migrations(&agent_dir);
     let auth_path = agent_dir.join("auth.json");
     refresh_auth_file_oauth(&auth_path).await;
 
@@ -63,6 +65,10 @@ async fn main() -> ExitCode {
     }
 }
 
+fn run_startup_migrations(agent_dir: &Path) {
+    let _ = migrate_keybindings_file(agent_dir.join("keybindings.json"));
+}
+
 fn get_agent_dir() -> PathBuf {
     if let Some(agent_dir) = env::var_os(ENV_AGENT_DIR) {
         return expand_home_path(PathBuf::from(agent_dir));
@@ -89,4 +95,44 @@ fn expand_home_path(path: PathBuf) -> PathBuf {
 
 fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_startup_migrations;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn startup_migrations_rewrite_legacy_keybindings_file_when_present() {
+        let agent_dir = tempdir().unwrap();
+        fs::write(
+            agent_dir.path().join("keybindings.json"),
+            "{\n  \"cursorUp\": [\"up\", \"ctrl+p\"]\n}\n",
+        )
+        .unwrap();
+
+        run_startup_migrations(agent_dir.path());
+
+        let content = fs::read_to_string(agent_dir.path().join("keybindings.json")).unwrap();
+        assert_eq!(
+            content,
+            "{\n  \"tui.editor.cursorUp\": [\n    \"up\",\n    \"ctrl+p\"\n  ]\n}\n"
+        );
+    }
+
+    #[test]
+    fn startup_migrations_ignore_malformed_keybindings_files() {
+        let agent_dir = tempdir().unwrap();
+        fs::write(
+            agent_dir.path().join("keybindings.json"),
+            "{ not valid json\n",
+        )
+        .unwrap();
+
+        run_startup_migrations(agent_dir.path());
+
+        let content = fs::read_to_string(agent_dir.path().join("keybindings.json")).unwrap();
+        assert_eq!(content, "{ not valid json\n");
+    }
 }

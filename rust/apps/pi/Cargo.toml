@@ -8,4 +8,8 @@ license.workspace = true
 pi-ai = { path = "../../crates/pi-ai" }
 pi-coding-agent-cli = { path = "../../crates/pi-coding-agent-cli" }
 pi-coding-agent-core = { path = "../../crates/pi-coding-agent-core" }
+pi-coding-agent-tui = { path = "../../crates/pi-coding-agent-tui" }
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
