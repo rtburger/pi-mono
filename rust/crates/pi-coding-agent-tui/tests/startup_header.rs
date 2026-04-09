@@ -221,6 +221,34 @@ fn built_in_header_component_renders_spacers_borders_and_condensed_notice() {
 }
 
 #[test]
+fn built_in_header_component_renders_expanded_changelog_markdown() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let component = BuiltInHeaderComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainStyler,
+        false,
+        Some(
+            "## [0.9.0]\n\n### Added\n\n- Added **foo**\n- See [docs](docs.md)\n\n```ts\nconsole.log(\"hi\");\n```\n",
+        ),
+        false,
+    );
+
+    let lines = component.render(80);
+
+    assert!(lines.iter().any(|line| line == "What's New"));
+    assert!(lines.iter().any(|line| line == "[0.9.0]"));
+    assert!(lines.iter().any(|line| line == "### Added"));
+    assert!(lines.iter().any(|line| line == "- Added foo"));
+    assert!(lines.iter().any(|line| line == "- See docs (docs.md)"));
+    assert!(lines.iter().any(|line| line == "```ts"));
+    assert!(lines.iter().any(|line| line == "  console.log(\"hi\");"));
+    assert!(lines.iter().any(|line| line == "```"));
+    assert!(!lines.iter().any(|line| line.contains("Updated to v0.9.0")));
+}
+
+#[test]
 fn built_in_header_component_in_quiet_mode_only_shows_condensed_notice() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let component = BuiltInHeaderComponent::new(

@@ -1077,3 +1077,109 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui` / `rust/crates/pi-tui` and continue with the next smallest API/control slice:
 - add a first-class Rust overlay-handle API on top of the existing id-based overlay controls
 - then revisit whether queued callback draining is sufficient or whether a broader `Tui` ownership refactor is justified before differential rendering
+
+## Milestone 13 update: minimal single-line input widget slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/components/input.ts`
+- `packages/tui/test/input.test.ts`
+- `packages/tui/src/keybindings.ts`
+- `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+- `packages/coding-agent/src/modes/interactive/components/footer.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (submit / follow-up grounding)
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/src/tui.rs`
+- `rust/crates/pi-tui/src/keybindings.rs`
+- `rust/crates/pi-tui/src/keys.rs`
+- `rust/crates/pi-tui/src/utils.rs`
+- `migration/packages/tui.md`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- `pi-tui` now exports a first minimal `Input` widget for the single-line input slice from `packages/tui/src/components/input.ts`
+- the Rust `Input` now supports the core behaviors needed for the first coding-agent editor path:
+  - printable character insertion including literal backslashes
+  - submit callback on the configured `tui.input.submit` binding and raw `\n`
+  - cancel callback on `tui.select.cancel`
+  - bracketed-paste buffering with newline stripping and tab expansion
+  - grapheme-aware cursor-left / cursor-right movement
+  - cursor-to-start / cursor-to-end movement
+  - word-left / word-right movement using the existing Rust punctuation/whitespace helpers
+  - backspace and forward delete
+  - delete word backward / forward
+  - delete to line start / end
+  - horizontal scrolling with wide-character-safe rendering
+  - `CURSOR_MARKER` emission when focused so the existing Rust `Tui` hardware-cursor path can position IME/cursor state correctly
+- rendered input lines now stay within the requested width for the wide-text cases ported from the TypeScript tests
+
+Current intentional compatibility limitation for this slice:
+- this milestone ports only the smallest useful single-line input subset
+- the broader TypeScript input/editor behaviors remain deferred:
+  - kill ring and yank / yank-pop
+  - undo stack parity
+  - history browsing
+  - multiline editor behavior
+  - autocomplete
+  - copy/selection behavior
+  - large-paste marker substitution used by the multiline editor path
+
+### Rust design summary
+
+New Rust module:
+- `pi-tui::input`
+  - `Input`
+
+Public API added in this milestone:
+- `Input::new()`
+- `Input::with_keybindings(...)`
+- `Input::value()` / `get_value()`
+- `Input::set_value(...)`
+- `Input::clear()`
+- `Input::cursor()` / `set_cursor(...)`
+- `Input::is_focused()` / `set_focused(...)`
+- `Input::set_on_submit(...)` / `clear_on_submit()`
+- `Input::set_on_escape(...)` / `clear_on_escape()`
+- crate export via `pi_tui::Input`
+
+Implementation choices for this slice:
+- keep the widget single-line and self-contained instead of pulling the much larger TS `Editor` surface forward prematurely
+- inject a `KeybindingsManager` into the widget instead of porting the TS global `getKeybindings()` / `setKeybindings()` singleton yet
+- reuse already-ported raw-key parsing, grapheme utilities, width helpers, and `CURSOR_MARKER` support instead of introducing parallel editor-specific primitives
+- intentionally defer kill-ring and undo internals until a larger editor/widget milestone actually needs them
+
+### Validation summary
+
+New Rust coverage added for:
+- submit callback preserving a trailing backslash on Enter
+- literal backslash insertion
+- escape/cancel callback behavior
+- bracketed-paste newline stripping and tab expansion
+- `Ctrl+W` word deletion
+- wide-text render width stability
+- horizontal-scroll cursor visibility
+
+Validation run results:
+- `cd rust && cargo test -p pi-tui --test input` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- first-class overlay-handle API
+- differential rendering from `packages/tui/src/tui.ts`
+- richer input/editor parity (kill ring, undo, multiline editor, history, autocomplete)
+- markdown/select/settings/image widgets
+- coding-agent interactive integration on top of the new input widget
+
+### Recommended next step
+
+Stay in `packages/tui` / `rust/crates/pi-tui` and continue with the next smallest interaction slice that unlocks coding-agent integration without overbuilding:
+- either add the first-class overlay-handle API still deferred from the control path
+- or port the next minimal supporting widgets (`Text` / `Spacer`) plus a thin coding-agent shell layer that can actually use the new `Input`

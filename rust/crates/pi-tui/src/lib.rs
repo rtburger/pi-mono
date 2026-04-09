@@ -1,4 +1,5 @@
 pub mod fuzzy;
+pub mod input;
 pub mod keybindings;
 pub mod keys;
 pub mod stdin_buffer;
@@ -8,6 +9,7 @@ pub mod tui;
 pub mod utils;
 
 pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
+pub use input::Input;
 pub use keybindings::{
     KeyId, KeybindingConflict, KeybindingDefinition, KeybindingsConfig, KeybindingsManager,
     TUI_KEYBINDINGS,

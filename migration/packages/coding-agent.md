@@ -1505,3 +1505,93 @@ Still deferred for the coding-agent interactive header/startup surface:
 - full changelog markdown rendering (`What's New` header + markdown body) is not yet ported
 - no Rust interactive session/editor/footer integration yet
 - session-manager/resource-loader-backed interactive startup remains deferred
+
+## Milestone 26 update: expanded changelog markdown in the built-in startup header
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (built-in header / changelog path)
+- `packages/coding-agent/src/utils/changelog.ts`
+- `packages/tui/src/components/markdown.ts`
+- `packages/tui/test/markdown.test.ts`
+- `packages/coding-agent/CHANGELOG.md`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/startup_header.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_header.rs`
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/Cargo.toml`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `BuiltInHeaderComponent` now supports the non-condensed changelog path used by TypeScript interactive startup when `collapseChangelog` is disabled
+- non-quiet built-in header rendering now follows the current TS structure for the migrated slice:
+  - startup header body
+  - spacer
+  - dynamic-width top border
+  - `What's New` heading
+  - spacer
+  - rendered changelog body
+  - spacer
+  - dynamic-width bottom border
+- the Rust changelog renderer now covers the markdown constructs exercised by current coding-agent changelog entries and startup display needs:
+  - `##` headings rendered without the literal heading marker, matching the TS markdown component behavior for level-2 headings
+  - `###` and deeper headings rendered with their hash prefix, matching the TS markdown component behavior for deeper headings
+  - unordered and ordered lists
+  - fenced code blocks with TS-style ``` fence lines and two-space code indentation
+  - inline bold, inline code, strikethrough, and markdown links (`[text](url)` -> `text (url)` when text differs)
+  - single-blank-line spacing normalization between rendered blocks
+- quiet startup behavior is unchanged: Rust still shows only the condensed changelog notice in the silent path, matching the current TS startup flow
+
+Current intentional limitation for this slice:
+- this is still a startup-header-specific markdown renderer, not a full Rust port of the generic `@mariozechner/pi-tui` `Markdown` widget
+- richer markdown behaviors already present in TS `packages/tui/src/components/markdown.ts` (tables, blockquotes, nested list layout parity, theme-aware inline style restoration, code highlighting, background styling) remain deferred until the broader interactive/widget migration needs them
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::startup_header` with:
+- internal `ChangelogContent::{Condensed, Expanded}` to preserve the TS condensed vs expanded startup decision in one component
+- internal startup-header markdown rendering helpers for:
+  - block parsing (`heading`, `list`, `paragraph`, fenced code block, horizontal rule)
+  - inline formatting (`bold`, `code`, `strikethrough`, markdown links)
+  - ANSI-aware wrapping through the existing `pi_tui::wrap_text_with_ansi(...)`
+- widened `StartupHeaderStyler` with default no-op styling hooks for headings, links, code, list bullets, and code blocks so future theme wiring can layer styling without changing the current plain-text tests
+
+Design choices for this slice:
+- keep the work in `pi-coding-agent-tui::startup_header` instead of introducing a generic Rust markdown widget before coding-agent actually needs it elsewhere
+- preserve the TS built-in-header composition and condensed/quiet rules first, while explicitly deferring generic markdown/widget parity work to later interactive milestones
+- reuse the existing `pi-tui` wrapping helpers instead of introducing a second wrapping/rendering path for startup content
+
+### Validation summary
+
+New Rust coverage added for:
+- expanded built-in header rendering with:
+  - `What's New` heading
+  - changelog version heading rendering
+  - deep heading rendering
+  - list items
+  - markdown link rendering
+  - fenced code block rendering
+- existing startup-header tests continue to validate:
+  - exact startup instruction text
+  - keybinding override behavior
+  - condensed changelog notice rendering
+  - quiet-startup condensed notice behavior
+  - TUI wrapping of the startup header component
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test startup_header` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive header/startup surface:
+- no Rust interactive theme implementation yet to produce TS-style colored/bold/border output beyond the current styler hooks
+- no full generic Rust markdown widget yet; broader `packages/tui` markdown parity still remains deferred
+- no Rust interactive session/editor/footer integration yet
+- session-manager/resource-loader-backed interactive startup remains deferred
