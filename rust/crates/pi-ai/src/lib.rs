@@ -1,3 +1,4 @@
+pub mod anthropic_messages;
 pub mod models;
 pub mod openai_responses;
 
@@ -146,6 +147,7 @@ fn bedrock_placeholder() -> Option<String> {
 }
 
 pub fn register_builtin_providers() {
+    anthropic_messages::register_anthropic_provider();
     openai_responses::register_openai_responses_provider();
 }
 

@@ -1,6 +1,6 @@
 # packages/ai migration inventory
 
-Status: milestone 7 scaffold + faux provider slice + OpenAI Responses streaming/replay + tool-definition slice + built-in model catalog parsing from TypeScript `models.generated.ts`
+Status: milestone 9 adds TS-generated static model-header extraction and provider-level fallback wiring so Anthropic Messages and OpenAI Responses can consume built-in Copilot headers from `models.generated.ts` instead of provider-local constants
 Target crate: `rust/crates/pi-ai`
 
 ## 1. Files analyzed
@@ -279,3 +279,181 @@ Covered stream/request semantics in Rust tests:
 - how much of TS `SimpleStreamOptions` reasoning normalization should live in `pi-ai` vs provider-specific modules
 - whether faux provider should remain in `pi-ai` or move to `pi-test-harness` after the first provider lands
 - whether to continue AI with validation/tool execution plumbing for agent support or switch to Anthropic for a second end-to-end provider
+
+## Milestone 8 update: Anthropic Messages provider slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/ai/src/providers/anthropic.ts`
+- `packages/ai/src/providers/register-builtins.ts` (Anthropic lazy-registration path)
+- `packages/ai/test/anthropic-thinking-disable.test.ts`
+- `packages/ai/test/anthropic-tool-name-normalization.test.ts`
+- `packages/ai/test/anthropic-oauth.test.ts`
+- `packages/ai/test/github-copilot-anthropic.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/src/lib.rs`
+- `rust/crates/pi-ai/src/openai_responses.rs`
+- `rust/crates/pi-ai/tests/openai_responses_payload.rs`
+- `rust/crates/pi-ai/tests/openai_responses_stream.rs`
+- `rust/crates/pi-ai/tests/openai_responses_provider.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- built-in runtime registration of a second real provider path: `anthropic-messages`
+- Anthropic request conversion for:
+  - system prompts
+  - user text/image messages
+  - assistant text/thinking/tool-call replay
+  - grouped tool-result replay as a single user message
+  - tool-definition conversion
+- Anthropic cross-provider replay shaping for the current slice:
+  - foreign tool-call ID normalization to Anthropic-safe IDs
+  - skipping aborted/errored assistant turns during replay
+  - synthetic tool-result insertion for orphaned tool calls
+  - cross-model thinking-to-text fallback while preserving same-model signed/redacted thinking blocks
+- Anthropic cache-control shaping for the current request slice:
+  - short/long retention mapping to `cache_control: { type: "ephemeral" }`
+  - `ttl: "1h"` only for direct `api.anthropic.com` long-retention requests
+- Anthropic OAuth / Copilot request behavior for the current slice:
+  - Claude Code identity system prompt for Anthropic OAuth tokens
+  - Claude Code tool-name canonicalization on outbound requests and reverse normalization on inbound streamed tool calls
+  - GitHub Copilot bearer auth plus dynamic headers (`X-Initiator`, `Openai-Intent`, `Copilot-Vision-Request`)
+  - Copilot static header slice needed by the migrated tests (`User-Agent`, `Editor-Version`, `Editor-Plugin-Version`, `Copilot-Integration-Id`)
+- Anthropic SSE parsing and normalized stream behavior for:
+  - `message_start`
+  - `content_block_start`
+  - `content_block_delta` for text, thinking, signature, and tool JSON deltas
+  - `content_block_stop`
+  - `message_delta`
+  - `error`
+- runtime terminal-message behavior parity for:
+  - missing API key -> terminal assistant error message
+  - HTTP failure -> terminal assistant error message
+  - explicit streamed error event -> terminal assistant error message
+
+Current intentional limitations of this slice:
+- Rust still does not expose TS `streamSimple()` / `completeSimple()` or full provider-specific option parity; the runtime bridge currently maps the existing generic `StreamOptions.reasoning_effort` into a narrow Anthropic thinking configuration
+- partial tool JSON parsing is still best-effort and currently falls back to `{}` until JSON becomes valid
+- model-catalog headers are still not loaded generically from `models.generated.ts`; the current Copilot Anthropic path carries the required static headers in provider code for this slice
+- OAuth login/refresh remains in coding-agent auth sources, not in `pi-ai` provider modules yet
+
+### Rust design summary
+
+New Rust module added:
+- `rust/crates/pi-ai/src/anthropic_messages.rs`
+
+Public/provider-facing Rust surface added in that module:
+- `AnthropicOptions`
+- `AnthropicRequestParams`
+- `AnthropicStreamEnvelope`
+- `build_anthropic_request_params()`
+- `convert_anthropic_messages()`
+- `normalize_anthropic_tool_call_id()`
+- `stream_anthropic_http()`
+- `stream_anthropic_sse_events()`
+- `register_anthropic_provider()`
+
+Integration changes:
+- `rust/crates/pi-ai/src/lib.rs`
+  - now exposes `pub mod anthropic_messages`
+  - `register_builtin_providers()` now registers both Anthropic Messages and OpenAI Responses
+
+Behavior-freeze artifacts added:
+- `rust/crates/pi-ai/tests/fixtures/anthropic_messages_stream_mixed.json`
+
+### Validation summary
+
+New Rust coverage added for:
+- Anthropic thinking-disable payload shaping
+- Anthropic long-cache TTL shaping
+- Anthropic OAuth tool-name normalization
+- grouped tool-result conversion
+- foreign tool-call ID normalization for Anthropic-safe replay
+- Anthropic mixed text/thinking/tool-call stream event ordering
+- Anthropic explicit streamed error events
+- end-to-end HTTP dispatch through the provider registry
+- GitHub Copilot Anthropic header behavior
+- missing API-key terminal error behavior
+
+Validation run results:
+- `cd rust && cargo test -p pi-ai` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- full TS `streamSimple` / `completeSimple` API parity
+- broader Anthropic provider option parity (`toolChoice`, richer metadata passthrough, direct provider-specific public API surface from the crate root)
+- Anthropic abort regression tests and additional parity around empty streams / Unicode / token-accounting edge cases from the broader TS suite
+- next providers after Anthropic (`openai-completions`, Google, Mistral, Bedrock, Azure Responses)
+
+## Milestone 9 update: static model-header extraction slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/ai/src/providers/openai-responses.ts` (header merge order)
+- `packages/ai/src/models.generated.ts` (built-in `headers` fields for Copilot models)
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/src/models.rs`
+- `rust/crates/pi-ai/src/openai_responses.rs`
+- `rust/crates/pi-ai/src/anthropic_messages.rs`
+- `rust/crates/pi-ai/tests/models.rs`
+- `rust/crates/pi-ai/tests/openai_responses_provider.rs`
+- `rust/crates/pi-ai/tests/anthropic_messages_http.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- built-in static request headers are now parsed from `packages/ai/src/models.generated.ts`
+- Rust `pi-ai` now exposes catalog-backed header lookup helpers for:
+  - exact `provider + model id`
+  - provider-level fallback when a runtime model id is not directly catalogued but the built-in provider uses shared static headers (current Copilot tests use this path)
+- `anthropic-messages` runtime header construction now uses TS-generated static model headers before dynamic Copilot headers and user overrides
+- `openai-responses` runtime header construction now uses TS-generated static model headers before dynamic Copilot headers and user overrides
+- Copilot static header behavior is therefore no longer hardcoded only in the Anthropic provider slice
+
+Compatibility note for this slice:
+- provider-level fallback is intentionally narrow migration glue. It preserves the prior Rust behavior for Copilot-flavored runtime models whose ids are not direct catalog hits, without widening `pi_events::Model` yet.
+
+### Rust design summary
+
+Expanded `rust/crates/pi-ai/src/models.rs` with:
+- catalog storage of parsed static model headers
+- `get_model_headers(provider, model_id)`
+- `get_provider_headers(provider)`
+
+Provider integrations updated:
+- `rust/crates/pi-ai/src/anthropic_messages.rs`
+- `rust/crates/pi-ai/src/openai_responses.rs`
+
+The merge order now matches the TS provider code more closely:
+- built-in model headers
+- provider-generated dynamic headers
+- per-request override headers
+
+### Validation summary
+
+New Rust coverage added for:
+- loading static Copilot headers from the TS-generated catalog
+- provider-level static-header fallback lookup
+- OpenAI Responses Copilot dispatch now asserting static header presence in HTTP tests
+- Anthropic Copilot dispatch still passing with static headers sourced from the catalog/fallback path
+
+Validation run results:
+- `cd rust && cargo test -p pi-ai --test models --test openai_responses_provider --test anthropic_messages_http` passed
+- `cd rust && cargo test -p pi-ai` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- carrying static built-in headers directly on the Rust `Model` value instead of side-channel catalog lookup
+- full TS `streamSimple` / `completeSimple` API parity
+- next provider slice after Anthropic / header extraction, likely `openai-completions`

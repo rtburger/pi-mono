@@ -12,6 +12,7 @@ const MODELS_GENERATED_TS: &str = include_str!(concat!(
 struct BuiltInModelCatalog {
     providers: Vec<String>,
     provider_models: BTreeMap<String, Vec<Model>>,
+    model_headers: BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>,
     all_models: Vec<Model>,
 }
 
@@ -24,6 +25,8 @@ struct RawModel {
     provider: String,
     #[serde(rename = "baseUrl")]
     base_url: String,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
     reasoning: bool,
     input: Vec<String>,
     context_window: u64,
@@ -56,6 +59,22 @@ pub fn get_model(provider: &str, model_id: &str) -> Option<Model> {
         .cloned()
 }
 
+pub fn get_model_headers(provider: &str, model_id: &str) -> Option<BTreeMap<String, String>> {
+    catalog()
+        .model_headers
+        .get(provider)
+        .and_then(|models| models.get(model_id))
+        .cloned()
+}
+
+pub fn get_provider_headers(provider: &str) -> Option<BTreeMap<String, String>> {
+    catalog()
+        .model_headers
+        .get(provider)
+        .and_then(|models| models.values().next())
+        .cloned()
+}
+
 pub fn supports_xhigh(model: &Model) -> bool {
     model.id.contains("gpt-5.2")
         || model.id.contains("gpt-5.3")
@@ -83,13 +102,19 @@ fn load_catalog() -> BuiltInModelCatalog {
 
     let mut providers = Vec::with_capacity(raw_catalog.len());
     let mut provider_models = BTreeMap::new();
+    let mut model_headers = BTreeMap::new();
     let mut all_models = Vec::new();
 
     for (provider, models) in raw_catalog {
         providers.push(provider.clone());
         let mut provider_entries = Vec::with_capacity(models.len());
+        let mut provider_header_entries = BTreeMap::new();
 
         for raw_model in models.into_values() {
+            let model_id = raw_model.id.clone();
+            if !raw_model.headers.is_empty() {
+                provider_header_entries.insert(model_id.clone(), raw_model.headers.clone());
+            }
             let model = Model {
                 id: raw_model.id,
                 name: raw_model.name,
@@ -105,12 +130,16 @@ fn load_catalog() -> BuiltInModelCatalog {
             all_models.push(model);
         }
 
+        if !provider_header_entries.is_empty() {
+            model_headers.insert(provider.clone(), provider_header_entries);
+        }
         provider_models.insert(provider, provider_entries);
     }
 
     BuiltInModelCatalog {
         providers,
         provider_models,
+        model_headers,
         all_models,
     }
 }

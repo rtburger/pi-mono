@@ -96,6 +96,10 @@ async fn dispatches_github_copilot_with_dynamic_headers() {
         when.method(POST)
             .path("/responses")
             .header("authorization", "Bearer test-key")
+            .header("user-agent", "GitHubCopilotChat/0.35.0")
+            .header("editor-version", "vscode/1.107.0")
+            .header("editor-plugin-version", "copilot-chat/0.35.0")
+            .header("copilot-integration-id", "vscode-chat")
             .header("x-initiator", "user")
             .header("openai-intent", "conversation-edits")
             .header("copilot-vision-request", "true");

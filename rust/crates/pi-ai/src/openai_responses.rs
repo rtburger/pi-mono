@@ -1,4 +1,8 @@
-use crate::{AiProvider, AssistantEventStream, StreamOptions, register_provider};
+use crate::{
+    AiProvider, AssistantEventStream, StreamOptions,
+    models::{get_model_headers, get_provider_headers},
+    register_provider,
+};
 use async_stream::stream;
 use pi_events::{
     AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason,
@@ -1666,7 +1670,9 @@ fn build_runtime_request_headers(
     context: &Context,
     option_headers: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
-    let mut headers = BTreeMap::new();
+    let mut headers = get_model_headers(&model.provider, &model.id)
+        .or_else(|| get_provider_headers(&model.provider))
+        .unwrap_or_default();
 
     if model.provider == "github-copilot" {
         headers.extend(build_copilot_dynamic_headers(&context.messages));

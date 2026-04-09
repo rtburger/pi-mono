@@ -1,3 +1,4 @@
+use pi_ai::models::{get_model_headers, get_provider_headers};
 use pi_ai::{
     built_in_models, get_env_api_key, get_model, get_models, get_providers, models_are_equal,
     supports_xhigh,
@@ -63,6 +64,32 @@ fn returns_provider_lists_from_catalog() {
         anthropic_models
             .iter()
             .any(|model| model.id == "claude-opus-4-6")
+    );
+}
+
+#[test]
+fn loads_static_model_headers_from_typescript_generated_catalog() {
+    let headers = get_model_headers("github-copilot", "claude-sonnet-4")
+        .expect("expected static headers for github-copilot claude-sonnet-4");
+
+    assert_eq!(
+        headers.get("User-Agent").map(String::as_str),
+        Some("GitHubCopilotChat/0.35.0")
+    );
+    assert_eq!(
+        headers.get("Copilot-Integration-Id").map(String::as_str),
+        Some("vscode-chat")
+    );
+}
+
+#[test]
+fn falls_back_to_provider_static_headers_when_model_id_is_not_catalogued() {
+    let headers = get_provider_headers("github-copilot")
+        .expect("expected provider headers for github-copilot");
+
+    assert_eq!(
+        headers.get("User-Agent").map(String::as_str),
+        Some("GitHubCopilotChat/0.35.0")
     );
 }
 
