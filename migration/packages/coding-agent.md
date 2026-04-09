@@ -1953,3 +1953,351 @@ Still deferred for the coding-agent interactive transcript surface:
 Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
 - port the next smallest transcript widget that can reuse the same text-first pattern, likely `CompactionSummaryMessageComponent` or `SkillInvocationMessageComponent`
 - keep full markdown, themed backgrounds, multiline editor parity, and runtime/session wiring deferred until there are a few concrete transcript widgets in place
+
+## Milestone 31 update: second concrete transcript widget (`CompactionSummaryMessageComponent`) slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/compaction-summary-message.ts`
+- `packages/coding-agent/src/core/messages.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/branch_summary.rs`
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/src/transcript.rs`
+- `rust/crates/pi-coding-agent-tui/tests/branch_summary.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+- `rust/crates/pi-coding-agent-core/src/messages.rs`
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/src/text.rs`
+
+### Behavior summary
+
+New TS-compatible interactive-transcript behavior now covered in Rust:
+- `pi-coding-agent-tui` now has a second concrete transcript widget mirroring the current TypeScript `CompactionSummaryMessageComponent`
+- the Rust widget preserves the current compaction-summary interaction shape for the migrated slice:
+  - collapsed by default
+  - `[compaction]` label
+  - collapsed summary line with grouped token counts and the configured `app.tools.expand` hint
+  - expandable state via `set_expanded(...)`
+  - expanded rendering showing the grouped token-count header plus the stored summary text
+- the widget plugs into the already-ported transcript container and startup shell, so a second real coding-agent transcript message type can render above pending messages and the prompt
+
+Current intentional compatibility limitation for this slice:
+- the Rust widget currently renders the expanded summary through `pi_tui::Text`, not the full TS `Markdown` widget/theme path
+- background/theme parity for custom-message-style summary widgets remains deferred
+
+### Rust design summary
+
+New `pi-coding-agent-tui::compaction_summary` module:
+- `CompactionSummaryMessageComponent`
+  - backed by `pi_coding_agent_core::CompactionSummaryMessage`
+  - stores collapsed/expanded state
+  - reuses the existing coding-agent keybinding manager for the expand hint
+  - rebuilds an internal `pi_tui::Container` from spacer + label + collapsed/expanded body + trailing spacer
+- small internal grouped-number formatter for TS-style token-count display (`12,345`)
+
+Crate-surface change:
+- `pi-coding-agent-tui` now exports `CompactionSummaryMessageComponent`
+
+Design choices for this slice:
+- keep the widget narrow and text-first like the prior branch-summary slice instead of blocking on broader markdown/theme parity
+- validate integration through the existing startup-shell transcript path rather than introducing a separate transcript harness first
+
+### Validation summary
+
+New Rust coverage added for:
+- collapsed compaction-summary rendering with grouped token counts and expand hint text
+- expanded compaction-summary rendering with grouped token counts and summary content
+- startup-shell transcript integration with a real compaction-summary widget above pending messages and the prompt
+- unit coverage for grouped-number formatting
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test compaction_summary` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` fails in this environment because `biome` is not installed (`sh: biome: command not found`)
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive transcript surface:
+- no full markdown/theme parity yet for summary widgets
+- no additional concrete message widgets yet for `skill-invocation`, `user-message`, `assistant-message`, `tool-execution`, or `custom-message`
+- no Rust footer integration yet
+- no scroll behavior or transcript viewport management yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- port the next text-first transcript widget, with `SkillInvocationMessageComponent` now the most natural follow-up if the required Rust skill payload can be isolated cleanly
+- otherwise continue with another low-dependency interactive widget before attempting full markdown/theme/runtime integration
+
+## Milestone 32 update: skill-block parser + `SkillInvocationMessageComponent` slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/core/agent-session.ts` (skill-block parser section)
+- `packages/coding-agent/src/modes/interactive/components/skill-invocation-message.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (user-message skill-block insertion path)
+- `packages/coding-agent/src/index.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-core/src/lib.rs`
+- `rust/crates/pi-coding-agent-core/tests/messages.rs`
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/tests/branch_summary.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-coding-agent-core` now has a first Rust skill-block parser corresponding to the TypeScript `parseSkillBlock(...)` helper from `agent-session.ts`
+- the Rust parser preserves the current TS shape for the migrated slice:
+  - exact `<skill name="..." location="..."> ... </skill>` envelope parsing
+  - multiline body extraction
+  - optional trailing user message after a double newline
+  - user-message trimming with empty result -> `None`
+  - rejection of non-matching text and malformed trailing suffixes
+- `pi-coding-agent-tui` now has `SkillInvocationMessageComponent`, the next concrete transcript widget used by the TypeScript interactive-mode path for parsed skill blocks
+- the Rust widget preserves the current TS interaction shape for the migrated slice:
+  - collapsed by default
+  - collapsed single-line `[skill] <name> (<expand-key> to expand)` summary
+  - expanded label + skill name + full skill content rendering
+  - the embedded trailing user message is intentionally not rendered by the widget itself, matching the TS split where the skill block and user message render separately
+- the widget now plugs into the already-ported transcript container and startup shell, so a third real coding-agent transcript message type can render above pending messages and the prompt
+
+Current intentional compatibility limitation for this slice:
+- the expanded Rust widget still uses plain `pi_tui::Text` output rather than TS `Markdown` + theme/background styling
+- the separate Rust `UserMessageComponent` path is still unported, so this milestone stops at the parser + skill-block widget split only
+
+### Rust design summary
+
+New `pi-coding-agent-core::skill_block` module:
+- `ParsedSkillBlock`
+- `parse_skill_block(...)`
+
+Core surface change:
+- `pi-coding-agent-core` now exports `ParsedSkillBlock` and `parse_skill_block`
+
+New `pi-coding-agent-tui::skill_invocation` module:
+- `SkillInvocationMessageComponent`
+  - backed by `pi_coding_agent_core::ParsedSkillBlock`
+  - stores collapsed/expanded state
+  - resolves the expand hint through the existing coding-agent keybinding manager
+  - rebuilds an internal `pi_tui::Container` for collapsed vs expanded rendering
+
+Design choices for this slice:
+- keep the parser in `pi-coding-agent-core`, where the TypeScript source of truth already defines it, instead of inventing a TUI-local skill payload type
+- keep the widget text-first and low-dependency like the previous branch/compaction summary slices
+- stop before porting the separate user-message rendering branch so the parser split remains explicit and testable
+
+### Validation summary
+
+New Rust coverage added for:
+- parsing valid skill blocks with and without trailing user messages
+- rejecting malformed/non-matching skill-block text
+- collapsed skill-invocation rendering with expand hint text
+- expanded skill-invocation rendering with skill content while excluding the trailing user message
+- startup-shell transcript integration with a real skill-invocation widget above pending messages and the prompt
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-core --test skill_block` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test skill_invocation` passed
+- `cd rust && cargo test -p pi-coding-agent-core` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive transcript surface:
+- no Rust `UserMessageComponent` yet to complete the TS skill-block + user-message rendering pair
+- no full markdown/theme/background parity yet for skill/summary widgets
+- no additional concrete message widgets yet for `assistant-message`, `tool-execution`, or generic `custom-message`
+- no Rust footer integration yet
+- no scroll behavior or transcript viewport management yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-core`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- port `UserMessageComponent` next so the newly added skill-block parser can drive the full TS split rendering path for parsed user messages
+- keep markdown/theme parity and runtime/session wiring deferred until the user/assistant transcript basics are in place
+
+## Milestone 33 update: `UserMessageComponent` slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/user-message.ts`
+- `packages/coding-agent/src/modes/interactive/components/assistant-message.ts`
+- `packages/coding-agent/src/modes/interactive/components/index.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (user-message and parsed-skill-block insertion path)
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/tui.rs` (container surface)
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `migration/packages/coding-agent.md`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-coding-agent-tui` now has a first Rust `UserMessageComponent` corresponding to the current TypeScript `user-message.ts` widget
+- the Rust widget preserves the current TS shape for the migrated slice:
+  - leading spacer before the user message body
+  - padded user-message body rendered as transcript content
+  - OSC 133 prompt-zone wrapping around the rendered user-message block (`A` on first line, `B` + `C` on last line)
+- the widget now plugs into the existing transcript container and startup shell, so regular user transcript content can render above pending messages and the prompt
+- the newly added Rust skill-block parser plus existing `SkillInvocationMessageComponent` can now be exercised in the same split shape as TypeScript interactive mode:
+  - skill block rendered as a collapsible transcript widget
+  - trailing user message rendered separately as a user-message widget
+
+Current intentional compatibility limitation for this slice:
+- the Rust widget still uses plain `pi_tui::Text` instead of the TS `Markdown` widget with themed background/text coloring
+- first-user-message special handling and the broader assistant/user transcript visual system remain deferred
+
+### Rust design summary
+
+New `pi-coding-agent-tui::user_message` module:
+- `UserMessageComponent`
+  - backed by an internal `pi_tui::Container`
+  - composed from a leading `Spacer` and padded `Text`
+  - overrides `render(...)` to add the OSC 133 zone markers matching the TS widget contract for the migrated slice
+
+Crate-surface change:
+- `pi-coding-agent-tui` now exports `UserMessageComponent`
+
+Design choices for this slice:
+- keep the widget narrow and text-first, consistent with the current Rust transcript widgets, instead of blocking on generic markdown/theme parity
+- explicitly preserve the OSC 133 prompt-zone behavior now because it is observable output behavior from the TS component even before full styling parity lands
+- validate both standalone user-message rendering and parsed skill-block split rendering through the existing startup-shell transcript path
+
+### Validation summary
+
+New Rust coverage added for:
+- OSC 133 wrapping of rendered user-message output
+- startup-shell transcript integration with a real user-message widget
+- parsed skill-block + trailing user-message split rendering order in the transcript
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test user_message` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive transcript surface:
+- no Rust markdown/theme/background parity yet for user/skill/summary widgets
+- no Rust `AssistantMessageComponent` yet
+- no Rust `ToolExecutionComponent` or generic `CustomMessageComponent` yet
+- no Rust footer integration yet
+- no scroll behavior or transcript viewport management yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- port `AssistantMessageComponent` next, since it is the core transcript counterpart to the newly added user-message widget
+- keep markdown/theme parity and runtime/session wiring deferred until the basic user/assistant transcript pair exists in Rust
+
+## Milestone 34 update: `AssistantMessageComponent` slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/assistant-message.ts`
+- `packages/coding-agent/src/modes/interactive/components/user-message.ts`
+- `packages/coding-agent/src/modes/interactive/components/index.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (assistant/user transcript insertion grounding)
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-events/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/src/user_message.rs`
+- `rust/crates/pi-coding-agent-tui/tests/user_message.rs`
+- `rust/crates/pi-tui/src/text.rs`
+- `rust/crates/pi-tui/src/spacer.rs`
+- `migration/packages/coding-agent.md`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-coding-agent-tui` now has a first Rust `AssistantMessageComponent` corresponding to the current TypeScript `assistant-message.ts` widget
+- the Rust widget preserves the current TS transcript behavior for the migrated slice:
+  - renders assistant text blocks in order
+  - renders thinking blocks in order when visible
+  - supports `hideThinkingBlock` behavior with a configurable replacement label
+  - inserts spacing between visible thinking/text blocks but avoids spacing decisions based on tool-call-only tail content
+  - renders terminal aborted/error text only when there are no tool calls in the message
+  - maps aborted default text to `Operation aborted`
+  - maps error text to `Error: <message>` with `Unknown error` fallback
+- the widget now plugs into the existing transcript container and startup shell, so both user and assistant transcript basics now exist in Rust
+
+Current intentional compatibility limitation for this slice:
+- the Rust widget still uses plain `pi_tui::Text` rather than the TS `Markdown` widget and theme-driven styling
+- tool-call execution blocks are still not rendered by a Rust `ToolExecutionComponent`; this widget only preserves the TS rule that terminal error text is suppressed when tool calls are present
+
+### Rust design summary
+
+New `pi-coding-agent-tui::assistant_message` module:
+- `DEFAULT_HIDDEN_THINKING_LABEL`
+- `AssistantMessageComponent`
+  - stores the last `pi_events::AssistantMessage`
+  - supports `set_hide_thinking_block(...)`
+  - supports `set_hidden_thinking_label(...)`
+  - supports `update_content(...)`
+  - rebuilds an internal `pi_tui::Container` from assistant text/thinking/error content each time the message or visibility settings change
+
+Crate-surface change:
+- `pi-coding-agent-tui` now exports `AssistantMessageComponent` and `DEFAULT_HIDDEN_THINKING_LABEL`
+
+Design choices for this slice:
+- keep the widget text-first and low-dependency so transcript behavior can continue landing without waiting on full markdown/theme parity
+- preserve the TS-visible thinking-hide/show and terminal error-suppression rules now, because they affect transcript content ordering and observability even without theme support
+- validate through the existing startup-shell transcript path instead of adding a separate renderer harness
+
+### Validation summary
+
+New Rust coverage added for:
+- rendering assistant text plus visible thinking blocks
+- hiding thinking blocks with the default/custom hidden label
+- rendering aborted and error terminal text when no tool calls are present
+- suppressing terminal error text when tool calls are present
+- startup-shell transcript integration with a real assistant-message widget
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test assistant_message` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive transcript surface:
+- no Rust markdown/theme/background parity yet for user/assistant/skill/summary widgets
+- no Rust `ToolExecutionComponent` or generic `CustomMessageComponent` yet
+- no Rust footer integration yet
+- no scroll behavior or transcript viewport management yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- port `ToolExecutionComponent` next, since the new assistant-message widget now has the TS-aligned rule that tool-call-bearing assistant messages suppress their terminal error text
+- keep markdown/theme parity and runtime/session wiring deferred until the core transcript widgets are all present in Rust

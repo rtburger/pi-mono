@@ -5,6 +5,7 @@ pub mod messages;
 pub mod model_registry;
 pub mod model_resolver;
 pub mod runtime;
+pub mod skill_block;
 
 pub use auth::{
     AuthApiKeyFuture, AuthFileSource, AuthSource, ChainedAuthSource, MemoryAuthStorage,
@@ -32,6 +33,7 @@ pub use model_resolver::{
 pub use runtime::{
     CodingAgentCore, CodingAgentCoreOptions, CreateCodingAgentCoreResult, create_coding_agent_core,
 };
+pub use skill_block::{ParsedSkillBlock, parse_skill_block};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodingAgentCoreError {

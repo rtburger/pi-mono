@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 pi-coding-agent-core = { path = "../pi-coding-agent-core" }
+pi-events = { path = "../pi-events" }
 pi-tui = { path = "../pi-tui" }
 serde_json.workspace = true
 thiserror.workspace = true
