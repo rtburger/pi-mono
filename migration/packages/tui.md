@@ -472,3 +472,275 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui` / `rust/crates/pi-tui` and continue with the next smallest layer that reduces interactive-mode risk:
 - either complete the remaining OS-facing `ProcessTerminal` integration
 - or port the first render/container slice needed to make `Terminal` consumable by a Rust `TUI`
+
+## Milestone 6 update: width / ANSI helper slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/utils.ts`
+- `packages/tui/test/truncate-to-width.test.ts`
+- `packages/tui/test/wrap-ansi.test.ts`
+- `packages/tui/test/regression-regional-indicator-width.test.ts`
+- `packages/tui/src/index.ts`
+- `packages/coding-agent/src/modes/interactive/components/keybinding-hints.ts`
+- `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/Cargo.toml`
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/src/fuzzy.rs`
+- `rust/crates/pi-tui/src/keybindings.rs`
+- `rust/crates/pi-tui/src/keys.rs`
+- `rust/crates/pi-tui/src/stdin_buffer.rs`
+- `rust/crates/pi-tui/src/terminal.rs`
+- `migration/packages/tui.md`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- visible-width calculation for:
+  - printable ASCII fast path
+  - tabs as width 3
+  - CSI styling codes and OSC/APC sequences ignored for width
+  - wide CJK graphemes
+  - conservative width-2 handling for regional-indicator singletons and common emoji graphemes to avoid streaming drift
+- truncation with ANSI preservation:
+  - reset inserted before and after ellipsis
+  - wide-ellipsis clipping
+  - optional fixed-width padding
+  - malformed escape-prefix tolerance
+  - contiguous-prefix preservation (do not skip a wide grapheme and resume later)
+- ANSI-aware word wrapping:
+  - wraps plain text and long tokens by grapheme width
+  - carries active SGR styles across wrapped lines
+  - uses underline-only reset at wrapped line ends to avoid style bleed while preserving background color
+  - preserves OSC-width semantics during wrapping decisions
+- small helper surface for later render/widget work:
+  - ANSI extraction
+  - punctuation / whitespace classification
+
+### Rust design summary
+
+New `pi-tui::utils` module added with:
+- `AnsiCode`
+- `extract_ansi_code()`
+- `visible_width()`
+- `wrap_text_with_ansi()`
+- `truncate_to_width()`
+- `is_whitespace_char()`
+- `is_punctuation_char()`
+
+Implementation choices for this slice:
+- use `unicode-segmentation` for grapheme-safe iteration
+- use `unicode-width` for base terminal width with explicit emoji/regional-indicator overrides grounded in the TS tests
+- keep ANSI parsing explicit and narrow to the escape classes used by the current TS helper/tests (CSI style/control, OSC, APC)
+- port the TS SGR state tracker shape directly so wrapped lines preserve foreground/background state while only resetting underline at intermediate line boundaries
+
+### Validation summary
+
+New Rust coverage added for:
+- large-unicode truncation bounds
+- ANSI-preserving truncation reset behavior
+- malformed ANSI truncation tolerance
+- wide-ellipsis clipping
+- contiguous-prefix truncation regression
+- OSC width stripping
+- regional-indicator width regression cases
+- emoji intermediate width stability
+- underline/background wrapping regressions
+- color-preserving wrap continuation behavior
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` fails in this environment before repo checks run because `biome` is not installed (`sh: biome: command not found`)
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- slice-by-column / segment extraction helpers from `utils.ts`
+- render tree / container / overlay engine
+- input/editor/autocomplete widgets
+- markdown/select/settings/image widgets
+- coding-agent interactive integration
+
+### Recommended next step
+
+Stay in `packages/tui` / `rust/crates/pi-tui` and keep the scope narrow:
+- either finish the remaining `utils.ts` extraction helpers needed by rendering (`sliceByColumn`, `extractSegments`)
+- or start the first minimal render/container slice now that width/truncation/wrapping primitives exist
+
+## Milestone 7 update: slicing / segment-extraction helper slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/tui.ts` (overlay compositing call sites around `compositeLineAt()`)
+- `packages/tui/src/components/input.ts` (horizontal scrolling call sites)
+- `packages/tui/test/tui-render.test.ts`
+- `packages/tui/test/overlay-non-capturing.test.ts`
+- `packages/tui/test/tui-overlay-style-leak.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/utils.rs`
+- `rust/crates/pi-tui/tests/utils.rs`
+- `rust/crates/pi-tui/src/lib.rs`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- column-based ANSI-aware slicing now exists for the remaining `utils.ts` render primitives:
+  - `sliceByColumn()`
+  - `sliceWithWidth()`
+  - `extractSegments()`
+- strict wide-character boundary behavior is now covered, matching the TS helper semantics used by overlay compositing and input horizontal scrolling
+- pending ANSI codes that occur before the first visible sliced grapheme are now preserved in the sliced result, matching TS behavior
+- `extractSegments()` now carries active style state from the pre-overlay region into the extracted `after` region, matching the TS compositing strategy that prevents style loss when overlays replace the middle of a styled line
+
+### Rust design summary
+
+Expanded `pi-tui::utils` with:
+- `SliceWithWidthResult`
+- `ExtractSegmentsResult`
+- `slice_by_column()`
+- `slice_with_width()`
+- `extract_segments()`
+
+Implementation choices for this slice:
+- preserve the TS helper split rather than folding the behavior into a future renderer prematurely
+- keep these helpers independent from any `TUI`/container implementation so they can be reused by the future render engine and input widgets
+- maintain TS-style ANSI carry-forward behavior in `extract_segments()` via the existing Rust SGR tracker instead of introducing a separate render-state abstraction early
+
+### Validation summary
+
+New Rust coverage added for:
+- strict slicing at wide-character boundaries
+- ANSI carry-forward in sliced ranges
+- style inheritance from `before` to `after` segments
+- strict `after` extraction around wide-character boundaries
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` fails in this environment before repo checks run because `biome` is not installed (`sh: biome: command not found`)
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- render tree / container / overlay engine
+- input/editor/autocomplete widgets using the new helper surface
+- markdown/select/settings/image widgets
+- coding-agent interactive integration
+
+### Recommended next step
+
+Stay in `packages/tui` / `rust/crates/pi-tui` and move to the first real renderer slice:
+- port the minimal container/component/render path from `packages/tui/src/tui.ts`
+- use the now-ported width/truncation/slicing helpers directly instead of adding new abstraction layers first
+
+## Milestone 8 update: minimal container / overlay render slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/tui.ts` (full file)
+- `packages/tui/test/virtual-terminal.ts`
+- `packages/tui/test/overlay-options.test.ts`
+- `packages/tui/test/overlay-short-content.test.ts`
+- previously-read render/overlay call sites remained relevant:
+  - `packages/tui/test/tui-render.test.ts`
+  - `packages/tui/test/overlay-non-capturing.test.ts`
+  - `packages/tui/test/tui-overlay-style-leak.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/src/terminal.rs`
+- `rust/crates/pi-tui/src/utils.rs`
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-tui/tests/utils.rs`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- first minimal render/container surface now exists in `pi-tui`:
+  - `Component`
+  - `Container`
+  - `Tui`
+  - `CURSOR_MARKER`
+- overlay rendering now supports the first useful layout/compositing subset from `packages/tui/src/tui.ts`:
+  - anchor positioning
+  - absolute row/col positioning
+  - percentage row/col positioning
+  - min width and percentage width resolution
+  - max-height truncation
+  - margin and offset handling
+  - stacked overlay ordering (later overlays render on top)
+  - hide-top-overlay behavior for the current minimal slice
+- overlay compositing now uses the previously ported width/slicing helpers, including:
+  - defensive truncation of overlay lines to declared overlay width
+  - composite padding by visible width
+  - final terminal-width clamping via strict column slicing
+- short-content overlay placement is now preserved by padding the render working area to terminal height before compositing, matching the TS behavior that keeps overlays screen-relative even when base content is short
+- rendered lines now receive the same segment reset suffix strategy used by TS overlay compositing to reduce style leakage between segments
+
+Current intentional compatibility limitation for this slice:
+- Rust `Tui` currently does full-frame redraws on `start()` / `request_render()`; it does not yet port TS differential rendering, cursor extraction/IME positioning, focus management, input routing, or overlay handle semantics
+
+### Rust design summary
+
+New `pi-tui::tui` module added with:
+- `Component`
+- `ComponentId`
+- `OverlayId`
+- `Container`
+- `OverlayAnchor`
+- `OverlayMargin`
+- `SizeValue`
+- `OverlayOptions`
+- `Tui<T: Terminal>`
+- `CURSOR_MARKER`
+
+Implementation choices for this slice:
+- keep the first renderer generic over the existing Rust `Terminal` trait instead of pulling in a separate virtual-terminal dependency
+- use stable ids for children/overlays now, while keeping focus/input APIs deferred until their behavior is ported and validated
+- keep redraw behavior intentionally simple (full-frame) so the first slice validates layout/composition semantics before differential rendering complexity is introduced
+- preserve the TS overlay-layout math and compositing order closely, while deferring visibility/focus interaction semantics beyond the basic hidden/visible slice
+
+### Validation summary
+
+New Rust coverage added for:
+- child-container render ordering
+- overlay rendering with short base content
+- percentage width and `minWidth` behavior
+- anchor/margin/offset/absolute positioning
+- bottom-right and percentage positioning
+- `maxHeight` truncation
+- stacked overlay ordering and hide-top-overlay behavior
+- overlay width-overflow protection on styled/wide content
+- basic `start()` / `request_render()` terminal-write path
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` fails in this environment before repo checks run because `biome` is not installed (`sh: biome: command not found`)
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- differential rendering from `packages/tui/src/tui.ts`
+- cursor-marker extraction and hardware-cursor positioning
+- focusable component model and focus management
+- input routing and overlay handle parity (`focus()`, `unfocus()`, `setHidden()`, non-capturing overlays)
+- input/editor/autocomplete widgets
+- markdown/select/settings/image widgets
+- coding-agent interactive integration
+
+### Recommended next step
+
+Stay in `packages/tui` / `rust/crates/pi-tui` and continue with the next smallest renderer behavior slice:
+- port cursor-marker extraction plus hardware-cursor positioning from `packages/tui/src/tui.ts`
+- then add focus/input routing and only afterward attempt TS differential rendering parity

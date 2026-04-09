@@ -3,6 +3,8 @@ pub mod keybindings;
 pub mod keys;
 pub mod stdin_buffer;
 pub mod terminal;
+pub mod tui;
+pub mod utils;
 
 pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
 pub use keybindings::{
@@ -15,6 +17,15 @@ pub use keys::{
 };
 pub use stdin_buffer::{StdinBuffer, StdinBufferEvent, StdinBufferOptions};
 pub use terminal::{ProcessTerminal, Terminal};
+pub use tui::{
+    CURSOR_MARKER, Component, ComponentId, Container, OverlayAnchor, OverlayId, OverlayMargin,
+    OverlayOptions, SizeValue, Tui,
+};
+pub use utils::{
+    AnsiCode, ExtractSegmentsResult, SliceWithWidthResult, extract_ansi_code, extract_segments,
+    is_punctuation_char, is_whitespace_char, slice_by_column, slice_with_width, truncate_to_width,
+    visible_width, wrap_text_with_ansi,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TuiError {

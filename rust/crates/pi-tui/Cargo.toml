@@ -7,3 +7,5 @@ license.workspace = true
 [dependencies]
 regex = "1"
 thiserror.workspace = true
+unicode-segmentation = "1"
+unicode-width = "0.2"
