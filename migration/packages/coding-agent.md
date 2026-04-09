@@ -2301,3 +2301,288 @@ Still deferred for the coding-agent interactive transcript surface:
 Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
 - port `ToolExecutionComponent` next, since the new assistant-message widget now has the TS-aligned rule that tool-call-bearing assistant messages suppress their terminal error text
 - keep markdown/theme parity and runtime/session wiring deferred until the core transcript widgets are all present in Rust
+
+## Milestone 35 update: minimal text-first `ToolExecutionComponent` slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/tool-execution.ts`
+- `packages/coding-agent/src/modes/interactive/components/assistant-message.ts`
+- `packages/coding-agent/src/modes/interactive/components/index.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (tool-call / tool-result insertion and expansion-toggle sections)
+- `packages/coding-agent/src/core/messages.ts`
+- `packages/coding-agent/src/core/tools/render-utils.ts`
+- `packages/coding-agent/test/tool-execution-component.test.ts`
+- `packages/coding-agent/test/edit-tool-no-full-redraw.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/Cargo.toml`
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/assistant_message.rs`
+- `rust/crates/pi-coding-agent-tui/src/branch_summary.rs`
+- `rust/crates/pi-coding-agent-tui/src/compaction_summary.rs`
+- `rust/crates/pi-coding-agent-tui/src/skill_invocation.rs`
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/src/transcript.rs`
+- `rust/crates/pi-coding-agent-tui/src/user_message.rs`
+- `rust/crates/pi-coding-agent-tui/tests/assistant_message.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+- `rust/crates/pi-coding-agent-core/src/messages.rs`
+- `rust/crates/pi-tui/src/text.rs`
+- `rust/crates/pi-tui/src/spacer.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-coding-agent-tui` now has a first Rust `ToolExecutionComponent` corresponding to the generic text fallback path in TypeScript `tool-execution.ts`
+- the Rust widget preserves the current TS fallback shape for the migrated slice:
+  - tool name first
+  - pretty-printed JSON args below the tool name
+  - text result content appended below the args once a result arrives
+  - live arg mutation via `update_args(...)`
+  - live result mutation via `update_result(...)`
+- the Rust widget now renders image result blocks as textual fallback markers in the same `imageFallback(...)` output shape family used by the TS TUI path (`[Image: [mime/type]]` for the current minimal slice)
+- the widget now plugs into the existing transcript container and startup shell, so tool-execution transcript content can render above pending messages and the prompt
+
+Current intentional compatibility limitation for this slice:
+- the Rust widget is intentionally the generic text-first fallback only; it does not yet port TS built-in/custom renderer slots, theme backgrounds, inline image widgets, diff previews, or renderer-state sharing
+- `set_expanded(...)`, `mark_execution_started(...)`, and `set_args_complete(...)` are present for forward compatibility with the TS component lifecycle, but the current Rust fallback slice does not yet have renderer-specific visual changes attached to those states
+- image rendering parity remains deferred; the Rust slice currently emits textual fallback markers instead of inline images
+
+### Rust design summary
+
+New `pi-coding-agent-tui::tool_execution` module:
+- `ToolExecutionOptions`
+- `ToolExecutionResult`
+- `ToolExecutionComponent`
+  - stores tool name, tool-call id, JSON args, current result, and the migrated state flags needed by the TS lifecycle
+  - rebuilds an internal `pi_tui::Container` from a leading spacer plus a padded `Text` block for the current fallback rendering path
+  - exposes the narrow mutation surface needed by the TypeScript interaction model:
+    - `update_args(...)`
+    - `mark_execution_started()`
+    - `set_args_complete()`
+    - `update_result(...)`
+    - `set_expanded(...)`
+    - `set_show_images(...)`
+
+Crate-surface change:
+- `pi-coding-agent-tui` now exports `ToolExecutionComponent`, `ToolExecutionOptions`, and `ToolExecutionResult`
+
+Design choices for this slice:
+- keep the first Rust tool widget deliberately aligned with the TS generic fallback path instead of jumping directly to the full built-in/custom renderer system
+- avoid adding a new dependency on `pi-agent`; the widget uses `pi_events::UserContent` plus a small local result struct so it stays focused on transcript rendering only
+- validate transcript placement through the existing startup-shell path before attempting runtime/session wiring or built-in renderer parity
+
+### Validation summary
+
+New Rust coverage added for:
+- rendering tool name + pretty JSON args + text result output
+- updating args after construction and rendering image fallback text for image result blocks
+- startup-shell transcript integration with a real tool-execution widget above pending messages and the prompt
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test tool_execution` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive transcript surface:
+- no Rust built-in/custom tool renderer parity yet (`renderCall`, `renderResult`, shared renderer state, edit diff previews, built-in tool-specific layouts)
+- no Rust inline image rendering parity yet inside tool execution blocks
+- no Rust markdown/theme/background parity yet for the broader transcript widget set
+- no Rust `CustomMessageComponent` yet
+- no Rust footer integration yet
+- no scroll behavior or transcript viewport management yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- port the next concrete transcript widget with similarly narrow scope, likely `CustomMessageComponent`, or deepen `ToolExecutionComponent` with the first built-in renderer slice if tool transcript fidelity is the more immediate need
+- keep full markdown/theme parity, scrolling, and runtime/session wiring deferred until the remaining core transcript widgets are present in Rust
+
+## Milestone 36 update: minimal text-first `CustomMessageComponent` slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/custom-message.ts`
+- `packages/coding-agent/src/modes/interactive/components/index.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (custom-message transcript insertion path)
+- `packages/coding-agent/src/core/messages.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/src/transcript.rs`
+- `rust/crates/pi-coding-agent-tui/src/tool_execution.rs`
+- `rust/crates/pi-coding-agent-core/src/messages.rs`
+- `migration/packages/coding-agent.md`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-coding-agent-tui` now has a first Rust `CustomMessageComponent` corresponding to the default fallback path in TypeScript `custom-message.ts`
+- the Rust widget preserves the current TS fallback shape for the migrated slice:
+  - a visible `[customType]` label
+  - custom-message text content rendered below the label
+  - support for both string content and block-array content from `pi-coding-agent-core::CustomMessage`
+- for block-array content, the Rust fallback mirrors the TS default renderer behavior by rendering only text blocks and ignoring image blocks
+- the widget now plugs into the existing transcript container and startup shell, so extension/custom transcript content can render above pending messages and the prompt
+
+Current intentional compatibility limitation for this slice:
+- the Rust widget does not yet port TS custom renderer callbacks (`MessageRenderer`) or renderer failure fallback behavior
+- the Rust widget is intentionally text-first and does not yet port TS boxed background styling or Markdown rendering
+- `set_expanded(...)` is present for transcript compatibility but does not yet change visual output in the current fallback slice
+
+### Rust design summary
+
+New `pi-coding-agent-tui::custom_message` module:
+- `CustomMessageComponent`
+  - backed by `pi_coding_agent_core::CustomMessage`
+  - stores expanded state for future renderer parity
+  - rebuilds an internal `pi_tui::Container` from a leading spacer plus a padded `Text` block containing the label and fallback body text
+
+Crate-surface change:
+- `pi-coding-agent-tui` now exports `CustomMessageComponent`
+
+Design choices for this slice:
+- keep the first Rust custom-message widget aligned with the TS fallback path rather than introducing extension renderer plumbing before the surrounding runtime is ported
+- reuse the existing core `CustomMessage` payload type directly instead of creating a TUI-local duplicate
+- stop at text-block rendering and defer image/Markdown/theme/custom-renderer parity until the interactive runtime actually needs them
+
+### Validation summary
+
+New Rust coverage added for:
+- rendering label + string custom-message content
+- rendering only text blocks from block-array custom-message content while ignoring image blocks
+- startup-shell transcript integration with a real custom-message widget above pending messages and the prompt
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test custom_message` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive transcript surface:
+- no Rust custom message renderer callback parity yet
+- no Rust boxed background / Markdown parity yet for custom messages
+- no Rust built-in/custom tool renderer parity yet inside `ToolExecutionComponent`
+- no Rust inline image rendering parity yet inside transcript widgets
+- no Rust footer integration yet
+- no scroll behavior or transcript viewport management yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- either deepen `ToolExecutionComponent` with the first built-in renderer slice or port the next concrete transcript widget that still fits the text-first pattern
+- keep Markdown/theme parity, scrolling, and runtime/session wiring deferred until the remaining core transcript widgets are present in Rust
+
+## Milestone 37 update: first built-in `ToolExecutionComponent` renderer slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/tool-execution.ts`
+- `packages/coding-agent/src/core/tools/read.ts`
+- `packages/coding-agent/src/core/tools/write.ts`
+- `packages/coding-agent/src/core/tools/edit.ts`
+- `packages/coding-agent/src/core/tools/bash.ts`
+- `packages/coding-agent/src/core/tools/render-utils.ts`
+- `packages/coding-agent/test/tool-execution-component.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/tool_execution.rs`
+- `rust/crates/pi-coding-agent-tui/tests/tool_execution.rs`
+- `rust/crates/pi-coding-agent-tools/src/read.rs`
+- `rust/crates/pi-coding-agent-tools/src/write.rs`
+- `rust/crates/pi-coding-agent-tools/src/edit.rs`
+- `migration/packages/coding-agent.md`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `ToolExecutionComponent` now has a first built-in renderer branch for the migrated subset of built-in tools instead of always falling back to pretty-printed JSON args
+- the Rust built-in slice now covers:
+  - `read`
+    - path rendering from either `path` or legacy `file_path`
+    - offset/limit suffix rendering as `:start-end`
+    - trailing-empty-line trimming for rendered text results
+  - `write`
+    - path rendering from `path`
+    - inline preview from the `content` argument instead of raw JSON
+    - trailing-empty-line trimming for preview content
+    - success-result suppression, matching the TS built-in write renderer shape more closely
+  - `edit`
+    - path rendering from `path`
+    - text-result append path retained for the current Rust slice while diff-preview parity remains deferred
+- unknown tools still use the existing generic fallback path
+- the current Rust image fallback behavior inside tool results is unchanged and still works in both built-in and generic paths
+
+Current intentional compatibility limitation for this slice:
+- this is only the first built-in renderer branch; Rust still does not support TS `renderCall` / `renderResult` callback parity, renderer-state reuse, or built-in override inheritance rules
+- `write` preview truncation with keybinding hint text is still deferred; the Rust built-in slice currently focuses on path/content rendering plus trailing-blank-line handling
+- `edit` diff rendering parity is still deferred because the current Rust edit-tool details do not yet carry the TS unified diff payload
+- `bash` still uses the generic fallback path; its dedicated streaming/result UI remains a separate component in TS and is not part of this slice
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::tool_execution` with a narrow built-in formatting path:
+- internal built-in dispatch by `tool_name`
+- built-in formatters for:
+  - `format_read_tool_execution(...)`
+  - `format_write_tool_execution(...)`
+  - `format_edit_tool_execution(...)`
+- small shared helpers for:
+  - path extraction from `path` / `file_path`
+  - numeric offset/limit extraction
+  - read range suffix formatting
+  - trailing-empty-line trimming
+
+Design choices for this slice:
+- keep the implementation in `tool_execution.rs` instead of introducing a general renderer registry before the Rust interactive runtime exists
+- target the highest-value built-in text renderers first (`read`, `write`, `edit`) because they have direct TypeScript tests and visible transcript impact
+- preserve the generic fallback path for all other tools so the migrated widget remains broadly usable while built-in parity grows incrementally
+
+### Validation summary
+
+New Rust coverage added for:
+- built-in `read` support for legacy `file_path` plus `offset`/`limit` range rendering
+- built-in `write` preview rendering with trailing-blank-line trimming and hidden success text
+- built-in `read` result rendering with trailing-blank-line trimming
+- existing generic tool-execution and startup-shell transcript integration tests continue to pass
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test tool_execution` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive transcript surface:
+- no Rust custom renderer callback parity yet for tool execution (`renderCall`, `renderResult`, shared renderer state, built-in override inheritance)
+- no Rust `edit` diff preview parity yet
+- no Rust `write` preview truncation + expand-hint parity yet
+- no Rust inline image rendering parity yet inside transcript widgets
+- no Rust footer integration yet
+- no scroll behavior or transcript viewport management yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- continue `ToolExecutionComponent` with the next highest-value built-in renderer increment, likely `edit` diff preview parity or `write` preview truncation/expand behavior
+- keep Markdown/theme parity, scrolling, and runtime/session wiring deferred until the remaining core transcript/widget behavior is present in Rust

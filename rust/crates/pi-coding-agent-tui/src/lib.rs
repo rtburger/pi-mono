@@ -1,18 +1,21 @@
 mod assistant_message;
 mod branch_summary;
 mod compaction_summary;
+mod custom_message;
 mod keybinding_hints;
 mod keybindings;
 mod pending_messages;
 mod skill_invocation;
 mod startup_header;
 mod startup_shell;
+mod tool_execution;
 mod transcript;
 mod user_message;
 
 pub use assistant_message::{AssistantMessageComponent, DEFAULT_HIDDEN_THINKING_LABEL};
 pub use branch_summary::BranchSummaryMessageComponent;
 pub use compaction_summary::CompactionSummaryMessageComponent;
+pub use custom_message::CustomMessageComponent;
 pub use keybinding_hints::{KeyHintStyler, PlainKeyHintStyler, key_hint, key_text, raw_key_hint};
 pub use keybindings::{
     DEFAULT_APP_KEYBINDINGS, KeybindingsManager, MigrateKeybindingsConfigResult,
@@ -26,6 +29,7 @@ pub use startup_header::{
     build_condensed_changelog_notice, build_startup_header_text,
 };
 pub use startup_shell::StartupShellComponent;
+pub use tool_execution::{ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult};
 pub use transcript::TranscriptComponent;
 pub use user_message::UserMessageComponent;
 
