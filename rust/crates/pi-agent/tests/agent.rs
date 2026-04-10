@@ -898,6 +898,43 @@ async fn wrapper_forwards_tool_execution_updates_to_listeners() {
 }
 
 #[tokio::test]
+async fn wrapper_forwards_state_thinking_level_as_reasoning_effort() {
+    let seen_reasoning = Arc::new(Mutex::new(Vec::new()));
+    let streamer = Arc::new({
+        let seen_reasoning = seen_reasoning.clone();
+        move |_model: Model,
+              _context: Context,
+              options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            seen_reasoning
+                .lock()
+                .unwrap()
+                .push(options.reasoning_effort.clone());
+            let message = assistant_message("done", StopReason::Stop, 20);
+            Ok(Box::pin(try_stream! {
+                yield AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                };
+            }))
+        }
+    });
+
+    let mut initial_state = AgentState::new(model());
+    initial_state.thinking_level = pi_agent::ThinkingLevel::High;
+    let agent = Agent::with_parts(initial_state, streamer, StreamOptions::default());
+
+    agent.prompt_text("hello").await.unwrap();
+    agent.update_state(|state| state.thinking_level = pi_agent::ThinkingLevel::Off);
+    agent.prompt_text("hello again").await.unwrap();
+
+    assert_eq!(
+        seen_reasoning.lock().unwrap().clone(),
+        vec![Some(String::from("high")), None]
+    );
+}
+
+#[tokio::test]
 async fn wrapper_forwards_before_and_after_tool_hooks() {
     let calls = Arc::new(Mutex::new(VecDeque::from([
         assistant_tool_call_message(

@@ -5,8 +5,9 @@ use pi_agent::{
     CustomAgentMessage, ThinkingLevel, agent_loop, agent_loop_continue,
 };
 use pi_ai::{
-    AiError, AssistantEventStream, FauxResponse, RegisterFauxProviderOptions, StreamOptions,
-    register_faux_provider,
+    AiError, AiProvider, AssistantEventStream, FauxResponse, RegisterFauxProviderOptions,
+    StreamOptions, register_builtin_providers, register_faux_provider, register_provider,
+    stream_response, unregister_provider,
 };
 use pi_events::{
     AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason,
@@ -45,6 +46,41 @@ impl AssistantStreamer for ScriptedStreamer {
             .pop_front()
             .ok_or_else(|| AiError::Message("no scripted stream remaining".into()))?;
         Ok(Box::pin(stream::iter(events)))
+    }
+}
+
+#[derive(Clone)]
+struct RecordingAiProvider {
+    seen_options: Arc<Mutex<Vec<StreamOptions>>>,
+}
+
+impl AiProvider for RecordingAiProvider {
+    fn stream(
+        &self,
+        model: Model,
+        _context: Context,
+        options: StreamOptions,
+    ) -> AssistantEventStream {
+        self.seen_options.lock().unwrap().push(options);
+        let message = AssistantMessage {
+            role: "assistant".into(),
+            content: vec![AssistantContent::Text {
+                text: "done".into(),
+                text_signature: None,
+            }],
+            api: model.api.clone(),
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            response_id: None,
+            usage: usage(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 20,
+        };
+        Box::pin(stream::iter(vec![Ok(AssistantEvent::Done {
+            reason: StopReason::Stop,
+            message,
+        })]))
     }
 }
 
@@ -1350,6 +1386,53 @@ async fn continue_allows_custom_tail_when_convert_to_llm_maps_it_to_user() {
     let messages = final_messages(&events);
     assert_eq!(messages.len(), 1);
     assert!(is_standard_assistant_message(&messages[0]));
+}
+
+#[tokio::test]
+async fn default_streamer_maps_reasoning_effort_through_simple_options() {
+    let faux = register_faux_provider(RegisterFauxProviderOptions::default());
+    let faux_model = faux.get_model(None).expect("faux model");
+    let _ = stream_response(faux_model, Context::default(), StreamOptions::default())
+        .expect("faux provider should prime builtin registration");
+    faux.unregister();
+
+    let seen_options = Arc::new(Mutex::new(Vec::new()));
+    register_provider(
+        "anthropic-messages",
+        Arc::new(RecordingAiProvider {
+            seen_options: seen_options.clone(),
+        }),
+    );
+
+    let anthropic_model = Model {
+        id: "claude-sonnet-4-20250514".into(),
+        name: "Claude Sonnet 4".into(),
+        api: "anthropic-messages".into(),
+        provider: "anthropic".into(),
+        base_url: "https://api.anthropic.com/v1".into(),
+        reasoning: true,
+        input: vec!["text".into()],
+        context_window: 200_000,
+        max_tokens: 40_000,
+    };
+
+    let stream = agent_loop(
+        vec![user_message("What is 2+2?", 10).into()],
+        AgentContext::new("You are helpful."),
+        AgentLoopConfig::new(anthropic_model).with_stream_options(StreamOptions {
+            reasoning_effort: Some("high".into()),
+            ..Default::default()
+        }),
+    );
+
+    let _events = collect_events(stream).await.unwrap();
+    let seen = seen_options.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(seen[0].max_tokens, Some(40_000));
+
+    unregister_provider("anthropic-messages");
+    register_builtin_providers();
 }
 
 #[tokio::test]

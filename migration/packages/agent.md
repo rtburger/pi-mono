@@ -411,3 +411,74 @@ Still deferred in `pi-agent`:
 - fuller intermediate partial-JSON tool-argument reconstruction parity with TS `partial-json`
 - broader wrapper/property-surface parity with the TypeScript `Agent` class
 - explicit re-grounding of agent-level parallel tool-execution semantics in the migration note now that the Rust implementation already supports the current narrowed parallel path
+
+## Milestone 11 update: default-streamer simple-reasoning path slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/agent/src/agent.ts`
+- `packages/agent/src/types.ts`
+- `packages/agent/test/agent.test.ts`
+- `packages/agent/test/agent-loop.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-agent/src/agent.rs`
+- `rust/crates/pi-agent/src/loop.rs`
+- `rust/crates/pi-agent/tests/agent.rs`
+- `rust/crates/pi-agent/tests/agent_loop.rs`
+- `rust/crates/pi-ai/src/lib.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- the Rust `Agent` wrapper now forwards `AgentState.thinking_level` into per-request stream options for each run
+- the Rust default assistant streamer no longer dispatches through the raw `pi_ai::stream_response()` path for its default behavior
+- instead, the default streamer now uses the narrowed `pi_ai::stream_simple()` path, matching the TypeScript default `streamSimple` wiring more closely
+- this means the Rust agent now inherits the already-migrated `pi-ai` simple-option behavior for default runs, including:
+  - reasoning level mapping from agent state
+  - xhigh clamping handled in `pi-ai`
+  - Anthropic non-adaptive max-token adjustment handled in `pi-ai`
+- low-level Rust `AgentLoopConfig.stream_options.reasoning_effort` now also benefits from the simple-path mapping when the default streamer is used
+
+Compatibility note for this slice:
+- this milestone intentionally targets the default-streamer path only
+- Rust still does not expose the full TypeScript `AgentOptions` property surface (`thinkingBudgets`, `transport`, `maxRetryDelayMs`, `onPayload`, etc.) as first-class wrapper setters/getters yet
+- the coding-agent runtime has its own custom streamer and therefore remains a separate downstream parity step
+
+### Rust design summary
+
+Implementation changes:
+- `rust/crates/pi-agent/src/agent.rs`
+  - run preparation now maps `AgentState.thinking_level` to the outgoing request `reasoning_effort` string
+- `rust/crates/pi-agent/src/loop.rs`
+  - `DefaultAssistantStreamer` now converts `StreamOptions` into narrowed `pi_ai::SimpleStreamOptions`
+  - default dispatch now calls `pi_ai::stream_simple(...)`
+  - added local reasoning-string parsing helper for the simple-path bridge
+
+Behavior-freeze coverage added in Rust:
+- `rust/crates/pi-agent/tests/agent.rs`
+  - wrapper-level proof that `AgentState.thinking_level` becomes outgoing `reasoning_effort`
+- `rust/crates/pi-agent/tests/agent_loop.rs`
+  - default-streamer proof that a reasoning request now goes through the simple-path mapping and picks up Anthropic max-token adjustment
+
+### Validation summary
+
+New Rust coverage added for:
+- wrapper forwarding of `thinking_level = high` and `thinking_level = off`
+- default-streamer simple-path reasoning mapping for an Anthropic-style model
+- inherited Anthropic simple max-token adjustment via the default agent streamer path
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-agent` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-agent`:
+- fuller wrapper/property-surface parity with the TypeScript `Agent` class
+- explicit wrapper/runtime support for additional TS stream-simple knobs such as `thinkingBudgets` and other top-level agent options
+- fuller intermediate partial-JSON reconstruction parity in the proxy/tool path
+- downstream coding-agent parity still needs its own runtime streamer update so selected thinking levels affect the non-interactive app end-to-end

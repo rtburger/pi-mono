@@ -382,6 +382,9 @@ impl Agent {
 
             let mut stream_options = inner.stream_options.clone();
             stream_options.signal = Some(abort_rx);
+            stream_options.reasoning_effort =
+                thinking_level_to_reasoning_effort(inner.state.thinking_level)
+                    .map(ToOwned::to_owned);
 
             PreparedRun {
                 prompts,
@@ -602,6 +605,19 @@ fn extract_error_message(message: &Message) -> Option<String> {
 
 fn is_aborted_error(error: &AgentError) -> bool {
     matches!(error, AgentError::Ai(AiError::Aborted))
+}
+
+fn thinking_level_to_reasoning_effort(
+    thinking_level: crate::state::ThinkingLevel,
+) -> Option<&'static str> {
+    match thinking_level {
+        crate::state::ThinkingLevel::Off => None,
+        crate::state::ThinkingLevel::Minimal => Some("minimal"),
+        crate::state::ThinkingLevel::Low => Some("low"),
+        crate::state::ThinkingLevel::Medium => Some("medium"),
+        crate::state::ThinkingLevel::High => Some("high"),
+        crate::state::ThinkingLevel::XHigh => Some("xhigh"),
+    }
 }
 
 fn now_ms() -> u64 {
