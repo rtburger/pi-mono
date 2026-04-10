@@ -2,6 +2,7 @@ mod assistant_message;
 mod branch_summary;
 mod compaction_summary;
 mod custom_message;
+mod footer;
 mod keybinding_hints;
 mod keybindings;
 mod pending_messages;
@@ -16,6 +17,7 @@ pub use assistant_message::{AssistantMessageComponent, DEFAULT_HIDDEN_THINKING_L
 pub use branch_summary::BranchSummaryMessageComponent;
 pub use compaction_summary::CompactionSummaryMessageComponent;
 pub use custom_message::CustomMessageComponent;
+pub use footer::{FooterComponent, FooterState};
 pub use keybinding_hints::{KeyHintStyler, PlainKeyHintStyler, key_hint, key_text, raw_key_hint};
 pub use keybindings::{
     DEFAULT_APP_KEYBINDINGS, KeybindingsManager, MigrateKeybindingsConfigResult,

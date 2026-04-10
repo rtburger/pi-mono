@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod bootstrap;
 pub mod config_value;
+pub mod footer_data;
 pub mod messages;
 pub mod model_registry;
 pub mod model_resolver;
@@ -15,6 +16,7 @@ pub use bootstrap::{
     BootstrapDiagnostic, BootstrapDiagnosticLevel, ExistingSessionSelection,
     SessionBootstrapOptions, SessionBootstrapResult, bootstrap_session,
 };
+pub use footer_data::{FooterDataProvider, FooterDataSnapshot};
 pub use messages::{
     BLOCKED_IMAGE_PLACEHOLDER, BRANCH_SUMMARY_PREFIX, BRANCH_SUMMARY_SUFFIX, BashExecutionMessage,
     BranchSummaryMessage, COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX,

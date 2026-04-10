@@ -1,4 +1,8 @@
-use pi_coding_agent_tui::{KeyId, KeybindingsManager, PlainKeyHintStyler, StartupShellComponent};
+use pi_coding_agent_core::FooterDataSnapshot;
+use pi_coding_agent_tui::{
+    FooterState, KeyId, KeybindingsManager, PlainKeyHintStyler, StartupShellComponent,
+};
+use pi_events::Model;
 use pi_tui::{Component, Terminal, Text, Tui, TuiError, visible_width};
 use std::{
     collections::BTreeMap,
@@ -81,6 +85,20 @@ fn config(entries: &[(&str, &[&str])]) -> BTreeMap<String, Vec<KeyId>> {
             )
         })
         .collect()
+}
+
+fn model(id: &str, provider: &str, reasoning: bool) -> Model {
+    Model {
+        id: id.to_owned(),
+        name: id.to_owned(),
+        api: "openai-responses".to_owned(),
+        provider: provider.to_owned(),
+        base_url: String::new(),
+        reasoning,
+        input: vec!["text".to_owned()],
+        context_window: 200_000,
+        max_tokens: 8_192,
+    }
 }
 
 #[test]
@@ -341,6 +359,89 @@ fn startup_shell_can_scroll_transcript_without_hiding_prompt() {
     assert!(bottom[1].contains("line 5"));
     assert!(bottom[2].contains("line 6"));
     assert!(bottom[3].starts_with("> "));
+}
+
+#[test]
+fn startup_shell_budgets_transcript_height_for_footer_lines() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    for index in 1..=4 {
+        shell.add_transcript_item(Box::new(Text::new(format!("line {index}"), 0, 0)));
+    }
+    shell.set_footer_state(FooterState {
+        cwd: "/tmp/project".to_owned(),
+        git_branch: Some("main".to_owned()),
+        model: Some(model("gpt-5", "openai", true)),
+        thinking_level: "high".to_owned(),
+        context_window: 200_000,
+        context_percent: Some(12.3),
+        ..FooterState::default()
+    });
+    shell.set_viewport_size(40, 5);
+
+    let lines = shell.render(40);
+
+    assert_eq!(lines.len(), 5);
+    assert!(lines[0].contains("line 3"));
+    assert!(lines[1].contains("line 4"));
+    assert!(lines[2].starts_with("> "));
+    assert!(lines[3].contains("/tmp/project (main)"));
+    assert!(lines[4].contains("gpt-5 • high"));
+}
+
+#[test]
+fn startup_shell_can_apply_footer_data_snapshot_without_overwriting_session_footer_fields() {
+    let mut extension_statuses = BTreeMap::new();
+    extension_statuses.insert("a-first".to_owned(), "status\none".to_owned());
+
+    let snapshot = FooterDataSnapshot {
+        cwd: "/tmp/project".to_owned(),
+        git_branch: Some("main".to_owned()),
+        available_provider_count: 2,
+        extension_statuses,
+    };
+
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_footer_state(FooterState {
+        model: Some(model("gpt-5", "openai", true)),
+        thinking_level: "high".to_owned(),
+        context_window: 200_000,
+        context_percent: Some(12.3),
+        ..FooterState::default()
+    });
+    shell.apply_footer_data_snapshot(&snapshot);
+    shell.set_viewport_size(40, 6);
+
+    let lines = shell.render(40);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("/tmp/project (main)"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("(openai) gpt-5 • high"))
+    );
+    assert!(lines.iter().any(|line| line.contains("status one")));
 }
 
 #[test]

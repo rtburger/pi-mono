@@ -1,7 +1,8 @@
 use crate::{
-    BuiltInHeaderComponent, KeyHintStyler, KeybindingsManager, PendingMessagesComponent,
-    StartupHeaderStyler, TranscriptComponent,
+    BuiltInHeaderComponent, FooterComponent, FooterState, KeyHintStyler, KeybindingsManager,
+    PendingMessagesComponent, StartupHeaderStyler, TranscriptComponent,
 };
+use pi_coding_agent_core::FooterDataSnapshot;
 use pi_tui::{Component, ComponentId, Input};
 use std::{cell::Cell, ops::Deref};
 
@@ -10,6 +11,7 @@ pub struct StartupShellComponent {
     transcript: TranscriptComponent,
     pending_messages: PendingMessagesComponent,
     input: Input,
+    footer: FooterComponent,
     viewport_size: Cell<Option<(usize, usize)>>,
 }
 
@@ -36,6 +38,7 @@ impl StartupShellComponent {
             transcript: TranscriptComponent::new(),
             pending_messages: PendingMessagesComponent::new(keybindings),
             input: Input::with_keybindings(keybindings.deref().clone()),
+            footer: FooterComponent::default(),
             viewport_size: Cell::new(None),
         }
     }
@@ -133,6 +136,18 @@ impl StartupShellComponent {
         self.pending_messages.has_messages()
     }
 
+    pub fn set_footer_state(&mut self, state: FooterState) {
+        self.footer.set_state(state);
+    }
+
+    pub fn clear_footer(&mut self) {
+        self.footer.clear_state();
+    }
+
+    pub fn apply_footer_data_snapshot(&mut self, snapshot: &FooterDataSnapshot) {
+        self.footer.apply_data_snapshot(snapshot);
+    }
+
     pub fn is_focused(&self) -> bool {
         self.input.is_focused()
     }
@@ -143,9 +158,11 @@ impl Component for StartupShellComponent {
         let header_lines = self.header.render(width);
         let pending_lines = self.pending_messages.render(width);
         let input_lines = self.input.render(width);
+        let footer_lines = self.footer.render(width);
         let transcript_height = self.viewport_size.get().map(|(_, total_height)| {
-            total_height
-                .saturating_sub(header_lines.len() + pending_lines.len() + input_lines.len())
+            total_height.saturating_sub(
+                header_lines.len() + pending_lines.len() + input_lines.len() + footer_lines.len(),
+            )
         });
         self.transcript.set_viewport_height(transcript_height);
         let transcript_lines = self.transcript.render(width);
@@ -154,6 +171,7 @@ impl Component for StartupShellComponent {
         lines.extend(transcript_lines);
         lines.extend(pending_lines);
         lines.extend(input_lines);
+        lines.extend(footer_lines);
         lines
     }
 
@@ -162,6 +180,7 @@ impl Component for StartupShellComponent {
         self.transcript.invalidate();
         self.pending_messages.invalidate();
         self.input.invalidate();
+        self.footer.invalidate();
     }
 
     fn handle_input(&mut self, data: &str) {
@@ -178,5 +197,6 @@ impl Component for StartupShellComponent {
         self.transcript.set_viewport_size(width, height);
         self.pending_messages.set_viewport_size(width, height);
         self.input.set_viewport_size(width, height);
+        self.footer.set_viewport_size(width, height);
     }
 }
