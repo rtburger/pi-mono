@@ -844,3 +844,79 @@ Still deferred in `pi-ai`:
 - explicit narrowed regression files for response-id, image-tool-result, and tool-call-without-result across all four in-scope providers
 - Unicode/surrogate sanitization parity for request shaping
 - Codex retry/WebSocket transport parity beyond the current SSE slice
+
+## Milestone 14 update: narrowed empty-message / empty-assistant regression slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/ai/test/empty.test.ts`
+- `packages/ai/src/providers/transform-messages.ts`
+- `packages/ai/src/providers/anthropic.ts`
+- `packages/ai/src/providers/openai-responses.ts`
+- `packages/ai/src/providers/openai-responses-shared.ts`
+- `packages/ai/src/providers/openai-completions.ts`
+- `packages/ai/src/providers/openai-codex-responses.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/src/anthropic_messages.rs`
+- `rust/crates/pi-ai/src/openai_responses.rs`
+- `rust/crates/pi-ai/src/openai_completions.rs`
+- `rust/crates/pi-ai/src/openai_codex_responses.rs`
+- `rust/crates/pi-ai/tests/anthropic_messages_params.rs`
+- `rust/crates/pi-ai/tests/openai_responses_payload.rs`
+- `rust/crates/pi-ai/tests/openai_completions_messages.rs`
+- `rust/crates/pi-ai/tests/openai_codex_responses_http.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- narrowed empty-content-array regressions now exist for all four in-scope provider paths:
+  - `anthropic-messages`
+  - `openai-responses`
+  - `openai-completions`
+  - `openai-codex-responses`
+- narrowed empty-assistant replay regressions now exist for the same four provider paths
+- Rust now matches the current TypeScript Anthropic request-shaping behavior more closely for empty user messages:
+  - empty user content arrays are dropped during message conversion
+  - `build_anthropic_request_params()` no longer injects a synthetic empty user message when all user content collapses away
+- OpenAI-backed Rust request conversion is now explicitly frozen for this slice so empty assistant turns are skipped during replay across:
+  - OpenAI Responses
+  - OpenAI Completions
+  - OpenAI Codex Responses
+
+Compatibility note for this slice:
+- this milestone intentionally narrows the ported empty-message coverage to the Rust message-model cases that map directly to the TypeScript source/tests (`content: []` empty user messages and empty assistant turns). TypeScript’s separate string-content empty/whitespace cases remain a later compatibility question because Rust currently uses normalized `Vec<UserContent>` user messages.
+
+### Rust design summary
+
+New Rust regression file added:
+- `rust/crates/pi-ai/tests/empty_messages.rs`
+
+Implementation adjustment:
+- `rust/crates/pi-ai/src/anthropic_messages.rs`
+  - removed the synthetic empty-user fallback in `build_anthropic_request_params()` to preserve the current TypeScript request-shaping behavior for empty user-message arrays
+
+### Validation summary
+
+New Rust coverage added for:
+- Anthropic empty user-message array conversion
+- Anthropic empty assistant replay skipping
+- OpenAI Responses empty user-message array conversion
+- OpenAI Responses empty assistant replay skipping
+- OpenAI Completions empty user-message array conversion
+- OpenAI Completions empty assistant replay skipping
+- OpenAI Codex empty user-message array conversion
+- OpenAI Codex empty assistant replay skipping
+
+Validation run results:
+- `cd rust && cargo test -p pi-ai --test empty_messages` passed
+- `cd rust && cargo fmt --all && cargo test -p pi-ai` passed
+- `cd rust && cargo test -q --workspace` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- explicit narrowed regression files for response-id, image-tool-result, and tool-call-without-result across all four in-scope providers
+- Unicode/surrogate sanitization parity for request shaping
+- Codex retry/WebSocket transport parity beyond the current SSE slice

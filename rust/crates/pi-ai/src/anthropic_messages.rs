@@ -202,7 +202,7 @@ pub fn build_anthropic_request_params(
     options: &AnthropicOptions,
 ) -> AnthropicRequestParams {
     let cache_control = cache_control_for(model, options.cache_retention);
-    let mut messages = convert_anthropic_messages(
+    let messages = convert_anthropic_messages(
         &context.messages,
         model,
         is_oauth_token,
@@ -226,13 +226,6 @@ pub fn build_anthropic_request_params(
         .map(|user_id| AnthropicMetadata {
             user_id: user_id.clone(),
         });
-
-    if messages.is_empty() {
-        messages.push(AnthropicMessageParam {
-            role: "user".into(),
-            content: AnthropicMessageContent::Text(String::new()),
-        });
-    }
 
     AnthropicRequestParams {
         model: model.id.clone(),
