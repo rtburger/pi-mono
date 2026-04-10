@@ -79,11 +79,21 @@ fn execute_edit(
     fs::write(&absolute_path, final_content.as_bytes()).map_err(io_error)?;
     abort_if_requested(signal)?;
 
+    let diff = generate_diff_string(
+        &applied.base_content,
+        &applied.new_content,
+        &applied.matched_edits,
+        4,
+    );
+
     Ok(AgentToolResult {
         content: vec![UserContent::Text {
             text: format!("Successfully replaced {} block(s) in {path}.", edits.len()),
         }],
-        details: json!({ "firstChangedLine": applied.first_changed_line }),
+        details: json!({
+            "diff": diff,
+            "firstChangedLine": applied.first_changed_line,
+        }),
     })
 }
 
@@ -118,6 +128,7 @@ struct AppliedEditsResult {
     base_content: String,
     new_content: String,
     first_changed_line: usize,
+    matched_edits: Vec<MatchedEdit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,7 +287,167 @@ fn apply_edits_to_normalized_content(
         base_content,
         new_content,
         first_changed_line,
+        matched_edits,
     })
+}
+
+fn generate_diff_string(
+    base_content: &str,
+    new_content: &str,
+    matched_edits: &[MatchedEdit],
+    context_lines: usize,
+) -> String {
+    if matched_edits.is_empty() {
+        return String::new();
+    }
+
+    let old_lines = split_diff_lines(base_content);
+    let new_lines = split_diff_lines(new_content);
+    let line_num_width = old_lines
+        .len()
+        .max(new_lines.len())
+        .max(1)
+        .to_string()
+        .len();
+    let mut output = Vec::new();
+    let mut last_emitted_old_index = None;
+    let mut cumulative_line_delta = 0isize;
+
+    for edit in matched_edits {
+        let old_start_index = line_index_for_index(base_content, edit.match_index);
+        let old_segment = &base_content[edit.match_index..edit.match_index + edit.match_length];
+        let old_segment_lines = split_diff_lines(old_segment);
+        let new_segment_lines = split_diff_lines(&edit.new_text);
+        let (common_prefix, common_suffix) =
+            common_prefix_suffix_counts(&old_segment_lines, &new_segment_lines);
+
+        let before_start = old_start_index.saturating_sub(context_lines);
+        let emit_before_start = match last_emitted_old_index {
+            Some(last) => before_start.max(last + 1),
+            None => before_start,
+        };
+        if should_emit_ellipsis(last_emitted_old_index, emit_before_start) {
+            output.push(ellipsis_diff_line(line_num_width));
+        }
+        for line_index in emit_before_start..old_start_index {
+            output.push(context_diff_line(
+                line_num_width,
+                line_index + 1,
+                old_lines[line_index],
+            ));
+        }
+
+        let mut old_line_index = old_start_index;
+        for line in old_segment_lines.iter().take(common_prefix) {
+            output.push(context_diff_line(line_num_width, old_line_index + 1, line));
+            old_line_index += 1;
+        }
+
+        let old_changed_end = old_segment_lines.len().saturating_sub(common_suffix);
+        for line in old_segment_lines
+            .iter()
+            .skip(common_prefix)
+            .take(old_changed_end.saturating_sub(common_prefix))
+        {
+            output.push(removed_diff_line(line_num_width, old_line_index + 1, line));
+            old_line_index += 1;
+        }
+
+        let new_start_index = (old_start_index as isize + cumulative_line_delta).max(0) as usize;
+        let mut new_line_index = new_start_index + common_prefix;
+        let new_changed_end = new_segment_lines.len().saturating_sub(common_suffix);
+        for line in new_segment_lines
+            .iter()
+            .skip(common_prefix)
+            .take(new_changed_end.saturating_sub(common_prefix))
+        {
+            output.push(added_diff_line(line_num_width, new_line_index + 1, line));
+            new_line_index += 1;
+        }
+
+        for line in old_segment_lines.iter().skip(old_changed_end) {
+            output.push(context_diff_line(line_num_width, old_line_index + 1, line));
+            old_line_index += 1;
+        }
+
+        let old_end_index = old_start_index + old_segment_lines.len();
+        let after_end = (old_end_index + context_lines).min(old_lines.len());
+        let emit_after_start = match last_emitted_old_index {
+            Some(last) => old_end_index.max(last + 1),
+            None => old_end_index,
+        };
+        for line_index in emit_after_start..after_end {
+            output.push(context_diff_line(
+                line_num_width,
+                line_index + 1,
+                old_lines[line_index],
+            ));
+        }
+
+        last_emitted_old_index = after_end.checked_sub(1).or(last_emitted_old_index);
+        cumulative_line_delta +=
+            new_segment_lines.len() as isize - old_segment_lines.len() as isize;
+    }
+
+    output.join("\n")
+}
+
+fn split_diff_lines(text: &str) -> Vec<&str> {
+    let mut lines = text.split('\n').collect::<Vec<_>>();
+    if lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
+fn common_prefix_suffix_counts<'a>(old_lines: &[&'a str], new_lines: &[&'a str]) -> (usize, usize) {
+    let mut prefix = 0;
+    while prefix < old_lines.len()
+        && prefix < new_lines.len()
+        && old_lines[prefix] == new_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0;
+    while suffix < old_lines.len().saturating_sub(prefix)
+        && suffix < new_lines.len().saturating_sub(prefix)
+        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    (prefix, suffix)
+}
+
+fn line_index_for_index(content: &str, index: usize) -> usize {
+    content[..index.min(content.len())]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+}
+
+fn should_emit_ellipsis(last_emitted_old_index: Option<usize>, next_start_index: usize) -> bool {
+    match last_emitted_old_index {
+        Some(last) => next_start_index > last + 1,
+        None => next_start_index > 0,
+    }
+}
+
+fn context_diff_line(line_num_width: usize, line_number: usize, content: &str) -> String {
+    format!(" {} {}", format!("{line_number:>line_num_width$}"), content)
+}
+
+fn removed_diff_line(line_num_width: usize, line_number: usize, content: &str) -> String {
+    format!("-{} {}", format!("{line_number:>line_num_width$}"), content)
+}
+
+fn added_diff_line(line_num_width: usize, line_number: usize, content: &str) -> String {
+    format!("+{} {}", format!("{line_number:>line_num_width$}"), content)
+}
+
+fn ellipsis_diff_line(line_num_width: usize) -> String {
+    format!(" {} ...", " ".repeat(line_num_width))
 }
 
 fn fuzzy_find_text(content: &str, old_text: &str) -> MatchResult {

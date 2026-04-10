@@ -2663,3 +2663,172 @@ Still deferred for the coding-agent interactive transcript surface:
 Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
 - continue `ToolExecutionComponent` with the next highest-value built-in renderer increment, now most likely `edit` diff preview parity
 - keep Markdown/theme parity, scrolling, and runtime/session wiring deferred until the remaining core transcript/widget behavior is present in Rust
+
+## Milestone 39 update: `edit` diff-details + transcript diff-rendering slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/tool-execution.ts`
+- `packages/coding-agent/src/modes/interactive/components/diff.ts`
+- `packages/coding-agent/src/core/tools/edit.ts`
+- `packages/coding-agent/src/core/tools/edit-diff.ts`
+- `packages/coding-agent/test/tool-execution-component.test.ts`
+- `packages/coding-agent/test/edit-tool-no-full-redraw.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tools/src/edit.rs`
+- `rust/crates/pi-coding-agent-tools/tests/bash_edit.rs`
+- `rust/crates/pi-coding-agent-tui/src/tool_execution.rs`
+- `rust/crates/pi-coding-agent-tui/tests/tool_execution.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- successful Rust `edit` tool executions now return diff details alongside `firstChangedLine`
+- the new Rust diff-details slice is derived from the same exact-text replacement matching already used by the edit tool, so the rendered diff stays aligned with the actual applied edit ranges
+- Rust tool-execution transcript rendering now matches the current TS built-in `edit` shape more closely:
+  - call header remains `edit <path>`
+  - successful edit results render diff content from `details.diff`
+  - success text is suppressed when diff details are present
+  - error results still render textual error output
+- startup-shell transcript integration now renders the diff body for built-in `edit` executions instead of only the success string
+
+Compatibility note for this slice:
+- Rust currently ports the line-level diff/details behavior, not the full TS themed `renderDiff(...)` presentation. The Rust transcript widget remains text-first, so there is no intra-line inverse highlighting or themed color treatment yet.
+- the generated Rust diff is compact and context-limited for the current tool-edit shape, but it is not a byte-for-byte clone of the TS `generateDiffString(...)` + `renderDiff(...)` pipeline yet.
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tools::edit` with:
+- `AppliedEditsResult.matched_edits`
+- internal compact diff generation based on the matched edit ranges already produced by the exact-replacement engine
+- tool result `details` now include:
+  - `diff`
+  - `firstChangedLine`
+
+Expanded `pi-coding-agent-tui::tool_execution` with:
+- built-in `edit` rendering that prefers `result.details.diff` over the success text payload
+- continued text fallback for error cases
+
+Design choices for this slice:
+- keep the diff generation inside the Rust edit-tool implementation instead of adding a broader generic diff/render subsystem first
+- reuse the already-validated matched-edit metadata from the exact replacement engine so this slice stays deterministic and local
+- keep the TUI rendering text-first and diff-string-based until broader theme/markdown/widget parity is needed
+
+### Validation summary
+
+New Rust coverage added for:
+- successful edit tool results carrying `diff` + `firstChangedLine`
+- built-in `edit` transcript rendering preferring diff details over success text
+- startup-shell transcript integration rendering edit diff output
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tools --test bash_edit` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test tool_execution` passed
+- `cd rust && cargo test -p pi-coding-agent-tools && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive transcript surface:
+- no Rust themed/intra-line diff rendering parity yet for edit results (`renderDiff(...)` styling)
+- no Rust custom renderer callback parity yet for tool execution (`renderCall`, `renderResult`, shared renderer state, built-in override inheritance)
+- no Rust inline image rendering parity yet inside transcript widgets
+- no Rust markdown/theme/background parity yet for the broader transcript widget set
+- no Rust footer integration yet
+- no scroll behavior or transcript viewport management yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- deepen `ToolExecutionComponent` with the next highest-value renderer gap after raw edit diff details, likely themed/intra-line edit diff presentation or built-in/custom renderer override parity
+- keep scrolling and runtime/session wiring deferred until the remaining transcript/widget behavior is present in Rust
+
+## Milestone 40 update: styled/intra-line edit diff rendering slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/tool-execution.ts`
+- `packages/coding-agent/src/modes/interactive/components/diff.ts`
+- `packages/coding-agent/test/tool-execution-component.test.ts`
+- `packages/coding-agent/test/edit-tool-no-full-redraw.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/tool_execution.rs`
+- `rust/crates/pi-coding-agent-tui/tests/tool_execution.rs`
+- `rust/crates/pi-tui/src/text.rs`
+- `rust/crates/pi-tui/src/utils.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- built-in `edit` transcript rendering now ports the next visible part of the TypeScript diff presentation rather than showing the raw diff string unchanged
+- Rust now applies a first themed/styled diff rendering pass derived from TS `diff.ts`:
+  - context lines rendered in dim/context color
+  - removed lines rendered in removed-line color
+  - added lines rendered in added-line color
+  - tabs in diff content replaced with spaces for stable rendering
+- Rust now ports the first intra-line edit highlighting rule from TypeScript:
+  - when a diff hunk contains exactly one removed line followed by one added line
+  - changed word-level segments are highlighted inside the colored lines using inverse video
+  - leading indentation is kept outside inverse highlighting, matching the TS `renderIntraLineDiff(...)` behavior
+- existing built-in `edit` transcript rendering still prefers `details.diff` over success text, so the new styling applies directly to the already-migrated diff-detail path
+- startup-shell transcript integration continues to render edit diffs correctly with the new ANSI-styled output
+
+Current intentional limitation for this slice:
+- Rust now ports the visible styling/intra-line behavior, but it still does not have the full TS theme system behind those colors
+- the word diff is a small local token-based implementation, not a byte-for-byte clone of the TypeScript `diffWords(...)` library behavior for every edge case
+- the Rust TUI still lacks the broader no-full-redraw/differential-render parity from the TS TUI stack; this milestone is limited to the tool-execution component’s rendered content
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::tool_execution` with:
+- internal diff-line parser for the Rust `details.diff` text
+- ANSI-styled diff rendering helpers for:
+  - context
+  - removed
+  - added
+- a small word-token diff path used only for one-removed/one-added line pairs to port the current TS intra-line highlighting rule
+- inverse-video highlighting that keeps leading indentation outside the highlighted region
+
+Design choices for this slice:
+- keep the styling/rendering logic local to `tool_execution.rs` instead of introducing a generic Rust diff widget before other transcript widgets need it
+- reuse the existing ANSI-aware `pi-tui` text rendering path rather than adding a separate rendering layer
+- keep the token diff intentionally narrow and deterministic to match the current TS component behavior without overbuilding a general diff engine
+
+### Validation summary
+
+New Rust coverage added for:
+- colored context/added/removed edit diff rendering
+- inverse-video intra-line highlighting for a single removed/added line pair
+- tab replacement in rendered edit diff output
+- existing diff-detail and startup-shell transcript integration tests continue to pass using ANSI-stripped assertions where appropriate
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test tool_execution` passed
+- `cd rust && cargo test -p pi-coding-agent-tools && cargo test -p pi-coding-agent-tui && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive transcript surface:
+- no Rust custom renderer callback parity yet for tool execution (`renderCall`, `renderResult`, shared renderer state, built-in override inheritance)
+- no Rust inline image rendering parity yet inside transcript widgets
+- no Rust markdown/theme/background parity yet for the broader transcript widget set
+- no Rust footer integration yet
+- no scroll behavior or transcript viewport management yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- either deepen `ToolExecutionComponent` with built-in/custom renderer override parity or move to transcript viewport/scroll behavior if interaction fidelity is now the higher priority
+- keep session/runtime wiring deferred until the remaining transcript/widget behavior is present in Rust

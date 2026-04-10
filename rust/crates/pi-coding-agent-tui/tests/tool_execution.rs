@@ -76,6 +76,34 @@ fn default_keybindings() -> KeybindingsManager {
     KeybindingsManager::new(BTreeMap::new(), None)
 }
 
+fn strip_ansi(text: &str) -> String {
+    let mut stripped = String::new();
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] == 0x1b {
+            index += 1;
+            if index < bytes.len() && bytes[index] == b'[' {
+                index += 1;
+                while index < bytes.len() && !(bytes[index] as char).is_ascii_alphabetic() {
+                    index += 1;
+                }
+                if index < bytes.len() {
+                    index += 1;
+                }
+                continue;
+            }
+        }
+
+        let character = text[index..].chars().next().expect("valid UTF-8 character");
+        stripped.push(character);
+        index += character.len_utf8();
+    }
+
+    stripped
+}
+
 #[test]
 fn tool_execution_component_renders_tool_name_args_and_text_result() {
     let keybindings = default_keybindings();
@@ -289,6 +317,76 @@ fn built_in_write_renderer_expands_long_preview_when_expanded() {
 }
 
 #[test]
+fn built_in_edit_renderer_applies_colored_intraline_diff_rendering() {
+    let keybindings = default_keybindings();
+    let mut component = ToolExecutionComponent::new(
+        "edit",
+        "tool-edit-inline-1",
+        json!({ "path": "README.md", "oldText": "\tbefore value", "newText": "\tafter value" }),
+        ToolExecutionOptions::default(),
+        &keybindings,
+    );
+    component.update_result(
+        ToolExecutionResult {
+            content: vec![UserContent::Text {
+                text: "Successfully replaced 1 block(s) in README.md.".into(),
+            }],
+            details: json!({
+                "diff": " 1 \talpha\n-2 \tbefore value\n+2 \tafter value\n 3 gamma",
+                "firstChangedLine": 2,
+            }),
+            is_error: false,
+        },
+        false,
+    );
+
+    let rendered = component.render(120).join("\n");
+    let plain = strip_ansi(&rendered);
+
+    assert!(rendered.contains("\x1b[90m 1    alpha\x1b[0m"));
+    assert!(rendered.contains("\x1b[31m-2    "));
+    assert!(rendered.contains("\x1b[32m+2    "));
+    assert!(rendered.contains("\x1b[7mbefore "));
+    assert!(rendered.contains("\x1b[7mafter "));
+    assert!(!rendered.contains("\x1b[7m   before"));
+    assert!(plain.contains("-2    before value"));
+    assert!(plain.contains("+2    after value"));
+}
+
+#[test]
+fn built_in_edit_renderer_prefers_diff_details_over_success_text() {
+    let keybindings = default_keybindings();
+    let mut component = ToolExecutionComponent::new(
+        "edit",
+        "tool-edit-1",
+        json!({ "path": "README.md", "oldText": "beta", "newText": "BETA" }),
+        ToolExecutionOptions::default(),
+        &keybindings,
+    );
+    component.update_result(
+        ToolExecutionResult {
+            content: vec![UserContent::Text {
+                text: "Successfully replaced 1 block(s) in README.md.".into(),
+            }],
+            details: json!({
+                "diff": " 1 alpha\n-2 beta\n+2 BETA\n 3 gamma",
+                "firstChangedLine": 2,
+            }),
+            is_error: false,
+        },
+        false,
+    );
+
+    let rendered = component.render(120).join("\n");
+    let plain = strip_ansi(&rendered);
+
+    assert!(plain.contains("edit README.md"));
+    assert!(plain.contains("-2 beta"));
+    assert!(plain.contains("+2 BETA"));
+    assert!(!plain.contains("Successfully replaced 1 block(s) in README.md."));
+}
+
+#[test]
 fn startup_shell_can_render_tool_execution_component_in_transcript() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let mut shell = StartupShellComponent::new(
@@ -313,7 +411,10 @@ fn startup_shell_can_render_tool_execution_component_in_transcript() {
             content: vec![UserContent::Text {
                 text: "Successfully replaced 1 block in README.md.".into(),
             }],
-            details: json!({}),
+            details: json!({
+                "diff": " 1 alpha\n-2 beta\n+2 after\n 3 gamma",
+                "firstChangedLine": 2,
+            }),
             is_error: false,
         },
         false,
@@ -331,15 +432,19 @@ fn startup_shell_can_render_tool_execution_component_in_transcript() {
     assert!(tui.set_focus_child(shell_id));
 
     let lines = tui.render_for_size(72, 20);
-    let tool_line = lines
+    let plain_lines = lines
         .iter()
-        .position(|line| line.contains("Successfully replaced 1 block"))
-        .expect("tool execution should render");
-    let pending_line = lines
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>();
+    let tool_line = plain_lines
+        .iter()
+        .position(|line| line.contains("+2 after"))
+        .expect("tool execution should render diff output");
+    let pending_line = plain_lines
         .iter()
         .position(|line| line.contains("Steering: queued message"))
         .expect("pending message should render");
-    let prompt_line = lines
+    let prompt_line = plain_lines
         .iter()
         .position(|line| line.starts_with("> "))
         .expect("prompt should render");

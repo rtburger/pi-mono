@@ -160,7 +160,11 @@ impl ToolExecutionComponent {
                 self.expanded,
                 &self.expand_key_text,
             )),
-            "edit" => Some(format_edit_tool_execution(&self.args, self.text_output())),
+            "edit" => Some(format_edit_tool_execution(
+                &self.args,
+                self.result.as_ref(),
+                self.text_output(),
+            )),
             _ => None,
         }
     }
@@ -266,13 +270,28 @@ fn format_write_tool_execution(
     text
 }
 
-fn format_edit_tool_execution(args: &Value, output: String) -> String {
+fn format_edit_tool_execution(
+    args: &Value,
+    result: Option<&ToolExecutionResult>,
+    output: String,
+) -> String {
     let mut text = format!("edit {}", path_arg(args).unwrap_or("..."));
-    let output = trim_trailing_empty_lines(&output);
-    if !output.is_empty() {
-        text.push_str("\n\n");
-        text.push_str(&output);
+
+    if let Some(result) = result {
+        if result.is_error {
+            let output = trim_trailing_empty_lines(&output);
+            if !output.is_empty() {
+                text.push_str("\n\n");
+                text.push_str(&output);
+            }
+        } else if let Some(diff) = result.details.get("diff").and_then(Value::as_str) {
+            if !diff.is_empty() {
+                text.push_str("\n\n");
+                text.push_str(&render_diff(diff));
+            }
+        }
     }
+
     text
 }
 
@@ -314,6 +333,271 @@ fn trim_trailing_empty_lines(text: &str) -> String {
         lines.pop();
     }
     lines.join("\n")
+}
+
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_INVERSE_ON: &str = "\x1b[7m";
+const ANSI_INVERSE_OFF: &str = "\x1b[27m";
+const ANSI_DIFF_CONTEXT: &str = "\x1b[90m";
+const ANSI_DIFF_REMOVED: &str = "\x1b[31m";
+const ANSI_DIFF_ADDED: &str = "\x1b[32m";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedDiffLine {
+    prefix: char,
+    line_num: String,
+    content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WordDiffPart {
+    Equal(String),
+    Removed(String),
+    Added(String),
+}
+
+fn render_diff(diff_text: &str) -> String {
+    let mut rendered = Vec::new();
+    let lines = diff_text.split('\n').collect::<Vec<_>>();
+    let mut index = 0usize;
+
+    while index < lines.len() {
+        let Some(parsed) = parse_diff_line(lines[index]) else {
+            rendered.push(colorize_diff_line(ANSI_DIFF_CONTEXT, lines[index]));
+            index += 1;
+            continue;
+        };
+
+        match parsed.prefix {
+            '-' => {
+                let mut removed_lines = Vec::new();
+                while index < lines.len() {
+                    let Some(line) = parse_diff_line(lines[index]) else {
+                        break;
+                    };
+                    if line.prefix != '-' {
+                        break;
+                    }
+                    removed_lines.push(line);
+                    index += 1;
+                }
+
+                let mut added_lines = Vec::new();
+                while index < lines.len() {
+                    let Some(line) = parse_diff_line(lines[index]) else {
+                        break;
+                    };
+                    if line.prefix != '+' {
+                        break;
+                    }
+                    added_lines.push(line);
+                    index += 1;
+                }
+
+                if removed_lines.len() == 1 && added_lines.len() == 1 {
+                    let (removed_content, added_content) =
+                        render_intra_line_diff(&removed_lines[0].content, &added_lines[0].content);
+                    rendered.push(colorize_diff_line(
+                        ANSI_DIFF_REMOVED,
+                        &format!("-{} {}", removed_lines[0].line_num, removed_content),
+                    ));
+                    rendered.push(colorize_diff_line(
+                        ANSI_DIFF_ADDED,
+                        &format!("+{} {}", added_lines[0].line_num, added_content),
+                    ));
+                } else {
+                    for line in removed_lines {
+                        rendered.push(colorize_diff_line(
+                            ANSI_DIFF_REMOVED,
+                            &format!("-{} {}", line.line_num, replace_tabs(&line.content)),
+                        ));
+                    }
+                    for line in added_lines {
+                        rendered.push(colorize_diff_line(
+                            ANSI_DIFF_ADDED,
+                            &format!("+{} {}", line.line_num, replace_tabs(&line.content)),
+                        ));
+                    }
+                }
+            }
+            '+' => {
+                rendered.push(colorize_diff_line(
+                    ANSI_DIFF_ADDED,
+                    &format!("+{} {}", parsed.line_num, replace_tabs(&parsed.content)),
+                ));
+                index += 1;
+            }
+            _ => {
+                rendered.push(colorize_diff_line(
+                    ANSI_DIFF_CONTEXT,
+                    &format!(" {} {}", parsed.line_num, replace_tabs(&parsed.content)),
+                ));
+                index += 1;
+            }
+        }
+    }
+
+    rendered.join("\n")
+}
+
+fn parse_diff_line(line: &str) -> Option<ParsedDiffLine> {
+    let mut chars = line.chars();
+    let prefix = chars.next()?;
+    if !matches!(prefix, '+' | '-' | ' ') {
+        return None;
+    }
+
+    let remainder = chars.as_str();
+    let space_index = remainder.find(' ')?;
+    let (line_num, content_with_space) = remainder.split_at(space_index);
+    let content = content_with_space.strip_prefix(' ')?;
+
+    if !line_num
+        .chars()
+        .all(|character| character.is_ascii_whitespace() || character.is_ascii_digit())
+    {
+        return None;
+    }
+
+    Some(ParsedDiffLine {
+        prefix,
+        line_num: line_num.to_owned(),
+        content: content.to_owned(),
+    })
+}
+
+fn replace_tabs(text: &str) -> String {
+    text.replace('\t', "   ")
+}
+
+fn colorize_diff_line(color: &str, line: &str) -> String {
+    format!("{color}{line}{ANSI_RESET}")
+}
+
+fn render_intra_line_diff(old_content: &str, new_content: &str) -> (String, String) {
+    let old_tokens = tokenize_words(old_content);
+    let new_tokens = tokenize_words(new_content);
+    let diff = diff_word_tokens(&old_tokens, &new_tokens);
+
+    let mut removed_line = String::new();
+    let mut added_line = String::new();
+    let mut is_first_removed = true;
+    let mut is_first_added = true;
+
+    for part in diff {
+        match part {
+            WordDiffPart::Equal(value) => {
+                removed_line.push_str(&value);
+                added_line.push_str(&value);
+            }
+            WordDiffPart::Removed(value) => {
+                let mut value = value;
+                if is_first_removed {
+                    let leading_whitespace = value
+                        .chars()
+                        .take_while(|character| character.is_whitespace())
+                        .collect::<String>();
+                    removed_line.push_str(&leading_whitespace);
+                    value = value[leading_whitespace.len()..].to_owned();
+                    is_first_removed = false;
+                }
+                if !value.is_empty() {
+                    removed_line.push_str(ANSI_INVERSE_ON);
+                    removed_line.push_str(&value);
+                    removed_line.push_str(ANSI_INVERSE_OFF);
+                }
+            }
+            WordDiffPart::Added(value) => {
+                let mut value = value;
+                if is_first_added {
+                    let leading_whitespace = value
+                        .chars()
+                        .take_while(|character| character.is_whitespace())
+                        .collect::<String>();
+                    added_line.push_str(&leading_whitespace);
+                    value = value[leading_whitespace.len()..].to_owned();
+                    is_first_added = false;
+                }
+                if !value.is_empty() {
+                    added_line.push_str(ANSI_INVERSE_ON);
+                    added_line.push_str(&value);
+                    added_line.push_str(ANSI_INVERSE_OFF);
+                }
+            }
+        }
+    }
+
+    (replace_tabs(&removed_line), replace_tabs(&added_line))
+}
+
+fn tokenize_words(text: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let characters = text.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+
+    while index < characters.len() {
+        if characters[index].is_whitespace() {
+            let start = index;
+            while index < characters.len() && characters[index].is_whitespace() {
+                index += 1;
+            }
+            if tokens.is_empty() {
+                tokens.push(characters[start..index].iter().collect());
+            } else if let Some(last) = tokens.last_mut() {
+                last.push_str(&characters[start..index].iter().collect::<String>());
+            }
+            continue;
+        }
+
+        let start = index;
+        while index < characters.len() && !characters[index].is_whitespace() {
+            index += 1;
+        }
+        tokens.push(characters[start..index].iter().collect());
+    }
+
+    tokens
+}
+
+fn diff_word_tokens(old_tokens: &[String], new_tokens: &[String]) -> Vec<WordDiffPart> {
+    let mut lcs = vec![vec![0usize; new_tokens.len() + 1]; old_tokens.len() + 1];
+    for old_index in (0..old_tokens.len()).rev() {
+        for new_index in (0..new_tokens.len()).rev() {
+            lcs[old_index][new_index] = if old_tokens[old_index] == new_tokens[new_index] {
+                lcs[old_index + 1][new_index + 1] + 1
+            } else {
+                lcs[old_index + 1][new_index].max(lcs[old_index][new_index + 1])
+            };
+        }
+    }
+
+    let mut parts = Vec::new();
+    let mut old_index = 0usize;
+    let mut new_index = 0usize;
+    while old_index < old_tokens.len() && new_index < new_tokens.len() {
+        if old_tokens[old_index] == new_tokens[new_index] {
+            parts.push(WordDiffPart::Equal(old_tokens[old_index].clone()));
+            old_index += 1;
+            new_index += 1;
+        } else if lcs[old_index + 1][new_index] >= lcs[old_index][new_index + 1] {
+            parts.push(WordDiffPart::Removed(old_tokens[old_index].clone()));
+            old_index += 1;
+        } else {
+            parts.push(WordDiffPart::Added(new_tokens[new_index].clone()));
+            new_index += 1;
+        }
+    }
+
+    while old_index < old_tokens.len() {
+        parts.push(WordDiffPart::Removed(old_tokens[old_index].clone()));
+        old_index += 1;
+    }
+    while new_index < new_tokens.len() {
+        parts.push(WordDiffPart::Added(new_tokens[new_index].clone()));
+        new_index += 1;
+    }
+
+    parts
 }
 
 fn image_fallback(mime_type: &str) -> String {

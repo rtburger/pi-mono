@@ -100,6 +100,23 @@ async fn edit_applies_multiple_replacements_against_original_content() {
         fs::read_to_string(temp_dir.join("file.txt")).unwrap(),
         "alpha\nBETA\nGAMMA\n"
     );
+
+    let diff = result
+        .details
+        .get("diff")
+        .and_then(|value| value.as_str())
+        .expect("successful edit should include diff details");
+    assert!(diff.contains("-2 beta"));
+    assert!(diff.contains("+2 BETA"));
+    assert!(diff.contains("-3 gamma"));
+    assert!(diff.contains("+3 GAMMA"));
+    assert_eq!(
+        result
+            .details
+            .get("firstChangedLine")
+            .and_then(|value| value.as_u64()),
+        Some(2)
+    );
 }
 
 #[tokio::test]
