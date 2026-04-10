@@ -1587,7 +1587,7 @@ impl AiProvider for OpenAiCompletionsProvider {
             &context,
             &compat,
             &OpenAiCompletionsRequestOptions {
-                tool_choice: None,
+                tool_choice: options.tool_choice.clone(),
                 reasoning_effort: parse_reasoning_effort(options.reasoning_effort.as_deref()),
                 max_tokens: options.max_tokens,
                 temperature: options.temperature,

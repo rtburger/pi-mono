@@ -1,6 +1,6 @@
 # packages/ai migration inventory
 
-Status: milestone 18 centralizes Rust-side provider text sanitization at the Rust `String` boundary and freezes Unicode-bearing request shaping across Anthropic Messages, OpenAI Responses, OpenAI Completions, and OpenAI Codex Responses
+Status: milestone 21 adds Rust `stream_simple()` / `complete_simple()` parity for the narrowed in-scope providers and freezes the remaining high-value `SimpleStreamOptions` request-mapping behavior against the TypeScript implementation
 Target crate: `rust/crates/pi-ai`
 
 ## 1. Files analyzed
@@ -1384,3 +1384,90 @@ Validation run results:
 
 Still deferred in `pi-ai`:
 - broader `streamSimple()` / `completeSimple()` API parity remains deferred across the crate
+
+## Milestone 21 update: narrowed `stream_simple()` / `complete_simple()` parity slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/ai/src/types.ts`
+- `packages/ai/src/stream.ts`
+- `packages/ai/src/providers/simple-options.ts`
+- `packages/ai/src/providers/anthropic.ts` (`streamSimpleAnthropic`)
+- `packages/ai/src/providers/openai-responses.ts` (`streamSimpleOpenAIResponses`)
+- `packages/ai/src/providers/openai-completions.ts` (`streamSimpleOpenAICompletions`)
+- `packages/ai/src/providers/openai-codex-responses.ts` (`streamSimpleOpenAICodexResponses`)
+- focused TS test grounding for the narrowed API slice:
+  - `packages/ai/test/anthropic-thinking-disable.test.ts`
+  - `packages/ai/test/openai-completions-tool-choice.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/src/lib.rs`
+- `rust/crates/pi-ai/src/openai_completions.rs`
+- `rust/crates/pi-ai/tests/openai_responses_http.rs`
+- `rust/crates/pi-ai/tests/openai_completions_http.rs`
+- `rust/crates/pi-ai/tests/anthropic_messages_http.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- `pi-ai` now exposes top-level Rust `stream_simple()` and `complete_simple()` entry points alongside the existing `stream_response()` / `complete()` API
+- Rust now has explicit `SimpleStreamOptions`, `ThinkingLevel`, and `ThinkingBudgets` types for the narrowed migration scope
+- `stream_simple()` preserves registry dispatch rather than bypassing registered providers, so faux/custom providers still work through the simple API path
+- TS `buildBaseOptions()` parity now exists for the narrowed Rust simple API surface:
+  - default `max_tokens` / `max_output_tokens` now clamp to `min(model.max_tokens, 32000)` when the caller does not provide one
+  - existing shared options (`signal`, `api_key`, `transport`, `cache_retention`, `session_id`, `headers`, `temperature`) now flow through the simple path
+- TS reasoning mapping now exists for the narrowed in-scope providers:
+  - OpenAI Responses / OpenAI Completions / OpenAI Codex clamp `xhigh` to `high` when the target model does not `supportsXhigh()`
+  - Anthropic preserves raw reasoning levels so adaptive models can still distinguish `xhigh`
+  - non-adaptive Anthropic simple requests now apply the TS `adjustMaxTokensForThinking()` behavior before dispatching to the existing provider runtime path
+- OpenAI Completions now accepts the remaining high-value TS `streamSimple()` passthrough behavior needed by current tests:
+  - `tool_choice` survives the Rust simple path and reaches the request body
+
+Compatibility note for this slice:
+- this milestone intentionally narrows `SimpleStreamOptions` parity to the currently in-scope providers and the highest-value fields observed in the TypeScript implementation/tests
+- broader provider-specific `streamSimple()` extras outside the narrowed provider scope remain deferred
+
+### Rust design summary
+
+Core API changes in `rust/crates/pi-ai/src/lib.rs`:
+- added `ThinkingLevel`
+- added `ThinkingBudgets`
+- added `SimpleStreamOptions`
+- added `stream_simple()`
+- added `complete_simple()`
+- added shared simple-option mapping helpers for:
+  - TS-style default max-token handling
+  - xhigh clamping
+  - Anthropic non-adaptive thinking-budget max-token adjustment
+
+Runtime option integration:
+- `StreamOptions` now carries optional `tool_choice` so the existing registry/provider path can preserve OpenAI Completions simple-tool-choice behavior without bypassing provider dispatch
+
+Provider update:
+- `rust/crates/pi-ai/src/openai_completions.rs`
+  - provider runtime now forwards `StreamOptions.tool_choice` into `OpenAiCompletionsRequestOptions`
+
+Behavior-freeze artifact added:
+- `rust/crates/pi-ai/tests/simple_stream.rs`
+
+### Validation summary
+
+New Rust coverage added for:
+- OpenAI Responses simple-path `xhigh` clamping plus default `max_output_tokens`
+- OpenAI Completions simple-path `tool_choice` passthrough plus default `max_completion_tokens`
+- Anthropic simple-path non-adaptive thinking max-token adjustment
+- faux-provider dispatch through `complete_simple()` proving registry/custom-provider compatibility
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-ai --test simple_stream` passed
+- `cd rust && cargo test -p pi-ai` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed in the current environment; the earlier migration-note `biome` blocker no longer reproduced in this session
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- broader `streamSimple()` / `completeSimple()` API parity beyond the narrowed in-scope providers and current high-value passthrough fields
+- provider-specific simple-option parity that is outside the current migration scope

@@ -59,6 +59,58 @@ pub struct StreamOptions {
     pub max_tokens: Option<u64>,
     pub reasoning_effort: Option<String>,
     pub reasoning_summary: Option<String>,
+    pub tool_choice: Option<crate::openai_completions::OpenAiCompletionsToolChoice>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingLevel {
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+}
+
+impl ThinkingLevel {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+        }
+    }
+
+    fn clamped(self) -> Self {
+        match self {
+            Self::Xhigh => Self::High,
+            other => other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThinkingBudgets {
+    pub minimal: Option<u64>,
+    pub low: Option<u64>,
+    pub medium: Option<u64>,
+    pub high: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SimpleStreamOptions {
+    pub signal: Option<tokio::sync::watch::Receiver<bool>>,
+    pub session_id: Option<String>,
+    pub cache_retention: CacheRetention,
+    pub api_key: Option<String>,
+    pub transport: Option<Transport>,
+    pub headers: BTreeMap<String, String>,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<u64>,
+    pub reasoning: Option<ThinkingLevel>,
+    pub thinking_budgets: ThinkingBudgets,
+    pub tool_choice: Option<crate::openai_completions::OpenAiCompletionsToolChoice>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -141,6 +193,25 @@ pub fn complete(
     }
 }
 
+pub fn complete_simple(
+    model: Model,
+    context: Context,
+    options: SimpleStreamOptions,
+) -> impl std::future::Future<Output = Result<AssistantMessage, AiError>> {
+    async move {
+        let mut last_message = None;
+        let mut events = stream_simple(model, context, options)?;
+        while let Some(event) = events.next().await {
+            match event? {
+                AssistantEvent::Done { message, .. } => last_message = Some(message),
+                AssistantEvent::Error { error, .. } => last_message = Some(error),
+                _ => {}
+            }
+        }
+        last_message.ok_or_else(|| AiError::Message("stream ended without terminal event".into()))
+    }
+}
+
 pub fn stream_response(
     model: Model,
     context: Context,
@@ -154,6 +225,117 @@ pub fn stream_response(
         .cloned()
         .ok_or_else(|| AiError::UnknownApi(model.api.clone()))?;
     Ok(provider.stream(model, context, options))
+}
+
+pub fn stream_simple(
+    model: Model,
+    context: Context,
+    options: SimpleStreamOptions,
+) -> Result<AssistantEventStream, AiError> {
+    stream_response(
+        model.clone(),
+        context,
+        map_simple_stream_options(&model, options),
+    )
+}
+
+fn map_simple_stream_options(model: &Model, options: SimpleStreamOptions) -> StreamOptions {
+    let SimpleStreamOptions {
+        signal,
+        session_id,
+        cache_retention,
+        api_key,
+        transport,
+        headers,
+        temperature,
+        max_tokens,
+        reasoning,
+        thinking_budgets,
+        tool_choice,
+    } = options;
+
+    let base_max_tokens = max_tokens
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| model.max_tokens.min(32_000));
+    let mut resolved_max_tokens = Some(base_max_tokens);
+
+    if model.api == "anthropic-messages"
+        && let Some(reasoning) = reasoning
+        && !anthropic_supports_adaptive_thinking(&model.id)
+    {
+        resolved_max_tokens = Some(
+            adjust_max_tokens_for_thinking(
+                base_max_tokens,
+                model.max_tokens,
+                reasoning,
+                &thinking_budgets,
+            )
+            .max_tokens,
+        );
+    }
+
+    let reasoning_effort = reasoning.map(|reasoning| {
+        if model.api == "anthropic-messages" || supports_xhigh(model) {
+            reasoning.as_str().to_string()
+        } else {
+            reasoning.clamped().as_str().to_string()
+        }
+    });
+
+    StreamOptions {
+        signal,
+        session_id,
+        cache_retention,
+        api_key,
+        transport,
+        headers,
+        temperature,
+        max_tokens: resolved_max_tokens,
+        reasoning_effort,
+        reasoning_summary: None,
+        tool_choice,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AdjustedThinkingTokens {
+    max_tokens: u64,
+    thinking_budget: u64,
+}
+
+fn adjust_max_tokens_for_thinking(
+    base_max_tokens: u64,
+    model_max_tokens: u64,
+    reasoning_level: ThinkingLevel,
+    custom_budgets: &ThinkingBudgets,
+) -> AdjustedThinkingTokens {
+    let thinking_budget = match reasoning_level.clamped() {
+        ThinkingLevel::Minimal => custom_budgets.minimal.unwrap_or(1_024),
+        ThinkingLevel::Low => custom_budgets.low.unwrap_or(2_048),
+        ThinkingLevel::Medium => custom_budgets.medium.unwrap_or(8_192),
+        ThinkingLevel::High => custom_budgets.high.unwrap_or(16_384),
+        ThinkingLevel::Xhigh => unreachable!(),
+    };
+
+    let min_output_tokens = 1_024;
+    let max_tokens = (base_max_tokens + thinking_budget).min(model_max_tokens);
+    let thinking_budget = if max_tokens <= thinking_budget {
+        max_tokens.saturating_sub(min_output_tokens)
+    } else {
+        thinking_budget
+    };
+
+    AdjustedThinkingTokens {
+        max_tokens,
+        thinking_budget,
+    }
+}
+
+fn anthropic_supports_adaptive_thinking(model_id: &str) -> bool {
+    model_id.contains("opus-4-6")
+        || model_id.contains("opus-4.6")
+        || model_id.contains("sonnet-4-6")
+        || model_id.contains("sonnet-4.6")
 }
 
 #[derive(Debug, Clone)]
