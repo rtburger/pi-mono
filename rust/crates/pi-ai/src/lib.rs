@@ -40,12 +40,20 @@ fn registry() -> &'static Mutex<Registry> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Sse,
+    WebSocket,
+    Auto,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StreamOptions {
     pub signal: Option<tokio::sync::watch::Receiver<bool>>,
     pub session_id: Option<String>,
     pub cache_retention: CacheRetention,
     pub api_key: Option<String>,
+    pub transport: Option<Transport>,
     pub headers: BTreeMap<String, String>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,

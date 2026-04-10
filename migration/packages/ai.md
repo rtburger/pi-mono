@@ -1202,3 +1202,185 @@ Validation run results:
 
 Still deferred in `pi-ai`:
 - Codex retry/WebSocket transport parity beyond the current SSE slice
+
+## Milestone 19 update: Codex WebSocket + HTTP retry transport slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/ai/src/providers/openai-codex-responses.ts`
+- `packages/ai/test/openai-codex-stream.test.ts`
+- targeted transport grounding from the broader suite:
+  - `packages/ai/test/stream.test.ts` (Codex WebSocket path)
+  - `packages/ai/src/types.ts` (`transport` option semantics)
+
+Additional Rust files read for this slice:
+- `rust/Cargo.toml`
+- `rust/crates/pi-ai/Cargo.toml`
+- `rust/crates/pi-ai/src/lib.rs`
+- `rust/crates/pi-ai/src/openai_codex_responses.rs`
+- `rust/crates/pi-ai/src/openai_responses.rs`
+- `rust/crates/pi-ai/tests/openai_codex_responses_http.rs`
+- `rust/crates/pi-ai/tests/openai_codex_responses_stream.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- `pi-ai` now exposes a transport selector on `StreamOptions` for providers that support multiple transports
+- `openai-codex-responses` now supports all three TS transport modes for the migrated slice:
+  - `sse`
+  - `websocket`
+  - `auto`
+- explicit Codex WebSocket transport now covers the current high-value TS runtime behavior:
+  - WebSocket URL derivation from the Codex base URL (`http -> ws`, `https -> wss`)
+  - WebSocket upgrade request headers including:
+    - bearer auth
+    - `chatgpt-account-id`
+    - `originator: pi`
+    - `OpenAI-Beta: responses_websockets=2026-02-06`
+    - `x-client-request-id`
+    - `session_id`
+  - `response.create` WebSocket request payload shaping
+  - normalized event streaming through the existing OpenAI Responses stream-state machinery
+- Codex `auto` transport now follows the current TS fallback rule for the migrated slice:
+  - try WebSocket first
+  - if the WebSocket connect/send path fails before streaming starts, fall back to SSE
+  - explicit `websocket` transport does not fall back to SSE on the same failure path
+- Codex SSE HTTP transport now has retry/backoff behavior for the current TS-compatible slice:
+  - retries retryable HTTP statuses (`429`, `500`, `502`, `503`, `504`)
+  - retries retryable transient-text responses like rate limits / overloaded / service unavailable
+  - retries network send failures
+  - exponential backoff starting at `1000ms`
+  - abort-aware retry sleep and request dispatch
+
+Compatibility note for this slice:
+- Rust now ports the observable Codex multi-transport behavior and retry loop, but it still does not implement the TS session-scoped WebSocket cache / idle TTL reuse path
+- the Rust transport option is currently used only by the Codex provider slice; other migrated providers still stay on their existing single-transport paths
+
+### Rust design summary
+
+Workspace/dependency changes:
+- `rust/Cargo.toml`
+  - added `tokio-tungstenite` as a workspace dependency
+- `rust/crates/pi-ai/Cargo.toml`
+  - `pi-ai` now depends on `tokio-tungstenite`
+
+Core surface change:
+- `rust/crates/pi-ai/src/lib.rs`
+  - new `Transport` enum
+  - `StreamOptions.transport: Option<Transport>`
+
+Codex provider changes in `rust/crates/pi-ai/src/openai_codex_responses.rs`:
+- added transport-aware provider dispatch:
+  - `stream_openai_codex_http(...)`
+  - `stream_openai_codex_websocket(...)`
+  - `stream_openai_codex_auto(...)`
+- added WebSocket helpers for:
+  - request-header shaping
+  - request-id generation
+  - WebSocket request construction
+  - `response.create` payload serialization
+  - raw WebSocket JSON-event parsing into the normalized OpenAI Responses envelope shape
+- added HTTP retry helpers for:
+  - retry classification
+  - abort-aware sleep
+  - retrying POST dispatch with final error materialization
+- reused the existing OpenAI Responses SSE/event normalization machinery so the WebSocket path does not introduce a second assistant-event protocol
+
+Behavior-freeze artifact added:
+- `rust/crates/pi-ai/tests/openai_codex_responses_transport.rs`
+
+### Validation summary
+
+New Rust coverage added for:
+- explicit Codex WebSocket transport with handshake-header assertions and `response.create` payload assertions
+- `auto` transport fallback from failed WebSocket connect/handshake into SSE
+- explicit `websocket` transport not falling back to SSE on the same failed-handshake path
+- retrying retryable HTTP failures before succeeding on a later SSE attempt
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-ai --test openai_codex_responses_transport` passed
+- `cd rust && cargo test -p pi-ai` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- Codex session-scoped WebSocket cache / idle-time reuse parity from the TypeScript provider
+- broader `streamSimple()` / `completeSimple()` API parity remains deferred across the crate
+
+## Milestone 20 update: Codex session-scoped WebSocket cache / idle-time reuse slice
+
+### Files analyzed
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/src/openai_codex_responses.rs`
+- `rust/crates/pi-ai/tests/openai_codex_responses_transport.rs`
+- `migration/packages/ai.md`
+
+Relevant TypeScript grounding already in scope for this slice:
+- `packages/ai/src/providers/openai-codex-responses.ts`
+- current TS cache/reuse helpers around:
+  - `CachedWebSocketConnection`
+  - `acquireWebSocket(...)`
+  - `scheduleSessionWebSocketExpiry(...)`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- Codex WebSocket transport now has session-scoped connection reuse when `session_id` is provided
+- sequential Codex requests with the same session id can now reuse the same open WebSocket connection instead of reconnecting every turn
+- Rust now preserves the current TS busy-path behavior for the migrated slice:
+  - if a cached session connection is already checked out/busy
+  - a concurrent/acquired-again request gets a temporary uncached connection instead of blocking on the cached one
+- cached session WebSockets now expire after an idle TTL and are closed/removed from the cache automatically
+- if a reused cached socket has gone stale and the first send fails before streaming starts, Rust now drops it and reconnects once for the same session
+
+Compatibility note for this slice:
+- Rust now matches the high-value TS reuse/idle semantics, but the internal implementation differs:
+  - TS uses browser/Node-style WebSocket objects with ready-state checks and JS timers
+  - Rust uses a global cache plus owned `tokio-tungstenite` streams returned to the cache after a successful turn
+- the idle-time unit test uses the Rust test build’s shortened TTL constant so the behavior can be validated without a multi-minute wait; non-test runtime behavior still keeps the TS five-minute TTL target
+
+### Rust design summary
+
+Expanded `rust/crates/pi-ai/src/openai_codex_responses.rs` with:
+- cached-session connection state:
+  - `CachedCodexWebSocketEntry`
+  - `AcquiredCodexWebSocket`
+  - global `codex_websocket_cache()`
+- cache lifecycle helpers:
+  - `abort_idle_task(...)`
+  - `remove_cached_websocket_entry_if_same(...)`
+  - `schedule_session_websocket_expiry(...)`
+  - `acquire_codex_websocket(...)`
+- WebSocket startup now returns an acquired connection wrapper instead of a bare socket, so the stream path can:
+  - return successful sockets to the cache on terminal `done`
+  - drop cached sockets on abort/error/close-before-complete paths
+- cached reused sockets now reconnect once if the initial `response.create` send fails before the stream starts
+
+Validation additions:
+- integration transport coverage keeps validating explicit WebSocket behavior and same-session reuse
+- new unit coverage inside `openai_codex_responses.rs` validates idle-expiry reconnection with the test TTL
+
+### Validation summary
+
+New Rust coverage added for:
+- same-session WebSocket reuse across sequential Codex turns
+- idle-expiry reconnection after the cached session socket ages out
+- existing transport coverage for explicit WebSocket, `auto` fallback, and retryable HTTP behavior still passes on top of the cache layer
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-ai --test openai_codex_responses_transport` passed
+- `cd rust && cargo test -p pi-ai openai_codex_responses::tests::reconnects_after_cached_websocket_idle_expiry -- --nocapture` passed
+- `cd rust && cargo test -p pi-ai` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- broader `streamSimple()` / `completeSimple()` API parity remains deferred across the crate
