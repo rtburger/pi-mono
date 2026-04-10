@@ -1,6 +1,7 @@
 use pi_ai::{StreamOptions, built_in_models};
 use pi_coding_agent_cli::{
-    AuthFileSource, ChainedAuthSource, EnvAuthSource, RunCommandOptions, run_command,
+    AppMode, AuthFileSource, ChainedAuthSource, EnvAuthSource, RunCommandOptions, parse_args,
+    resolve_app_mode, run_command, run_interactive_command,
 };
 use pi_coding_agent_core::refresh_auth_file_oauth;
 use pi_coding_agent_tui::migrate_keybindings_file;
@@ -33,20 +34,58 @@ async fn main() -> ExitCode {
     let auth_path = agent_dir.join("auth.json");
     refresh_auth_file_oauth(&auth_path).await;
 
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    let parsed = parse_args(&args);
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let auth_source = Arc::new(ChainedAuthSource::new(vec![
+        Arc::new(AuthFileSource::new(auth_path)),
+        Arc::new(EnvAuthSource::new()),
+    ]));
+    let built_in_models = built_in_models().to_vec();
+    let models_json_path = Some(agent_dir.join("models.json"));
+    let version = env!("CARGO_PKG_VERSION").to_string();
+
+    if matches!(
+        resolve_app_mode(&parsed, stdin_is_tty),
+        AppMode::Interactive
+    ) && !parsed.help
+        && !parsed.version
+        && parsed.list_models.is_none()
+        && parsed.export.is_none()
+    {
+        let exit_code = run_interactive_command(RunCommandOptions {
+            args: args.clone(),
+            stdin_is_tty,
+            stdin_content: stdin_content.clone(),
+            auth_source: auth_source.clone(),
+            built_in_models: built_in_models.clone(),
+            models_json_path: models_json_path.clone(),
+            agent_dir: Some(agent_dir.clone()),
+            cwd: cwd.clone(),
+            default_system_prompt: String::new(),
+            version: version.clone(),
+            stream_options: StreamOptions::default(),
+        })
+        .await;
+
+        return if exit_code == 0 {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(exit_code as u8)
+        };
+    }
+
     let result = run_command(RunCommandOptions {
-        args: env::args().skip(1).collect(),
+        args,
         stdin_is_tty,
         stdin_content,
-        auth_source: Arc::new(ChainedAuthSource::new(vec![
-            Arc::new(AuthFileSource::new(auth_path)),
-            Arc::new(EnvAuthSource::new()),
-        ])),
-        built_in_models: built_in_models().to_vec(),
-        models_json_path: Some(agent_dir.join("models.json")),
+        auth_source,
+        built_in_models,
+        models_json_path,
         agent_dir: Some(agent_dir),
-        cwd: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        cwd,
         default_system_prompt: String::new(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version,
         stream_options: StreamOptions::default(),
     })
     .await;

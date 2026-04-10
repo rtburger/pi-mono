@@ -1,11 +1,17 @@
 use crate::{
     StdinBuffer, StdinBufferEvent, StdinBufferOptions, TuiError, set_kitty_protocol_active,
 };
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size as terminal_size};
 use std::{
     env,
-    io::{self, Write as _},
-    sync::mpsc::Receiver,
-    time::Duration,
+    io::{self, Read as _, Write as _},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::Receiver,
+    },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const BRACKETED_PASTE_ENABLE: &str = "\x1b[?2004h";
@@ -20,6 +26,7 @@ const MODIFY_OTHER_KEYS_DISABLE: &str = "\x1b[>4;0m";
 const DEFAULT_COLUMNS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_STDIN_TIMEOUT: Duration = Duration::from_millis(10);
+const MODIFY_OTHER_KEYS_FALLBACK_DELAY: Duration = Duration::from_millis(150);
 
 pub trait Terminal {
     fn start(
@@ -42,15 +49,85 @@ pub trait Terminal {
     fn set_title(&mut self, title: &str) -> Result<(), TuiError>;
 }
 
+impl<T> Terminal for Box<T>
+where
+    T: Terminal + ?Sized,
+{
+    fn start(
+        &mut self,
+        on_input: Box<dyn FnMut(String) + Send>,
+        on_resize: Box<dyn FnMut() + Send>,
+    ) -> Result<(), TuiError> {
+        self.as_mut().start(on_input, on_resize)
+    }
+
+    fn stop(&mut self) -> Result<(), TuiError> {
+        self.as_mut().stop()
+    }
+
+    fn drain_input(&mut self, max: Duration, idle: Duration) -> Result<(), TuiError> {
+        self.as_mut().drain_input(max, idle)
+    }
+
+    fn write(&mut self, data: &str) -> Result<(), TuiError> {
+        self.as_mut().write(data)
+    }
+
+    fn columns(&self) -> u16 {
+        self.as_ref().columns()
+    }
+
+    fn rows(&self) -> u16 {
+        self.as_ref().rows()
+    }
+
+    fn kitty_protocol_active(&self) -> bool {
+        self.as_ref().kitty_protocol_active()
+    }
+
+    fn move_by(&mut self, lines: i32) -> Result<(), TuiError> {
+        self.as_mut().move_by(lines)
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), TuiError> {
+        self.as_mut().hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> Result<(), TuiError> {
+        self.as_mut().show_cursor()
+    }
+
+    fn clear_line(&mut self) -> Result<(), TuiError> {
+        self.as_mut().clear_line()
+    }
+
+    fn clear_from_cursor(&mut self) -> Result<(), TuiError> {
+        self.as_mut().clear_from_cursor()
+    }
+
+    fn clear_screen(&mut self) -> Result<(), TuiError> {
+        self.as_mut().clear_screen()
+    }
+
+    fn set_title(&mut self, title: &str) -> Result<(), TuiError> {
+        self.as_mut().set_title(title)
+    }
+}
+
 pub struct ProcessTerminal {
-    backend: Box<dyn TerminalBackend>,
-    input_handler: Option<Box<dyn FnMut(String) + Send>>,
-    resize_handler: Option<Box<dyn FnMut() + Send>>,
-    kitty_protocol_active: bool,
-    modify_other_keys_active: bool,
+    backend: Arc<Mutex<Box<dyn TerminalBackend>>>,
+    input_handler: SharedInputHandler,
+    resize_handler: SharedResizeHandler,
+    kitty_protocol_active: Arc<AtomicBool>,
+    modify_other_keys_active: Arc<AtomicBool>,
+    suppress_input: Arc<AtomicBool>,
+    stop_requested: Arc<AtomicBool>,
+    last_input_at_ms: Arc<AtomicU64>,
     stdin_buffer: StdinBuffer,
     #[cfg_attr(not(test), allow(dead_code))]
     stdin_events: Receiver<StdinBufferEvent>,
+    uses_process_io: bool,
+    raw_mode_enabled: bool,
 }
 
 impl Default for ProcessTerminal {
@@ -65,43 +142,83 @@ impl ProcessTerminal {
     }
 
     fn with_backend(backend: Box<dyn TerminalBackend>) -> Self {
+        let uses_process_io = backend.uses_process_io();
         let stdin_buffer = StdinBuffer::new(StdinBufferOptions {
             timeout: DEFAULT_STDIN_TIMEOUT,
         });
         let stdin_events = stdin_buffer.subscribe();
 
         Self {
-            backend,
-            input_handler: None,
-            resize_handler: None,
-            kitty_protocol_active: false,
-            modify_other_keys_active: false,
+            backend: Arc::new(Mutex::new(backend)),
+            input_handler: Arc::new(Mutex::new(None)),
+            resize_handler: Arc::new(Mutex::new(None)),
+            kitty_protocol_active: Arc::new(AtomicBool::new(false)),
+            modify_other_keys_active: Arc::new(AtomicBool::new(false)),
+            suppress_input: Arc::new(AtomicBool::new(false)),
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            last_input_at_ms: Arc::new(AtomicU64::new(now_millis())),
             stdin_buffer,
             stdin_events,
+            uses_process_io,
+            raw_mode_enabled: false,
         }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     fn process_input_data(&mut self, data: &str) -> Result<(), TuiError> {
         self.stdin_buffer.process_str(data);
+        self.forward_stdin_events(&self.stdin_events)
+    }
 
-        while let Ok(event) = self.stdin_events.try_recv() {
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn enable_modify_other_keys_fallback(&mut self) -> Result<(), TuiError> {
+        if !self.kitty_protocol_active.load(Ordering::Relaxed)
+            && !self.modify_other_keys_active.load(Ordering::Relaxed)
+        {
+            write_backend(&self.backend, MODIFY_OTHER_KEYS_ENABLE)?;
+            self.modify_other_keys_active.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn notify_resize(&mut self) {
+        notify_resize_handler(&self.resize_handler);
+    }
+
+    fn disable_input_protocols(&mut self) -> Result<(), TuiError> {
+        if self.kitty_protocol_active.swap(false, Ordering::Relaxed) {
+            write_backend(&self.backend, KITTY_DISABLE)?;
+            set_kitty_protocol_active(false);
+        }
+
+        if self.modify_other_keys_active.swap(false, Ordering::Relaxed) {
+            write_backend(&self.backend, MODIFY_OTHER_KEYS_DISABLE)?;
+        }
+
+        Ok(())
+    }
+
+    fn forward_stdin_events(&self, receiver: &Receiver<StdinBufferEvent>) -> Result<(), TuiError> {
+        while let Ok(event) = receiver.try_recv() {
             match event {
                 StdinBufferEvent::Data(sequence) => {
-                    if !self.kitty_protocol_active && is_kitty_protocol_response(&sequence) {
-                        self.kitty_protocol_active = true;
+                    if !self.kitty_protocol_active.load(Ordering::Relaxed)
+                        && is_kitty_protocol_response(&sequence)
+                    {
+                        self.kitty_protocol_active.store(true, Ordering::Relaxed);
                         set_kitty_protocol_active(true);
-                        self.backend.write(KITTY_ENABLE_FLAGS)?;
+                        write_backend(&self.backend, KITTY_ENABLE_FLAGS)?;
                         continue;
                     }
 
-                    if let Some(handler) = &mut self.input_handler {
-                        handler(sequence);
+                    if !self.suppress_input.load(Ordering::Relaxed) {
+                        forward_input(&self.input_handler, sequence);
                     }
                 }
                 StdinBufferEvent::Paste(content) => {
-                    if let Some(handler) = &mut self.input_handler {
-                        handler(format!("\x1b[200~{content}\x1b[201~"));
+                    if !self.suppress_input.load(Ordering::Relaxed) {
+                        forward_input(&self.input_handler, format!("\x1b[200~{content}\x1b[201~"));
                     }
                 }
             }
@@ -110,35 +227,97 @@ impl ProcessTerminal {
         Ok(())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn enable_modify_other_keys_fallback(&mut self) -> Result<(), TuiError> {
-        if !self.kitty_protocol_active && !self.modify_other_keys_active {
-            self.backend.write(MODIFY_OTHER_KEYS_ENABLE)?;
-            self.modify_other_keys_active = true;
+    fn start_process_input_loop(&self) {
+        if !self.uses_process_io {
+            return;
         }
-        Ok(())
+
+        self.stop_requested.store(false, Ordering::Relaxed);
+        self.last_input_at_ms.store(now_millis(), Ordering::Relaxed);
+
+        let backend = Arc::clone(&self.backend);
+        let input_handler = Arc::clone(&self.input_handler);
+        let kitty_protocol_active = Arc::clone(&self.kitty_protocol_active);
+        let suppress_input = Arc::clone(&self.suppress_input);
+        let stop_requested = Arc::clone(&self.stop_requested);
+        let last_input_at_ms = Arc::clone(&self.last_input_at_ms);
+
+        thread::spawn(move || {
+            let stdin_buffer = StdinBuffer::new(StdinBufferOptions {
+                timeout: DEFAULT_STDIN_TIMEOUT,
+            });
+            let stdin_events = stdin_buffer.subscribe();
+            let stdin = io::stdin();
+            let mut stdin = stdin.lock();
+            let mut buffer = [0u8; 4096];
+
+            loop {
+                if stop_requested.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                match stdin.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        last_input_at_ms.store(now_millis(), Ordering::Relaxed);
+                        stdin_buffer.process_bytes(&buffer[..read]);
+                        while let Ok(event) = stdin_events.try_recv() {
+                            match event {
+                                StdinBufferEvent::Data(sequence) => {
+                                    if !kitty_protocol_active.load(Ordering::Relaxed)
+                                        && is_kitty_protocol_response(&sequence)
+                                    {
+                                        kitty_protocol_active.store(true, Ordering::Relaxed);
+                                        set_kitty_protocol_active(true);
+                                        let _ = write_backend(&backend, KITTY_ENABLE_FLAGS);
+                                        continue;
+                                    }
+
+                                    if !suppress_input.load(Ordering::Relaxed) {
+                                        forward_input(&input_handler, sequence);
+                                    }
+                                }
+                                StdinBufferEvent::Paste(content) => {
+                                    if !suppress_input.load(Ordering::Relaxed) {
+                                        forward_input(
+                                            &input_handler,
+                                            format!("\x1b[200~{content}\x1b[201~"),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+        });
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn notify_resize(&mut self) {
-        if let Some(handler) = &mut self.resize_handler {
-            handler();
-        }
-    }
-
-    fn disable_input_protocols(&mut self) -> Result<(), TuiError> {
-        if self.kitty_protocol_active {
-            self.backend.write(KITTY_DISABLE)?;
-            self.kitty_protocol_active = false;
-            set_kitty_protocol_active(false);
+    fn start_modify_other_keys_fallback_timer(&self) {
+        if !self.uses_process_io {
+            return;
         }
 
-        if self.modify_other_keys_active {
-            self.backend.write(MODIFY_OTHER_KEYS_DISABLE)?;
-            self.modify_other_keys_active = false;
-        }
+        let backend = Arc::clone(&self.backend);
+        let kitty_protocol_active = Arc::clone(&self.kitty_protocol_active);
+        let modify_other_keys_active = Arc::clone(&self.modify_other_keys_active);
+        let stop_requested = Arc::clone(&self.stop_requested);
 
-        Ok(())
+        thread::spawn(move || {
+            thread::sleep(MODIFY_OTHER_KEYS_FALLBACK_DELAY);
+            if stop_requested.load(Ordering::Relaxed)
+                || kitty_protocol_active.load(Ordering::Relaxed)
+                || modify_other_keys_active.load(Ordering::Relaxed)
+            {
+                return;
+            }
+
+            if write_backend(&backend, MODIFY_OTHER_KEYS_ENABLE).is_ok() {
+                modify_other_keys_active.store(true, Ordering::Relaxed);
+            }
+        });
     }
 }
 
@@ -148,87 +327,146 @@ impl Terminal for ProcessTerminal {
         on_input: Box<dyn FnMut(String) + Send>,
         on_resize: Box<dyn FnMut() + Send>,
     ) -> Result<(), TuiError> {
-        self.input_handler = Some(on_input);
-        self.resize_handler = Some(on_resize);
-        self.backend.write(BRACKETED_PASTE_ENABLE)?;
-        self.backend.write(KITTY_QUERY)?;
+        *self
+            .input_handler
+            .lock()
+            .expect("input handler mutex poisoned") = Some(on_input);
+        *self
+            .resize_handler
+            .lock()
+            .expect("resize handler mutex poisoned") = Some(on_resize);
+        self.suppress_input.store(false, Ordering::Relaxed);
+        self.stop_requested.store(false, Ordering::Relaxed);
+
+        if self.uses_process_io {
+            enable_raw_mode()?;
+            self.raw_mode_enabled = true;
+        }
+
+        write_backend(&self.backend, BRACKETED_PASTE_ENABLE)?;
+        write_backend(&self.backend, KITTY_QUERY)?;
+
+        self.start_process_input_loop();
+        self.start_modify_other_keys_fallback_timer();
+
         Ok(())
     }
 
     fn stop(&mut self) -> Result<(), TuiError> {
-        self.backend.write(BRACKETED_PASTE_DISABLE)?;
+        self.stop_requested.store(true, Ordering::Relaxed);
+        self.suppress_input.store(true, Ordering::Relaxed);
+        write_backend(&self.backend, BRACKETED_PASTE_DISABLE)?;
         self.disable_input_protocols()?;
         self.stdin_buffer.destroy();
-        self.input_handler = None;
-        self.resize_handler = None;
+        *self
+            .input_handler
+            .lock()
+            .expect("input handler mutex poisoned") = None;
+        *self
+            .resize_handler
+            .lock()
+            .expect("resize handler mutex poisoned") = None;
+
+        if self.raw_mode_enabled {
+            disable_raw_mode()?;
+            self.raw_mode_enabled = false;
+        }
+
         Ok(())
     }
 
-    fn drain_input(&mut self, _max: Duration, _idle: Duration) -> Result<(), TuiError> {
-        self.disable_input_protocols()
+    fn drain_input(&mut self, max: Duration, idle: Duration) -> Result<(), TuiError> {
+        self.disable_input_protocols()?;
+        self.suppress_input.store(true, Ordering::Relaxed);
+
+        let start = std::time::Instant::now();
+        let idle_ms = duration_to_millis(idle);
+        while start.elapsed() < max {
+            let last_input = self.last_input_at_ms.load(Ordering::Relaxed);
+            let now = now_millis();
+            if now.saturating_sub(last_input) >= idle_ms {
+                break;
+            }
+            thread::sleep(idle.min(Duration::from_millis(10)));
+        }
+
+        self.suppress_input.store(false, Ordering::Relaxed);
+        Ok(())
     }
 
     fn write(&mut self, data: &str) -> Result<(), TuiError> {
-        self.backend.write(data)?;
+        write_backend(&self.backend, data)?;
         Ok(())
     }
 
     fn columns(&self) -> u16 {
-        self.backend.columns()
+        self.backend
+            .lock()
+            .expect("terminal backend mutex poisoned")
+            .columns()
     }
 
     fn rows(&self) -> u16 {
-        self.backend.rows()
+        self.backend
+            .lock()
+            .expect("terminal backend mutex poisoned")
+            .rows()
     }
 
     fn kitty_protocol_active(&self) -> bool {
-        self.kitty_protocol_active
+        self.kitty_protocol_active.load(Ordering::Relaxed)
     }
 
     fn move_by(&mut self, lines: i32) -> Result<(), TuiError> {
         if lines > 0 {
-            self.backend.write(&format!("\x1b[{lines}B"))?;
+            write_backend(&self.backend, &format!("\x1b[{lines}B"))?;
         } else if lines < 0 {
-            self.backend.write(&format!("\x1b[{}A", -lines))?;
+            write_backend(&self.backend, &format!("\x1b[{}A", -lines))?;
         }
         Ok(())
     }
 
     fn hide_cursor(&mut self) -> Result<(), TuiError> {
-        self.backend.write("\x1b[?25l")?;
+        write_backend(&self.backend, "\x1b[?25l")?;
         Ok(())
     }
 
     fn show_cursor(&mut self) -> Result<(), TuiError> {
-        self.backend.write("\x1b[?25h")?;
+        write_backend(&self.backend, "\x1b[?25h")?;
         Ok(())
     }
 
     fn clear_line(&mut self) -> Result<(), TuiError> {
-        self.backend.write("\x1b[K")?;
+        write_backend(&self.backend, "\x1b[K")?;
         Ok(())
     }
 
     fn clear_from_cursor(&mut self) -> Result<(), TuiError> {
-        self.backend.write("\x1b[J")?;
+        write_backend(&self.backend, "\x1b[J")?;
         Ok(())
     }
 
     fn clear_screen(&mut self) -> Result<(), TuiError> {
-        self.backend.write("\x1b[2J\x1b[H")?;
+        write_backend(&self.backend, "\x1b[2J\x1b[H")?;
         Ok(())
     }
 
     fn set_title(&mut self, title: &str) -> Result<(), TuiError> {
-        self.backend.write(&format!("\x1b]0;{title}\x07"))?;
+        write_backend(&self.backend, &format!("\x1b]0;{title}\x07"))?;
         Ok(())
     }
 }
+
+type SharedInputHandler = Arc<Mutex<Option<Box<dyn FnMut(String) + Send>>>>;
+type SharedResizeHandler = Arc<Mutex<Option<Box<dyn FnMut() + Send>>>>;
 
 trait TerminalBackend: Send {
     fn write(&mut self, data: &str) -> io::Result<()>;
     fn columns(&self) -> u16;
     fn rows(&self) -> u16;
+    fn uses_process_io(&self) -> bool {
+        false
+    }
 }
 
 struct StdoutBackend;
@@ -241,20 +479,65 @@ impl TerminalBackend for StdoutBackend {
     }
 
     fn columns(&self) -> u16 {
-        env::var("COLUMNS")
+        terminal_size()
             .ok()
-            .and_then(|value| value.parse::<u16>().ok())
+            .map(|(columns, _)| columns)
+            .or_else(|| {
+                env::var("COLUMNS")
+                    .ok()
+                    .and_then(|value| value.parse::<u16>().ok())
+            })
             .filter(|value| *value > 0)
             .unwrap_or(DEFAULT_COLUMNS)
     }
 
     fn rows(&self) -> u16 {
-        env::var("LINES")
+        terminal_size()
             .ok()
-            .and_then(|value| value.parse::<u16>().ok())
+            .map(|(_, rows)| rows)
+            .or_else(|| {
+                env::var("LINES")
+                    .ok()
+                    .and_then(|value| value.parse::<u16>().ok())
+            })
             .filter(|value| *value > 0)
             .unwrap_or(DEFAULT_ROWS)
     }
+
+    fn uses_process_io(&self) -> bool {
+        true
+    }
+}
+
+fn write_backend(backend: &Arc<Mutex<Box<dyn TerminalBackend>>>, data: &str) -> io::Result<()> {
+    backend
+        .lock()
+        .expect("terminal backend mutex poisoned")
+        .write(data)
+}
+
+fn forward_input(handler: &SharedInputHandler, data: String) {
+    if let Some(handler) = &mut *handler.lock().expect("input handler mutex poisoned") {
+        handler(data);
+    }
+}
+
+fn notify_resize_handler(handler: &SharedResizeHandler) {
+    if let Some(handler) = &mut *handler.lock().expect("resize handler mutex poisoned") {
+        handler();
+    }
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+fn duration_to_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

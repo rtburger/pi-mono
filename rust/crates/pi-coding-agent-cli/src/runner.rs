@@ -6,15 +6,25 @@ use crate::{
 use pi_ai::{StreamOptions, ThinkingBudgets};
 use pi_coding_agent_core::{
     AuthSource, BootstrapDiagnosticLevel, CodingAgentCoreError, CodingAgentCoreOptions,
-    ModelRegistry, ScopedModel, SessionBootstrapOptions, create_coding_agent_core,
-    resolve_cli_model, resolve_model_scope,
+    FooterDataProvider, ModelRegistry, ScopedModel, SessionBootstrapOptions,
+    create_coding_agent_core, resolve_cli_model, resolve_model_scope,
+};
+use pi_coding_agent_tui::{
+    InteractiveCoreBinding, KeybindingsManager, PlainKeyHintStyler, StartupShellComponent,
 };
 use pi_config::{ThinkingBudgetsSettings, load_runtime_settings};
-use pi_events::Model;
+use pi_events::{Message, Model, UserContent};
+use pi_tui::{ProcessTerminal, Terminal, Tui};
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
+use tokio::time::sleep;
 
 const NO_MODELS_ENV_HINT: &str = "  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.";
 const API_KEY_MODEL_REQUIREMENT: &str =
@@ -38,6 +48,267 @@ pub struct RunCommandResult {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+}
+
+type InteractiveTerminalFactory = Arc<dyn Fn() -> Box<dyn Terminal> + Send + Sync>;
+
+pub async fn run_interactive_command(options: RunCommandOptions) -> i32 {
+    run_interactive_command_with_terminal(options, Arc::new(|| Box::new(ProcessTerminal::new())))
+        .await
+}
+
+pub async fn run_interactive_command_with_terminal(
+    options: RunCommandOptions,
+    interactive_terminal_factory: InteractiveTerminalFactory,
+) -> i32 {
+    let RunCommandOptions {
+        args,
+        stdin_is_tty,
+        stdin_content,
+        auth_source,
+        built_in_models,
+        models_json_path,
+        agent_dir,
+        cwd,
+        default_system_prompt,
+        version,
+        stream_options,
+    } = options;
+
+    let parsed = parse_args(&args);
+    let parse_diagnostics = render_parse_diagnostics(&parsed.diagnostics);
+    if !parse_diagnostics.is_empty() {
+        eprint!("{parse_diagnostics}");
+    }
+    if parsed
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.kind == DiagnosticKind::Error)
+    {
+        return 1;
+    }
+
+    if parsed.help || parsed.version || parsed.export.is_some() || parsed.list_models.is_some() {
+        let result = run_command(RunCommandOptions {
+            args,
+            stdin_is_tty,
+            stdin_content,
+            auth_source,
+            built_in_models,
+            models_json_path,
+            agent_dir,
+            cwd,
+            default_system_prompt,
+            version,
+            stream_options,
+        })
+        .await;
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
+        }
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        return result.exit_code;
+    }
+
+    if let Some(message) = unsupported_flag_message(&parsed) {
+        eprintln!("{message}");
+        return 1;
+    }
+
+    let app_mode = resolve_app_mode(&parsed, stdin_is_tty);
+    if app_mode != AppMode::Interactive {
+        let result = run_command(RunCommandOptions {
+            args,
+            stdin_is_tty,
+            stdin_content,
+            auth_source,
+            built_in_models,
+            models_json_path,
+            agent_dir,
+            cwd,
+            default_system_prompt,
+            version,
+            stream_options,
+        })
+        .await;
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
+        }
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        return result.exit_code;
+    }
+
+    let runtime_settings = agent_dir
+        .as_deref()
+        .map(|agent_dir| load_runtime_settings(&cwd, agent_dir))
+        .unwrap_or_default();
+    eprint!("{}", render_settings_warnings(&runtime_settings.warnings));
+
+    let scoped_models = if let Some(patterns) = parsed.models.as_ref() {
+        let registry = ModelRegistry::new(
+            auth_source.clone(),
+            built_in_models.clone(),
+            models_json_path.clone(),
+        );
+        let resolved = resolve_model_scope(patterns, &registry.get_available());
+        eprint!("{}", render_scope_warnings(&resolved.warnings));
+        resolved.scoped_models
+    } else {
+        Vec::new()
+    };
+
+    let stdin_content = normalize_stdin_content(stdin_is_tty, stdin_content);
+    let processed_files = match process_file_arguments(
+        &parsed.file_args,
+        &cwd,
+        ProcessFileOptions {
+            auto_resize_images: runtime_settings.settings.images.auto_resize_images,
+        },
+    ) {
+        Ok(files) => files,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            return 1;
+        }
+    };
+
+    let mut messages = parsed.messages.clone();
+    let initial_message = build_initial_message(
+        &mut messages,
+        (!processed_files.text.is_empty()).then_some(processed_files.text),
+        processed_files.images,
+        stdin_content,
+    );
+
+    let overlay_auth = OverlayAuthSource::new(auth_source);
+    if let Err(error) = apply_runtime_api_key_override(
+        &parsed,
+        &overlay_auth,
+        &built_in_models,
+        models_json_path.as_deref(),
+        &scoped_models,
+    ) {
+        eprintln!("Error: {error}");
+        return 1;
+    }
+
+    let created = create_coding_agent_core(CodingAgentCoreOptions {
+        auth_source: Arc::new(overlay_auth),
+        built_in_models,
+        models_json_path: models_json_path.clone(),
+        cwd: Some(cwd.clone()),
+        tools: None,
+        system_prompt: resolve_system_prompt(
+            &default_system_prompt,
+            parsed.system_prompt.as_deref(),
+            parsed.append_system_prompt.as_deref(),
+        ),
+        bootstrap: SessionBootstrapOptions {
+            cli_provider: parsed.provider.clone(),
+            cli_model: parsed.model.clone(),
+            cli_thinking_level: parsed.thinking,
+            scoped_models,
+            ..SessionBootstrapOptions::default()
+        },
+        stream_options,
+    });
+
+    let created = match created {
+        Ok(created) => created,
+        Err(CodingAgentCoreError::NoModelAvailable) => {
+            eprint!("{}", render_no_models_message(models_json_path.as_deref()));
+            return 1;
+        }
+        Err(error) => {
+            eprintln!("Error: {error}");
+            return 1;
+        }
+    };
+
+    created
+        .core
+        .set_auto_resize_images(runtime_settings.settings.images.auto_resize_images);
+    created
+        .core
+        .set_block_images(runtime_settings.settings.images.block_images);
+    created.core.set_thinking_budgets(map_thinking_budgets(
+        &runtime_settings.settings.thinking_budgets,
+    ));
+
+    let bootstrap_output = render_bootstrap_diagnostics(&created.diagnostics);
+    if !bootstrap_output.is_empty() {
+        eprint!("{bootstrap_output}");
+    }
+    if created
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.level == BootstrapDiagnosticLevel::Error)
+    {
+        return 1;
+    }
+
+    let mut keybindings = match &agent_dir {
+        Some(agent_dir) => KeybindingsManager::create(agent_dir),
+        None => KeybindingsManager::new(BTreeMap::new(), None),
+    };
+    keybindings.reload();
+
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        &version,
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+
+    let exit_requested = Arc::new(AtomicBool::new(false));
+    let exit_requested_for_shell = Arc::clone(&exit_requested);
+    shell.set_on_exit(move || {
+        exit_requested_for_shell.store(true, Ordering::Relaxed);
+    });
+
+    let footer_provider = FooterDataProvider::new(&cwd);
+    let mut tui = Tui::new(interactive_terminal_factory());
+    shell.bind_footer_data_provider_with_render_handle(&footer_provider, tui.render_handle());
+    let binding =
+        InteractiveCoreBinding::bind(created.core.clone(), &mut shell, tui.render_handle());
+    let shell_id = tui.add_child(Box::new(shell));
+    let _ = tui.set_focus_child(shell_id);
+    let _ = tui.terminal_mut().set_title("pi");
+
+    if let Err(error) = tui.start() {
+        eprintln!("Error: {error}");
+        drop(binding);
+        return 1;
+    }
+
+    spawn_initial_interactive_messages(created.core.clone(), initial_message, messages);
+
+    let mut exit_code = 0;
+    while !exit_requested.load(Ordering::Relaxed) {
+        if let Err(error) = tui.drain_terminal_events() {
+            eprintln!("Error: {error}");
+            exit_code = 1;
+            break;
+        }
+        sleep(Duration::from_millis(16)).await;
+    }
+
+    created.core.abort();
+    created.core.wait_for_idle().await;
+    let _ = tui
+        .terminal_mut()
+        .drain_input(Duration::from_millis(1000), Duration::from_millis(50));
+    let _ = tui.stop();
+    drop(binding);
+
+    exit_code
 }
 
 pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
@@ -330,6 +601,42 @@ fn normalize_stdin_content(stdin_is_tty: bool, stdin_content: Option<String>) ->
     stdin_content
         .map(|content| content.trim().to_string())
         .filter(|content| !content.is_empty())
+}
+
+fn spawn_initial_interactive_messages(
+    core: pi_coding_agent_core::CodingAgentCore,
+    initial_message: crate::InitialMessageResult,
+    messages: Vec<String>,
+) {
+    tokio::spawn(async move {
+        if let Some(message) = build_initial_user_message(initial_message) {
+            let _ = core.prompt_message(message).await;
+        }
+
+        for message in messages {
+            let _ = core.prompt_text(message).await;
+        }
+    });
+}
+
+fn build_initial_user_message(initial_message: crate::InitialMessageResult) -> Option<Message> {
+    let mut content = Vec::new();
+
+    if let Some(text) = initial_message.initial_message {
+        content.push(UserContent::Text { text });
+    }
+    if let Some(images) = initial_message.initial_images {
+        content.extend(images);
+    }
+
+    if content.is_empty() {
+        None
+    } else {
+        Some(Message::User {
+            content,
+            timestamp: 0,
+        })
+    }
 }
 
 fn resolve_system_prompt(

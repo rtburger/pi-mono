@@ -5,12 +5,15 @@ use pi_ai::{
     AiProvider, AssistantEventStream, StreamOptions, built_in_models, get_model,
     register_builtin_providers, register_provider, stream_response, unregister_provider,
 };
-use pi_coding_agent_cli::{EnvAuthSource, RunCommandOptions, run_command};
+use pi_coding_agent_cli::{
+    EnvAuthSource, RunCommandOptions, run_command, run_interactive_command_with_terminal,
+};
 use pi_coding_agent_core::{AuthFileSource, ChainedAuthSource, MemoryAuthStorage};
 use pi_events::{
     AssistantContent, AssistantEvent, AssistantMessage, Context, Model, StopReason, Usage,
     UserContent,
 };
+use pi_tui::{Terminal, TuiError};
 use std::{
     fs,
     io::Cursor,
@@ -19,7 +22,8 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const TINY_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACAQMAAABIeJ9nAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURf8AAP///0EdNBEAAAABYktHRAH/Ai3eAAAAB3RJTUUH6gEOADM5Ddoh/wAAAAxJREFUCNdjYGBgAAAABAABJzQnCgAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyNi0wMS0xNFQwMDo1MTo1NyswMDowMOnKzHgAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjYtMDEtMTRUMDA6NTE6NTcrMDA6MDCYl3TEAAAAKHRFWHRkYXRlOnRpbWVzdGFtcAAyMDI2LTAxLTE0VDAwOjUxOjU3KzAwOjAwz4JVGwAAAABJRU5ErkJggg==";
@@ -122,6 +126,102 @@ fn model(api: &str, provider: &str, id: &str) -> Model {
         input: vec![String::from("text"), String::from("image")],
         context_window: 128_000,
         max_tokens: 16_384,
+    }
+}
+
+#[derive(Clone)]
+struct ScriptedTerminal {
+    writes: Arc<Mutex<Vec<String>>>,
+    script: Arc<Vec<(Duration, TerminalAction)>>,
+}
+
+#[derive(Clone)]
+enum TerminalAction {
+    Input(String),
+}
+
+impl ScriptedTerminal {
+    fn new(script: Vec<(Duration, TerminalAction)>) -> Self {
+        Self {
+            writes: Arc::new(Mutex::new(Vec::new())),
+            script: Arc::new(script),
+        }
+    }
+
+    fn output(&self) -> String {
+        self.writes.lock().unwrap().join("")
+    }
+}
+
+impl Terminal for ScriptedTerminal {
+    fn start(
+        &mut self,
+        mut on_input: Box<dyn FnMut(String) + Send>,
+        _on_resize: Box<dyn FnMut() + Send>,
+    ) -> Result<(), TuiError> {
+        let script = Arc::clone(&self.script);
+        thread::spawn(move || {
+            for (delay, action) in script.iter() {
+                thread::sleep(*delay);
+                match action {
+                    TerminalAction::Input(data) => on_input(data.clone()),
+                }
+            }
+        });
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn drain_input(&mut self, _max: Duration, _idle: Duration) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn write(&mut self, data: &str) -> Result<(), TuiError> {
+        self.writes.lock().unwrap().push(data.to_owned());
+        Ok(())
+    }
+
+    fn columns(&self) -> u16 {
+        100
+    }
+
+    fn rows(&self) -> u16 {
+        12
+    }
+
+    fn kitty_protocol_active(&self) -> bool {
+        false
+    }
+
+    fn move_by(&mut self, _lines: i32) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn show_cursor(&mut self) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn clear_line(&mut self) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn clear_from_cursor(&mut self) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn clear_screen(&mut self) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn set_title(&mut self, _title: &str) -> Result<(), TuiError> {
+        Ok(())
     }
 }
 
@@ -515,6 +615,66 @@ async fn run_command_rejects_interactive_mode_for_now() {
             .stderr
             .contains("Interactive mode is not supported in the Rust CLI yet")
     );
+}
+
+#[tokio::test]
+async fn run_interactive_command_renders_live_transcript_and_exits() {
+    let provider = unique_name("interactive-provider");
+    let model_id = unique_name("interactive-model");
+    let (api, _recorded) = register_recording_provider("interactive-done");
+    let built_in_model = model(&api, &provider, &model_id);
+    let terminal = ScriptedTerminal::new(vec![
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("h")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("i")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("\r")),
+        ),
+        (
+            Duration::from_millis(80),
+            TerminalAction::Input(String::from("\x04")),
+        ),
+    ]);
+    let inspector = terminal.clone();
+
+    let exit_code = run_interactive_command_with_terminal(
+        RunCommandOptions {
+            args: vec![
+                String::from("--provider"),
+                provider.clone(),
+                String::from("--model"),
+                model_id.clone(),
+            ],
+            stdin_is_tty: true,
+            stdin_content: None,
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![built_in_model],
+            models_json_path: None,
+            agent_dir: None,
+            cwd: unique_temp_dir("runner-interactive-live"),
+            default_system_prompt: String::new(),
+            version: String::from("0.1.0"),
+            stream_options: StreamOptions::default(),
+        },
+        Arc::new(move || Box::new(terminal.clone())),
+    )
+    .await;
+
+    assert_eq!(exit_code, 0);
+    let output = inspector.output();
+    assert!(output.contains("interactive-done"), "output: {output}");
+    assert!(output.contains("hi"), "output: {output}");
+
+    unregister_provider(&api);
 }
 
 #[tokio::test]

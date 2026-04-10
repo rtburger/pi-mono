@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+crossterm = "0.28"
 regex = "1"
 thiserror.workspace = true
 unicode-segmentation = "1"

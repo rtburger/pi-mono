@@ -1501,3 +1501,82 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
 - consume the new viewport-size hook in the coding-agent startup shell/transcript path to add transcript viewport clipping and scrolling
 - keep multiline editor and broader widget parity deferred until that transcript viewport behavior exists
+
+## Milestone 18 update: real `ProcessTerminal` stdin/raw-mode slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/terminal.ts`
+- `packages/tui/src/tui.ts`
+- `packages/coding-agent/src/main.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/Cargo.toml`
+- `rust/crates/pi-tui/src/terminal.rs`
+- `rust/crates/pi-coding-agent-cli/src/runner.rs`
+- `rust/apps/pi/src/main.rs`
+- `rust/crates/pi-coding-agent-cli/tests/runner.rs`
+
+### Behavior summary
+
+New TS-compatible behaviors now covered in Rust:
+- `pi-tui::ProcessTerminal` now has a real process-backed stdin path instead of only test-time/manual sequence injection
+- Rust `ProcessTerminal::start()` now enables raw mode for the real process-backed terminal path, preserving the existing startup control writes for:
+  - bracketed paste enable
+  - Kitty keyboard-protocol query
+- real stdin bytes now flow through the existing migrated `StdinBuffer` logic before reaching `Tui`, so the live terminal path preserves the already-migrated sequence splitting behavior for:
+  - plain text input
+  - escape/control sequences
+  - bracketed paste
+  - Kitty protocol response detection
+- Rust now enables the timed modifyOtherKeys fallback for the real process-backed path, matching the current TypeScript terminal startup intent more closely when Kitty does not answer quickly
+- `Terminal` is now implemented for `Box<T: Terminal + ?Sized>`, which lets downstream interactive app code inject terminal implementations while still using the generic `Tui<T>` surface
+
+Compatibility note for this slice:
+- the Rust real-process path now covers raw stdin/input callback integration honestly enough for the first end-user interactive app slice, but it still does not port the full TypeScript OS-integration surface yet
+- live resize/signal callback parity remains deferred; the current Rust process terminal now relies on later input/render activity rather than a dedicated real resize callback path
+- Windows-specific VT-input setup parity from the TypeScript terminal remains deferred
+- the background stdin reader thread is intentionally simple and best-effort for the current migration slice; broader lifecycle/thread shutdown refinement can follow later if needed
+
+### Rust design summary
+
+Expanded `rust/crates/pi-tui/src/terminal.rs` with:
+- process/raw-mode integration via `crossterm`
+- shared backend/handler state for the real-process path
+- a real stdin reader thread that feeds `StdinBuffer::process_bytes(...)`
+- timed modifyOtherKeys fallback wiring for the real-process path
+- a blanket `Terminal for Box<T>` impl for injected terminal usage in downstream interactive app tests/runtime code
+
+Dependency change:
+- `rust/crates/pi-tui/Cargo.toml`
+  - added `crossterm`
+
+### Validation summary
+
+New Rust coverage added for:
+- the existing `pi-tui` terminal unit tests still validating protocol-state behavior after the real stdin/raw-mode implementation changes
+- downstream end-to-end interactive app validation through the new coding-agent interactive runner test that mounts `Tui<Box<dyn Terminal>>` and drives live shell input through the same callback path
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test -p pi-coding-agent-cli --test runner` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- live resize callback parity in the real process-backed terminal path
+- Windows VT-input setup parity
+- differential rendering parity remains partial relative to TS `packages/tui/src/tui.ts`
+- richer widgets are still missing (`Box`, multiline editor, autocomplete, markdown/select/settings/image widgets)
+- broader image/widget/theme parity remains deferred
+
+### Recommended next step
+
+Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
+- either add the next honest real-terminal parity gap (`resize` / remaining OS integration) or continue upward into the multiline/custom-editor slice now that the interactive app can consume live stdin through the Rust terminal path
+- keep broader markdown/image/theme parity deferred until the higher-value interaction/runtime gaps are closed first

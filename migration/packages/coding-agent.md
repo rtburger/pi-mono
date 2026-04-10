@@ -4203,3 +4203,108 @@ Still deferred for the coding-agent interactive/runtime path:
 Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
 - port the next honest blocker for a real end-user interactive path: `pi-tui::ProcessTerminal` real stdin/input callback integration
 - once that exists, wire the new interactive binding into the Rust CLI/app entry path instead of keeping interactive mode rejected at the top level
+
+## Milestone 56 update: first top-level Rust interactive app command path slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/main.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`
+- `packages/tui/src/terminal.ts`
+- `packages/tui/src/tui.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-cli/Cargo.toml`
+- `rust/crates/pi-coding-agent-cli/src/lib.rs`
+- `rust/crates/pi-coding-agent-cli/src/runner.rs`
+- `rust/crates/pi-coding-agent-cli/tests/runner.rs`
+- `rust/apps/pi/src/main.rs`
+- `rust/crates/pi-tui/src/terminal.rs`
+
+### Behavior summary
+
+New TS-compatible interactive behavior now covered in Rust:
+- `rust/apps/pi` no longer has to reject interactive mode at the top level for the current migrated subset
+- the Rust app now branches honestly between:
+  - existing buffered non-interactive handling through `run_command(...)`
+  - a new live interactive path using the already-migrated startup shell + `InteractiveCoreBinding`
+- the new Rust interactive path now preserves the current high-value TypeScript startup/runtime behavior for the migrated subset:
+  - parse normal CLI model/provider/auth flags before interactive startup
+  - create a `CodingAgentCore` with the same bootstrap/runtime path already used by non-interactive mode
+  - mount a live `StartupShellComponent` into a real `Tui`
+  - bind that shell to the live runtime through `InteractiveCoreBinding`
+  - drive prompt submission through the bound shell/runtime path instead of a print-mode fallback
+  - carry startup `@file` / stdin / first-message assembly into the interactive request path by replaying the same prepared initial message through the runtime after the shell starts
+  - exit the shell through the already-migrated shell exit behavior instead of keeping interactive mode globally unsupported
+- the CLI crate now exposes two explicit command paths instead of overloading the buffered runner:
+  - `run_command(...)` remains the buffered non-interactive path and still rejects interactive mode at the library level
+  - `run_interactive_command(...)` / `run_interactive_command_with_terminal(...)` own the live interactive path
+- the interactive path is now testable with injected terminal implementations, which let Rust freeze the top-level interactive flow without requiring a real terminal in tests
+
+Compatibility note for this slice:
+- this is the first honest top-level interactive path, not full TypeScript interactive-mode parity
+- the current Rust interactive app intentionally uses the migrated startup shell subset, so it still does not have:
+  - multiline/custom editor parity
+  - session-manager/resource-loader-backed interactive runtime wiring
+  - the full TS theme/markdown/image presentation stack
+- the buffered `run_command(...)` API still rejects interactive mode; the live interactive path now exists at the app level and via the new explicit interactive runner functions
+
+### Rust design summary
+
+Expanded `pi-coding-agent-cli` with:
+- `run_interactive_command(...)`
+- `run_interactive_command_with_terminal(...)`
+- interactive runner logic that:
+  - reuses existing bootstrap/runtime/file-processing/settings handling
+  - mounts `StartupShellComponent`
+  - binds `FooterDataProvider` and `InteractiveCoreBinding`
+  - starts a live `Tui`
+  - replays prepared initial messages into `CodingAgentCore`
+  - drains queued render/input events until shell exit
+
+Crate/dependency changes:
+- `rust/crates/pi-coding-agent-cli/Cargo.toml`
+  - now depends on `pi-coding-agent-tui`
+  - now carries `tokio` as a normal dependency for the live interactive loop
+- `rust/crates/pi-coding-agent-cli/src/lib.rs`
+  - now exports the new interactive runner functions
+
+Top-level app integration:
+- `rust/apps/pi/src/main.rs`
+  - now parses args early enough to choose between the buffered non-interactive path and the live interactive path
+  - keeps help/version/list-models/export on the buffered command path
+  - uses the live interactive runner only for the actual interactive app mode
+
+### Validation summary
+
+New Rust coverage added for:
+- a full top-level interactive runner test with an injected scripted terminal, proving:
+  - live prompt input reaches the mounted shell/runtime
+  - user transcript content renders
+  - assistant transcript content renders
+  - the interactive command path can exit cleanly through shell input
+- existing non-interactive runner tests continue to pass, preserving the buffered CLI path contract
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-cli --test runner` passed
+- `cd rust && cargo test -p pi-coding-agent-cli` passed
+- `cd rust && cargo test -p pi` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive/runtime path:
+- buffered `run_command(...)` still intentionally rejects interactive mode; only the top-level app and the explicit interactive runner functions own the live path today
+- no multiline editor / custom-editor parity yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no richer interactive transcript/navigation/status UI beyond the already-migrated startup-shell controls
+- no broader theme/markdown/image parity yet for the full interactive presentation stack
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-cli`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- move to the next honest interactive gap above the new top-level app path, most likely multiline/custom-editor parity or the next remaining real-terminal integration gap such as live resize handling
+- keep session-manager/resource-loader wiring and the broader theme/markdown/image stack deferred until the higher-value interaction/runtime gaps are closed first
