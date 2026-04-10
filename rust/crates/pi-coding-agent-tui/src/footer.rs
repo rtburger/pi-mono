@@ -1,7 +1,11 @@
-use pi_coding_agent_core::FooterDataSnapshot;
+use pi_coding_agent_core::{BranchChangeSubscription, FooterDataProvider, FooterDataSnapshot};
 use pi_events::Model;
-use pi_tui::{Component, truncate_to_width, visible_width};
-use std::{collections::BTreeMap, env};
+use pi_tui::{Component, RenderHandle, truncate_to_width, visible_width};
+use std::{
+    collections::BTreeMap,
+    env,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FooterState {
@@ -61,28 +65,99 @@ impl Default for FooterState {
 }
 
 pub struct FooterComponent {
-    state: FooterState,
+    state: Mutex<FooterState>,
+    pending_snapshot: Arc<Mutex<Option<FooterDataSnapshot>>>,
+    data_subscription: Mutex<Option<BranchChangeSubscription>>,
 }
 
 impl FooterComponent {
     pub fn new(state: FooterState) -> Self {
-        Self { state }
+        Self {
+            state: Mutex::new(state),
+            pending_snapshot: Arc::new(Mutex::new(None)),
+            data_subscription: Mutex::new(None),
+        }
     }
 
-    pub fn state(&self) -> &FooterState {
-        &self.state
+    pub fn state(&self) -> FooterState {
+        self.sync_pending_snapshot();
+        self.state
+            .lock()
+            .expect("footer state mutex poisoned")
+            .clone()
     }
 
-    pub fn set_state(&mut self, state: FooterState) {
-        self.state = state;
+    pub fn set_state(&self, state: FooterState) {
+        *self.state.lock().expect("footer state mutex poisoned") = state;
     }
 
-    pub fn clear_state(&mut self) {
-        self.state = FooterState::default();
+    pub fn clear_state(&self) {
+        *self.state.lock().expect("footer state mutex poisoned") = FooterState::default();
     }
 
-    pub fn apply_data_snapshot(&mut self, snapshot: &FooterDataSnapshot) {
-        self.state.apply_data_snapshot(snapshot);
+    pub fn apply_data_snapshot(&self, snapshot: &FooterDataSnapshot) {
+        self.state
+            .lock()
+            .expect("footer state mutex poisoned")
+            .apply_data_snapshot(snapshot);
+    }
+
+    pub fn bind_data_provider(&self, provider: &FooterDataProvider) {
+        self.bind_data_provider_internal(provider, None);
+    }
+
+    pub fn bind_data_provider_with_render_handle(
+        &self,
+        provider: &FooterDataProvider,
+        render_handle: RenderHandle,
+    ) {
+        self.bind_data_provider_internal(provider, Some(render_handle));
+    }
+
+    pub fn unbind_data_provider(&self) {
+        self.data_subscription
+            .lock()
+            .expect("footer subscription mutex poisoned")
+            .take();
+        self.pending_snapshot
+            .lock()
+            .expect("footer pending snapshot mutex poisoned")
+            .take();
+    }
+
+    fn sync_pending_snapshot(&self) {
+        let snapshot = self
+            .pending_snapshot
+            .lock()
+            .expect("footer pending snapshot mutex poisoned")
+            .take();
+        if let Some(snapshot) = snapshot {
+            self.apply_data_snapshot(&snapshot);
+        }
+    }
+
+    fn bind_data_provider_internal(
+        &self,
+        provider: &FooterDataProvider,
+        render_handle: Option<RenderHandle>,
+    ) {
+        self.apply_data_snapshot(&provider.snapshot());
+        if let Some(render_handle) = &render_handle {
+            render_handle.request_render();
+        }
+        let pending_snapshot = Arc::clone(&self.pending_snapshot);
+        let subscription = provider.on_snapshot_change(move |snapshot| {
+            *pending_snapshot
+                .lock()
+                .expect("footer pending snapshot mutex poisoned") = Some(snapshot);
+            if let Some(render_handle) = &render_handle {
+                render_handle.request_render();
+            }
+        });
+        *self
+            .data_subscription
+            .lock()
+            .expect("footer subscription mutex poisoned") = Some(subscription);
     }
 }
 
@@ -94,20 +169,25 @@ impl Default for FooterComponent {
 
 impl Component for FooterComponent {
     fn render(&self, width: usize) -> Vec<String> {
+        self.sync_pending_snapshot();
+        let state = self
+            .state
+            .lock()
+            .expect("footer state mutex poisoned")
+            .clone();
         let mut lines = Vec::new();
 
-        if has_pwd_line(&self.state) {
-            let pwd_line = truncate_to_width(&format_pwd(&self.state), width, "...", false);
+        if has_pwd_line(&state) {
+            let pwd_line = truncate_to_width(&format_pwd(&state), width, "...", false);
             lines.push(pwd_line);
         }
 
-        if has_stats_line(&self.state) {
-            lines.push(render_stats_line(&self.state, width));
+        if has_stats_line(&state) {
+            lines.push(render_stats_line(&state, width));
         }
 
-        if !self.state.extension_statuses.is_empty() {
-            let status_line = self
-                .state
+        if !state.extension_statuses.is_empty() {
+            let status_line = state
                 .extension_statuses
                 .values()
                 .map(|text| sanitize_status_text(text))

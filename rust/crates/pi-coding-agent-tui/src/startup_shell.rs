@@ -2,8 +2,8 @@ use crate::{
     BuiltInHeaderComponent, FooterComponent, FooterState, KeyHintStyler, KeybindingsManager,
     PendingMessagesComponent, StartupHeaderStyler, TranscriptComponent,
 };
-use pi_coding_agent_core::FooterDataSnapshot;
-use pi_tui::{Component, ComponentId, Input};
+use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
+use pi_tui::{Component, ComponentId, Input, RenderHandle};
 use std::{cell::Cell, ops::Deref};
 
 pub struct StartupShellComponent {
@@ -142,6 +142,23 @@ impl StartupShellComponent {
 
     pub fn clear_footer(&mut self) {
         self.footer.clear_state();
+    }
+
+    pub fn bind_footer_data_provider(&mut self, provider: &FooterDataProvider) {
+        self.footer.bind_data_provider(provider);
+    }
+
+    pub fn bind_footer_data_provider_with_render_handle(
+        &mut self,
+        provider: &FooterDataProvider,
+        render_handle: RenderHandle,
+    ) {
+        self.footer
+            .bind_data_provider_with_render_handle(provider, render_handle);
+    }
+
+    pub fn unbind_footer_data_provider(&mut self) {
+        self.footer.unbind_data_provider();
     }
 
     pub fn apply_footer_data_snapshot(&mut self, snapshot: &FooterDataSnapshot) {

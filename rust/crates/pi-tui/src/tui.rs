@@ -76,6 +76,20 @@ pub struct OverlayHandle {
     id: OverlayId,
 }
 
+#[derive(Clone)]
+pub struct RenderHandle {
+    pending_terminal_events: Arc<Mutex<VecDeque<TerminalEvent>>>,
+}
+
+impl RenderHandle {
+    pub fn request_render(&self) {
+        self.pending_terminal_events
+            .lock()
+            .expect("pending terminal events mutex poisoned")
+            .push_back(TerminalEvent::Render);
+    }
+}
+
 impl OverlayHandle {
     pub fn id(self) -> OverlayId {
         self.id
@@ -229,6 +243,7 @@ struct InputListenerEntry {
 enum TerminalEvent {
     Input(String),
     Resize,
+    Render,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -354,6 +369,12 @@ impl<T: Terminal> Tui<T> {
 
     pub fn terminal_mut(&mut self) -> &mut T {
         &mut self.terminal
+    }
+
+    pub fn render_handle(&self) -> RenderHandle {
+        RenderHandle {
+            pending_terminal_events: Arc::clone(&self.pending_terminal_events),
+        }
     }
 
     pub fn add_child(&mut self, component: Box<dyn Component>) -> ComponentId {
@@ -621,7 +642,7 @@ impl<T: Terminal> Tui<T> {
             };
             match event {
                 TerminalEvent::Input(data) => self.handle_input(&data)?,
-                TerminalEvent::Resize => {
+                TerminalEvent::Resize | TerminalEvent::Render => {
                     if self.started {
                         self.render_now()?;
                     }

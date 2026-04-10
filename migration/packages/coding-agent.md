@@ -3290,3 +3290,281 @@ Still deferred for the coding-agent interactive footer path:
 Stay in `packages/coding-agent/src/core`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-coding-agent-core`, and `rust/crates/pi-coding-agent-tui`:
 - add the next `FooterDataProvider` parity layer next, specifically watcher/debounce/branch-change callback behavior, now that there is a concrete consumer-side snapshot bridge waiting for live updates
 - keep multiline editor parity, keybound transcript scrolling, and broader session/runtime wiring deferred until that live footer update path exists
+
+## Milestone 46 update: `FooterDataProvider` watcher/debounce/branch-change callback slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/core/footer-data-provider.ts`
+- `packages/coding-agent/test/footer-data-provider.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-core/src/footer_data.rs`
+- `rust/crates/pi-coding-agent-core/src/lib.rs`
+- `rust/crates/pi-coding-agent-core/tests/footer_data.rs`
+- `rust/crates/pi-coding-agent-core/Cargo.toml`
+- previously added footer consumer grounding remained relevant:
+  - `migration/packages/coding-agent.md`
+  - `rust/crates/pi-coding-agent-tui/src/footer.rs`
+  - `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-coding-agent-core::FooterDataProvider` now has the first live branch-change subscription path corresponding to the TypeScript `onBranchChange(...)` behavior
+- the Rust provider now preserves the current TS watcher/debounce behaviors for the migrated slice:
+  - branch listeners can subscribe and unsubscribe explicitly
+  - `set_cwd(...)` resets cached branch state, switches the watched repo root, and notifies listeners immediately
+  - reftable-driven repo updates now trigger asynchronous branch refreshes without requiring callers to poll manually
+  - repeated filesystem updates are debounced into a single refresh window (`500ms`), matching the TS debounce constant
+  - listener callbacks are emitted only when the cached branch actually changes after a watched refresh
+  - reftable updates that keep the same branch do not emit redundant callbacks
+- the current Rust watcher scope also preserves the TS data-source surface already present before this slice:
+  - branch lookup from regular repos and worktrees
+  - `.invalid` reftable fallback through `git symbolic-ref --quiet --short HEAD`
+  - extension-status storage
+  - available-provider-count storage
+  - snapshot generation for the footer bridge
+
+Compatibility note for this slice:
+- the Rust watcher uses a small background thread plus polling/signature checks over `HEAD`, the reftable directory, and `tables.list`, rather than a direct `fs.watch` / `watchFile` port. This preserves the observable debounce/callback behavior without adding a larger platform-specific watcher dependency yet.
+- the async refresh path uses the existing synchronous `git` resolution helper inside that background thread rather than introducing a second Tokio/runtime-dependent process path in this slice.
+
+### Rust design summary
+
+Expanded `pi-coding-agent-core::footer_data` with:
+- `BranchChangeSubscription`
+- background watcher thread owned by `FooterDataProvider`
+- internal cached-branch state with an explicit `Unknown` vs resolved-value split
+- internal watched-signature capture for:
+  - `HEAD` contents
+  - reftable directory entry lists
+  - `reftable/tables.list` contents
+- explicit lifecycle methods:
+  - `FooterDataProvider::on_branch_change(...)`
+  - `FooterDataProvider::dispose()`
+- existing mutator/query methods now operate through interior mutability so the live watcher and callback path can update provider state without changing the external Rust call sites materially
+
+Core surface change:
+- `rust/crates/pi-coding-agent-core/src/lib.rs` now re-exports `BranchChangeSubscription`
+
+Design choices for this slice:
+- keep the watcher/runtime logic inside `pi-coding-agent-core`, where the TypeScript source-of-truth provider already lives, instead of pushing repo-watching into `pi-coding-agent-tui`
+- prefer a narrow background-thread implementation over a broader filesystem-watcher dependency while the live consumer path is still limited to footer updates
+- preserve the TS immediate `setCwd()` notification behavior now, because it affects how a future interactive footer can refresh on project switches before the next async branch refresh completes
+
+### Validation summary
+
+New Rust coverage added for:
+- immediate listener notification when `set_cwd(...)` switches repos
+- reftable updates that keep the same branch not emitting callbacks
+- debouncing rapid reftable updates into a single `git` refresh
+- reftable updates changing the branch updating the cached value and notifying listeners exactly once
+- existing direct branch-detection and snapshot tests continue to pass
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-core --test footer_data` passed
+- `cd rust && cargo test -p pi-coding-agent-core` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive footer/live-update path:
+- no Rust consumer wiring yet from live `FooterDataProvider` callbacks into `FooterComponent` / `StartupShellComponent`
+- no Rust watcher/debounce callback path yet for a future interactive runtime loop beyond direct test coverage
+- no Rust theme-aware footer styling parity yet
+- no keybound transcript scroll controls yet
+- no Rust multiline editor / custom-editor parity yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates the shell/footer stack
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/core`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-coding-agent-core`, and `rust/crates/pi-coding-agent-tui`:
+- connect the new live `FooterDataProvider` callback path to the existing Rust footer snapshot bridge so footer updates can propagate into the startup shell without manual snapshot pushes
+- keep multiline editor parity, keybound transcript scrolling, and broader session/runtime wiring deferred until that first live footer-consumer path exists
+
+## Milestone 47 update: live footer snapshot binding into `FooterComponent` / `StartupShellComponent`
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/core/footer-data-provider.ts`
+- `packages/coding-agent/src/modes/interactive/components/footer.ts`
+- targeted interactive wiring grounding:
+  - `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (branch-change -> `requestRender()` path)
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-core/src/footer_data.rs`
+- `rust/crates/pi-coding-agent-tui/src/footer.rs`
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/tests/footer.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- the Rust footer consumer path no longer requires callers to push `FooterDataSnapshot` objects manually after every branch/cwd change
+- `FooterComponent` now supports binding directly to a live `pi_coding_agent_core::FooterDataProvider`
+- the live Rust binding now preserves the current TypeScript source/consumer ownership split:
+  - provider-owned data continues to come from `FooterDataProvider`
+  - session/runtime-owned footer fields continue to live in `FooterState`
+- bound footer updates now preserve current session-derived fields while refreshing only provider-owned fields on snapshot changes:
+  - cwd
+  - git branch
+  - available provider count
+  - extension statuses
+- `StartupShellComponent` now exposes the same live binding path, so a future interactive runtime can hand it a `FooterDataProvider` directly instead of translating callbacks into manual snapshot application
+- current Rust live binding behavior is now explicitly frozen for the migrated slice through render-time tests:
+  - initial provider snapshot is applied on bind
+  - later `set_cwd(...)` callbacks update the rendered footer on the next render pass without a manual `apply_footer_data_snapshot(...)` call
+
+Compatibility note for this slice:
+- this slice ports the live data propagation path into the footer/shell consumer surface, but it still does not request a TUI rerender automatically the way the full TypeScript interactive mode does with `ui.requestRender()` in its callback. The Rust shell now consumes live snapshots correctly on the next render; top-level runtime-driven rerender triggering remains a later interactive integration step.
+
+### Rust design summary
+
+Expanded `pi-coding-agent-core::FooterDataProvider` with:
+- `on_snapshot_change(...)`
+  - Rust-only helper that bridges the existing branch-change callback path to full `FooterDataSnapshot` delivery without widening the TS compatibility target itself
+
+Expanded `pi-coding-agent-tui::FooterComponent` with:
+- interior-mutable footer state
+- queued pending-snapshot storage
+- `bind_data_provider(...)`
+- `unbind_data_provider(...)`
+- render-time snapshot draining/merge into existing `FooterState`
+
+Expanded `pi-coding-agent-tui::StartupShellComponent` with:
+- `bind_footer_data_provider(...)`
+- `unbind_footer_data_provider(...)`
+
+Design choices for this slice:
+- keep the live binding in `pi-coding-agent-tui`, the consumer crate, instead of moving TUI concerns into `pi-coding-agent-core`
+- use pending-snapshot merging at render time to preserve the existing session/provider ownership split and avoid forcing a larger shell-state redesign
+- add the small Rust-only `on_snapshot_change(...)` helper in core rather than making `FooterDataProvider` globally cloneable or exposing its internals across crate boundaries
+
+### Validation summary
+
+New Rust coverage added for:
+- direct footer binding to a live `FooterDataProvider` with cwd/branch refresh after `set_cwd(...)`
+- startup-shell binding to a live `FooterDataProvider` without manual snapshot pushes
+- existing footer width, snapshot-merge, transcript-budgeting, and startup-shell layout tests continue to pass
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test footer --test startup_shell` passed
+- `cd rust && cargo test -p pi-coding-agent-core` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive footer/live-update path:
+- no automatic TUI rerender request hook yet when live footer snapshots change
+- no Rust theme-aware footer styling parity yet
+- no keybound transcript scroll controls yet
+- no Rust multiline editor / custom-editor parity yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates the shell/footer stack
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- add the first live rerender bridge for footer updates next, so bound footer/provider changes can trigger shell/TUI redraws instead of waiting for the next external render call
+- keep multiline editor parity, keybound transcript scrolling, and broader session/runtime wiring deferred until that live redraw path exists
+
+## Milestone 48 update: live footer-triggered rerender bridge slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/core/footer-data-provider.ts`
+- `packages/coding-agent/src/modes/interactive/components/footer.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (branch-change -> `requestRender()` grounding)
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/tui.rs`
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/tests/tui.rs`
+- `rust/crates/pi-coding-agent-tui/src/footer.rs`
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/tests/footer.rs`
+- `migration/packages/coding-agent.md`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- the Rust interactive shell/footer path now has its first explicit redraw bridge corresponding to the TypeScript `footerDataProvider.onBranchChange(() => ui.requestRender())` pattern
+- bound footer/provider updates no longer rely only on some later unrelated render call to become visible
+- the current Rust behavior for the migrated slice is now:
+  - live footer/provider updates still flow through the previously added snapshot-binding path
+  - those updates can now also queue a TUI rerender through a thread-safe render handle
+  - the queued rerender is drained through the existing Rust terminal-event bridge, matching the broader queued-callback architecture already used in `pi-tui`
+- `StartupShellComponent` now exposes a live footer binding path that wires both parts together:
+  - provider snapshot updates
+  - queued TUI redraw requests
+- this gives Rust the first end-to-end live footer update loop for the migrated subset:
+  - provider `set_cwd(...)`
+  - footer snapshot callback
+  - queued render request
+  - `Tui::drain_terminal_events()`
+  - updated rendered footer output
+
+Compatibility note for this slice:
+- redraw requests are still processed through the Rust queued-event/drain path, not immediately on callback, so the exact mechanics still differ from the full TypeScript runtime event loop
+- this is intentionally aligned with the current Rust `pi-tui` control model and avoids a larger ownership/event-loop redesign in the same milestone
+
+### Rust design summary
+
+Expanded `pi-tui::tui` with:
+- `RenderHandle`
+- `Tui::render_handle()`
+- queued `TerminalEvent::Render` handling in `drain_terminal_events()`
+
+Expanded `pi-coding-agent-tui::FooterComponent` with:
+- `bind_data_provider_with_render_handle(...)`
+- internal bind path that can optionally queue a render on initial bind and subsequent snapshot updates
+
+Expanded `pi-coding-agent-tui::StartupShellComponent` with:
+- `bind_footer_data_provider_with_render_handle(...)`
+
+Design choices for this slice:
+- keep the redraw bridge generic in `pi-tui` rather than making footer-specific code know how to force a render directly
+- reuse the already-existing queued terminal-event architecture instead of adding another asynchronous callback channel just for footer updates
+- keep the previous non-rerender binding methods intact so the migration can still use the shell/footer components in deterministic non-started tests without requiring a live `Tui`
+
+### Validation summary
+
+New Rust coverage added for:
+- `pi-tui` render-handle queueing and rerender processing through `drain_terminal_events()`
+- startup-shell integration proving that a live footer/provider update can queue a TUI rerender and update the rendered footer content without a manual snapshot push
+- existing live footer binding tests and surrounding TUI/startup-shell tests continue to pass
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test tui` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test startup_shell` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive footer/live-update path:
+- redraws still require the existing queued-event drain step; there is no broader immediate runtime event loop integration yet
+- no Rust theme-aware footer styling parity yet
+- no keybound transcript scroll controls yet
+- no Rust multiline editor / custom-editor parity yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates the shell/footer stack
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- use the new render-handle bridge to add the next interactive live-update slice, likely keybound transcript scrolling or another shell/runtime callback path that benefits from queued redraws
+- keep multiline editor parity and broader session/runtime wiring deferred until a few more live interactive control paths are landing on top of the current shell/TUI foundation

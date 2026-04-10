@@ -1,8 +1,57 @@
-use pi_coding_agent_core::FooterDataSnapshot;
+use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
 use pi_coding_agent_tui::{FooterComponent, FooterState};
 use pi_events::Model;
 use pi_tui::{Component, visible_width};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+struct TestDir {
+    path: PathBuf,
+}
+
+impl TestDir {
+    fn new(prefix: &str) -> Self {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()));
+        fs::create_dir_all(&path).expect("failed to create temp dir");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn write_file(path: impl AsRef<Path>, content: &str) {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("failed to create parent dir");
+    }
+    fs::write(path, content).expect("failed to write file");
+}
+
+fn create_plain_repo(temp_dir: &Path, repo_name: &str, branch: &str) -> PathBuf {
+    let repo_dir = temp_dir.join(repo_name);
+    fs::create_dir_all(repo_dir.join(".git")).expect("failed to create repo .git dir");
+    write_file(
+        repo_dir.join(".git/HEAD"),
+        &format!("ref: refs/heads/{branch}\n"),
+    );
+    repo_dir
+}
 
 fn model(id: &str, provider: &str, reasoning: bool) -> Model {
     Model {
@@ -88,7 +137,7 @@ fn footer_can_apply_core_data_snapshot_without_losing_session_fields() {
         extension_statuses,
     };
 
-    let mut footer = FooterComponent::new(FooterState {
+    let footer = FooterComponent::new(FooterState {
         model: Some(model("gpt-5", "openai", true)),
         thinking_level: "high".to_owned(),
         usage_input: 12_345,
@@ -107,4 +156,41 @@ fn footer_can_apply_core_data_snapshot_without_losing_session_fields() {
     assert!(lines[0].contains("/tmp/project (main)"));
     assert!(lines[1].contains("(openai) gpt-5 • high"));
     assert_eq!(lines[2], "status one");
+}
+
+#[test]
+fn footer_can_bind_live_data_provider_and_refresh_on_cwd_change() {
+    let temp_dir = TestDir::new("footer-component");
+    let first_repo = create_plain_repo(temp_dir.path(), "first", "main");
+    let second_repo = create_plain_repo(temp_dir.path(), "second", "feature");
+    let provider = FooterDataProvider::new(&first_repo);
+    let footer = FooterComponent::new(FooterState {
+        model: Some(model("gpt-5", "openai", true)),
+        thinking_level: "high".to_owned(),
+        context_window: 200_000,
+        context_percent: Some(12.3),
+        ..FooterState::default()
+    });
+
+    footer.bind_data_provider(&provider);
+    let initial_lines = footer.render(80);
+    assert!(
+        initial_lines
+            .iter()
+            .any(|line| line.contains("first (main)"))
+    );
+
+    provider.set_cwd(&second_repo);
+    let updated_lines = footer.render(80);
+
+    assert!(
+        updated_lines
+            .iter()
+            .any(|line| line.contains("second (feature)"))
+    );
+    assert!(
+        updated_lines
+            .iter()
+            .any(|line| line.contains("gpt-5 • high"))
+    );
 }

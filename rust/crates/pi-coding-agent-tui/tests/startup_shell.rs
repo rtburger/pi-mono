@@ -1,4 +1,4 @@
-use pi_coding_agent_core::FooterDataSnapshot;
+use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
 use pi_coding_agent_tui::{
     FooterState, KeyId, KeybindingsManager, PlainKeyHintStyler, StartupShellComponent,
 };
@@ -6,12 +6,79 @@ use pi_events::Model;
 use pi_tui::{Component, Terminal, Text, Tui, TuiError, visible_width};
 use std::{
     collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+struct TestDir {
+    path: PathBuf,
+}
+
+impl TestDir {
+    fn new(prefix: &str) -> Self {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()));
+        fs::create_dir_all(&path).expect("failed to create temp dir");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn write_file(path: impl AsRef<Path>, content: &str) {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("failed to create parent dir");
+    }
+    fs::write(path, content).expect("failed to write file");
+}
+
+fn create_plain_repo(temp_dir: &Path, repo_name: &str, branch: &str) -> PathBuf {
+    let repo_dir = temp_dir.join(repo_name);
+    fs::create_dir_all(repo_dir.join(".git")).expect("failed to create repo .git dir");
+    write_file(
+        repo_dir.join(".git/HEAD"),
+        &format!("ref: refs/heads/{branch}\n"),
+    );
+    repo_dir
+}
 
 #[derive(Default)]
 struct NoopTerminal;
+
+#[derive(Clone)]
+struct RecordingTerminal {
+    writes: Arc<Mutex<Vec<String>>>,
+}
+
+impl RecordingTerminal {
+    fn new() -> Self {
+        Self {
+            writes: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn write_count(&self) -> usize {
+        self.writes.lock().expect("writes mutex poisoned").len()
+    }
+
+    fn writes(&self) -> Vec<String> {
+        self.writes.lock().expect("writes mutex poisoned").clone()
+    }
+}
 
 impl Terminal for NoopTerminal {
     fn start(
@@ -40,6 +107,72 @@ impl Terminal for NoopTerminal {
 
     fn rows(&self) -> u16 {
         24
+    }
+
+    fn kitty_protocol_active(&self) -> bool {
+        false
+    }
+
+    fn move_by(&mut self, _lines: i32) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn show_cursor(&mut self) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn clear_line(&mut self) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn clear_from_cursor(&mut self) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn clear_screen(&mut self) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn set_title(&mut self, _title: &str) -> Result<(), TuiError> {
+        Ok(())
+    }
+}
+
+impl Terminal for RecordingTerminal {
+    fn start(
+        &mut self,
+        _on_input: Box<dyn FnMut(String) + Send>,
+        _on_resize: Box<dyn FnMut() + Send>,
+    ) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn drain_input(&mut self, _max: Duration, _idle: Duration) -> Result<(), TuiError> {
+        Ok(())
+    }
+
+    fn write(&mut self, data: &str) -> Result<(), TuiError> {
+        self.writes
+            .lock()
+            .expect("writes mutex poisoned")
+            .push(data.to_owned());
+        Ok(())
+    }
+
+    fn columns(&self) -> u16 {
+        120
+    }
+
+    fn rows(&self) -> u16 {
+        6
     }
 
     fn kitty_protocol_active(&self) -> bool {
@@ -442,6 +575,105 @@ fn startup_shell_can_apply_footer_data_snapshot_without_overwriting_session_foot
             .any(|line| line.contains("(openai) gpt-5 • high"))
     );
     assert!(lines.iter().any(|line| line.contains("status one")));
+}
+
+#[test]
+fn startup_shell_can_bind_live_footer_data_provider_without_manual_snapshot_push() {
+    let temp_dir = TestDir::new("startup-shell-footer");
+    let first_repo = create_plain_repo(temp_dir.path(), "first", "main");
+    let second_repo = create_plain_repo(temp_dir.path(), "second", "feature");
+    let provider = FooterDataProvider::new(&first_repo);
+
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_footer_state(FooterState {
+        model: Some(model("gpt-5", "openai", true)),
+        thinking_level: "high".to_owned(),
+        context_window: 200_000,
+        context_percent: Some(12.3),
+        ..FooterState::default()
+    });
+    shell.bind_footer_data_provider(&provider);
+    shell.set_viewport_size(120, 6);
+
+    let initial_lines = shell.render(120);
+    assert!(
+        initial_lines
+            .iter()
+            .any(|line| line.contains("first (main)"))
+    );
+
+    provider.set_cwd(&second_repo);
+    let updated_lines = shell.render(120);
+
+    assert!(
+        updated_lines
+            .iter()
+            .any(|line| line.contains("second (feature)"))
+    );
+    assert!(
+        updated_lines
+            .iter()
+            .any(|line| line.contains("gpt-5 • high"))
+    );
+}
+
+#[test]
+fn startup_shell_live_footer_binding_can_queue_tui_rerenders() {
+    let temp_dir = TestDir::new("startup-shell-live-footer-rerender");
+    let first_repo = create_plain_repo(temp_dir.path(), "first", "main");
+    let second_repo = create_plain_repo(temp_dir.path(), "second", "feature");
+    let provider = FooterDataProvider::new(&first_repo);
+
+    let terminal = RecordingTerminal::new();
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    let render_handle = tui.render_handle();
+
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_footer_state(FooterState {
+        model: Some(model("gpt-5", "openai", true)),
+        thinking_level: "high".to_owned(),
+        context_window: 200_000,
+        context_percent: Some(12.3),
+        ..FooterState::default()
+    });
+    shell.bind_footer_data_provider_with_render_handle(&provider, render_handle);
+
+    let shell_id = tui.add_child(Box::new(shell));
+    assert!(tui.set_focus_child(shell_id));
+    tui.start().expect("start should succeed");
+    tui.drain_terminal_events()
+        .expect("initial queued footer render should drain successfully");
+    let writes_before = inspector.write_count();
+
+    provider.set_cwd(&second_repo);
+    tui.drain_terminal_events()
+        .expect("queued footer rerender should drain successfully");
+
+    assert!(inspector.write_count() > writes_before);
+    assert!(!inspector.writes().is_empty());
+    let lines = tui.render_current();
+    assert!(lines.iter().any(|line| line.contains("second (feature)")));
+
+    tui.stop().expect("stop should succeed");
 }
 
 #[test]

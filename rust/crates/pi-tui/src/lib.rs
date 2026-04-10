@@ -32,7 +32,8 @@ pub use text::Text;
 pub use truncated_text::TruncatedText;
 pub use tui::{
     CURSOR_MARKER, Component, ComponentId, Container, InputListenerId, InputListenerResult,
-    OverlayAnchor, OverlayHandle, OverlayId, OverlayMargin, OverlayOptions, SizeValue, Tui,
+    OverlayAnchor, OverlayHandle, OverlayId, OverlayMargin, OverlayOptions, RenderHandle,
+    SizeValue, Tui,
 };
 pub use utils::{
     AnsiCode, ExtractSegmentsResult, SliceWithWidthResult, extract_ansi_code, extract_segments,

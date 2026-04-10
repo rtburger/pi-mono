@@ -2,8 +2,12 @@ use pi_coding_agent_core::FooterDataProvider;
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 struct TestDir {
@@ -79,6 +83,19 @@ fn create_reftable_worktree(temp_dir: &Path) -> (PathBuf, PathBuf) {
     (worktree_dir, reftable_dir)
 }
 
+fn wait_for<F>(timeout: Duration, mut condition: F)
+where
+    F: FnMut() -> bool,
+{
+    let started_at = SystemTime::now();
+    while !condition() {
+        if started_at.elapsed().expect("time went backwards") > timeout {
+            panic!("timed out waiting for condition");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -112,6 +129,11 @@ impl Drop for PathGuard {
 }
 
 #[cfg(unix)]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace("'", "'\"'\"'"))
+}
+
+#[cfg(unix)]
 fn install_fake_git(bin_dir: &Path, branch: Option<&str>) {
     use std::os::unix::fs::PermissionsExt;
 
@@ -128,6 +150,39 @@ fn install_fake_git(bin_dir: &Path, branch: Option<&str>) {
         .permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&path, permissions).expect("failed to chmod fake git");
+}
+
+#[cfg(unix)]
+fn install_recording_fake_git(bin_dir: &Path, branch_file: &Path, log_file: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let branch_file = shell_quote(&branch_file.display().to_string());
+    let log_file = shell_quote(&log_file.display().to_string());
+    let body = format!(
+        "#!/bin/sh\nprintf '1\\n' >> {log_file}\nif [ \"$1\" = \"--no-optional-locks\" ] && [ \"$2\" = \"symbolic-ref\" ] && [ \"$3\" = \"--quiet\" ] && [ \"$4\" = \"--short\" ] && [ \"$5\" = \"HEAD\" ]; then\n  if [ -f {branch_file} ]; then\n    IFS= read -r branch < {branch_file} || branch=\"\"\n  else\n    branch=\"\"\n  fi\n  if [ -n \"$branch\" ]; then\n    printf '%s\\n' \"$branch\"\n    exit 0\n  fi\nfi\nexit 1\n"
+    );
+    let path = bin_dir.join("git");
+    write_file(&path, &body);
+    let mut permissions = fs::metadata(&path)
+        .expect("failed to stat fake git")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).expect("failed to chmod fake git");
+}
+
+#[cfg(unix)]
+fn set_recording_git_branch(branch_file: &Path, branch: Option<&str>) {
+    match branch {
+        Some(branch) => write_file(branch_file, &format!("{branch}\n")),
+        None => write_file(branch_file, ""),
+    }
+}
+
+#[cfg(unix)]
+fn read_recording_git_call_count(log_file: &Path) -> usize {
+    fs::read_to_string(log_file)
+        .map(|content| content.lines().count())
+        .unwrap_or(0)
 }
 
 #[test]
@@ -200,7 +255,7 @@ fn set_cwd_switches_the_repo_used_for_branch_detection() {
     let first_repo = create_plain_repo(&first_root, "main");
     let second_repo = create_plain_repo(&second_root, "feature");
 
-    let mut provider = FooterDataProvider::new(first_repo.join("src"));
+    let provider = FooterDataProvider::new(first_repo.join("src"));
     fs::create_dir_all(provider.cwd()).expect("failed to create first nested cwd");
     assert_eq!(provider.get_git_branch().as_deref(), Some("main"));
 
@@ -211,11 +266,133 @@ fn set_cwd_switches_the_repo_used_for_branch_detection() {
     assert_eq!(provider.get_git_branch().as_deref(), Some("feature"));
 }
 
+#[cfg(unix)]
+#[test]
+fn set_cwd_notifies_branch_change_listeners() {
+    let _env_guard = env_lock().lock().expect("env lock poisoned");
+    let _path_guard = PathGuard::clear();
+    let temp_dir = TestDir::new("footer-data-provider");
+    let first_root = temp_dir.path().join("first");
+    let second_root = temp_dir.path().join("second");
+    let first_repo = create_plain_repo(&first_root, "main");
+    let second_repo = create_plain_repo(&second_root, "feature");
+    let provider = FooterDataProvider::new(&first_repo);
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let notifications_for_callback = Arc::clone(&notifications);
+    let _subscription = provider.on_branch_change(move || {
+        notifications_for_callback.fetch_add(1, Ordering::SeqCst);
+    });
+
+    provider.set_cwd(&second_repo);
+
+    wait_for(Duration::from_secs(1), || {
+        notifications.load(Ordering::SeqCst) == 1
+    });
+    assert_eq!(provider.get_git_branch().as_deref(), Some("feature"));
+}
+
+#[cfg(unix)]
+#[test]
+fn reftable_updates_that_keep_same_branch_do_not_notify_listeners() {
+    let _env_guard = env_lock().lock().expect("env lock poisoned");
+    let temp_dir = TestDir::new("footer-data-provider");
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create bin dir");
+    let branch_file = temp_dir.path().join("branch.txt");
+    let log_file = temp_dir.path().join("git.log");
+    install_recording_fake_git(&bin_dir, &branch_file, &log_file);
+    set_recording_git_branch(&branch_file, Some("main"));
+    let _path_guard = PathGuard::set(&bin_dir);
+    let (worktree_dir, reftable_dir) = create_reftable_worktree(temp_dir.path());
+    let provider = FooterDataProvider::new(&worktree_dir);
+    assert_eq!(provider.get_git_branch().as_deref(), Some("main"));
+    write_file(&log_file, "");
+
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let notifications_for_callback = Arc::clone(&notifications);
+    let _subscription = provider.on_branch_change(move || {
+        notifications_for_callback.fetch_add(1, Ordering::SeqCst);
+    });
+
+    write_file(reftable_dir.join("tables.list"), "1\n");
+    wait_for(Duration::from_secs(3), || {
+        read_recording_git_call_count(&log_file) == 1
+    });
+    thread::sleep(Duration::from_millis(650));
+
+    assert_eq!(read_recording_git_call_count(&log_file), 1);
+    assert_eq!(provider.get_git_branch().as_deref(), Some("main"));
+    assert_eq!(notifications.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn rapid_reftable_updates_debounce_to_single_refresh() {
+    let _env_guard = env_lock().lock().expect("env lock poisoned");
+    let temp_dir = TestDir::new("footer-data-provider");
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create bin dir");
+    let branch_file = temp_dir.path().join("branch.txt");
+    let log_file = temp_dir.path().join("git.log");
+    install_recording_fake_git(&bin_dir, &branch_file, &log_file);
+    set_recording_git_branch(&branch_file, Some("main"));
+    let _path_guard = PathGuard::set(&bin_dir);
+    let (worktree_dir, reftable_dir) = create_reftable_worktree(temp_dir.path());
+    let provider = FooterDataProvider::new(&worktree_dir);
+    assert_eq!(provider.get_git_branch().as_deref(), Some("main"));
+    write_file(&log_file, "");
+
+    write_file(reftable_dir.join("tables.list"), "1\n");
+    write_file(reftable_dir.join("tables.list"), "2\n");
+    write_file(reftable_dir.join("tables.list"), "3\n");
+
+    wait_for(Duration::from_secs(3), || {
+        read_recording_git_call_count(&log_file) == 1
+    });
+    thread::sleep(Duration::from_millis(650));
+
+    assert_eq!(read_recording_git_call_count(&log_file), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn reftable_updates_refresh_the_cached_branch_and_notify_listeners() {
+    let _env_guard = env_lock().lock().expect("env lock poisoned");
+    let temp_dir = TestDir::new("footer-data-provider");
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create bin dir");
+    let branch_file = temp_dir.path().join("branch.txt");
+    let log_file = temp_dir.path().join("git.log");
+    install_recording_fake_git(&bin_dir, &branch_file, &log_file);
+    set_recording_git_branch(&branch_file, Some("main"));
+    let _path_guard = PathGuard::set(&bin_dir);
+    let (worktree_dir, reftable_dir) = create_reftable_worktree(temp_dir.path());
+    let provider = FooterDataProvider::new(&worktree_dir);
+    assert_eq!(provider.get_git_branch().as_deref(), Some("main"));
+    write_file(&log_file, "");
+
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let notifications_for_callback = Arc::clone(&notifications);
+    let _subscription = provider.on_branch_change(move || {
+        notifications_for_callback.fetch_add(1, Ordering::SeqCst);
+    });
+
+    set_recording_git_branch(&branch_file, Some("foo"));
+    write_file(reftable_dir.join("tables.list"), "1\n");
+
+    wait_for(Duration::from_secs(3), || {
+        provider.get_git_branch().as_deref() == Some("foo")
+    });
+
+    assert_eq!(read_recording_git_call_count(&log_file), 1);
+    assert_eq!(notifications.load(Ordering::SeqCst), 1);
+}
+
 #[test]
 fn snapshot_carries_extension_statuses_and_provider_count() {
     let temp_dir = TestDir::new("footer-data-provider");
     let repo_dir = create_plain_repo(temp_dir.path(), "main");
-    let mut provider = FooterDataProvider::new(&repo_dir);
+    let provider = FooterDataProvider::new(&repo_dir);
     provider.set_extension_status("z-last", Some("status\ttwo".to_owned()));
     provider.set_extension_status("a-first", Some("status\none".to_owned()));
     provider.set_available_provider_count(2);

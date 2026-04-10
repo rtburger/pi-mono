@@ -16,7 +16,7 @@ pub use bootstrap::{
     BootstrapDiagnostic, BootstrapDiagnosticLevel, ExistingSessionSelection,
     SessionBootstrapOptions, SessionBootstrapResult, bootstrap_session,
 };
-pub use footer_data::{FooterDataProvider, FooterDataSnapshot};
+pub use footer_data::{BranchChangeSubscription, FooterDataProvider, FooterDataSnapshot};
 pub use messages::{
     BLOCKED_IMAGE_PLACEHOLDER, BRANCH_SUMMARY_PREFIX, BRANCH_SUMMARY_SUFFIX, BashExecutionMessage,
     BranchSummaryMessage, COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX,

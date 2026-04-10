@@ -1001,3 +1001,24 @@ fn start_and_request_render_write_a_full_frame_to_terminal() {
     assert_eq!(inspector.stopped(), 1);
     assert!(!inspector.cursor_hidden());
 }
+
+#[test]
+fn render_handle_queues_rerender_until_terminal_events_are_drained() {
+    let terminal = MockTerminal::new(20, 5);
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    tui.add_child(Box::new(StaticComponent::new(["hello", "world"])));
+    let render_handle = tui.render_handle();
+
+    tui.start().expect("start should succeed");
+    let writes_before = inspector.writes().len();
+
+    render_handle.request_render();
+
+    assert_eq!(inspector.writes().len(), writes_before);
+    tui.drain_terminal_events()
+        .expect("queued render request should drain successfully");
+    assert!(inspector.writes().len() > writes_before);
+
+    tui.stop().expect("stop should succeed");
+}
