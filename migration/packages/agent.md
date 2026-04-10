@@ -1,6 +1,6 @@
 # packages/agent migration inventory
 
-Status: milestone 8 scaffold + minimal loop/state slice + minimal Agent wrapper slice + sequential tool execution + tool prepare/before/after hook slice + steering/follow-up queue slice + queue mode configuration slice + custom-message/convert/transform slice + tool progress update slice
+Status: milestone 10 adds narrowed tool-argument validation/coercion parity plus proxy-stream reconstruction and HTTP proxy-client support on top of the existing loop/state/wrapper/tool/queue slices
 Target crate: `rust/crates/pi-agent`
 
 ## 1. Files analyzed
@@ -217,3 +217,197 @@ Milestone 8 validation target:
 ## 12. Recommended follow-up after this milestone
 
 Next increment should stay on `packages/agent` and add JSON-schema validation parity, or begin the first `packages/coding-agent` core integration layer on top of the now-more-complete `pi-agent` API.
+
+## Milestone 9 update: narrowed tool-argument validation + coercion slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/agent/src/agent-loop.ts`
+- `packages/ai/src/utils/validation.ts`
+- `packages/ai/test/validation.test.ts`
+- previously grounded `packages/agent/test/agent-loop.test.ts`
+- previously grounded `packages/agent/test/e2e.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-agent/src/lib.rs`
+- `rust/crates/pi-agent/src/loop.rs`
+- `rust/crates/pi-agent/src/tool.rs`
+- `rust/crates/pi-agent/tests/agent_loop.rs`
+- `rust/crates/pi-agent/Cargo.toml`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- tool-call argument validation now runs after `prepare_arguments(...)` and before `before_tool_call(...)`, matching the TypeScript `agent-loop.ts` ordering through `validateToolArguments(...)`
+- narrowed JSON-schema validation now exists for the Rust agent tool path across the schema features exercised by the current migrated tools/tests:
+  - object schemas with `properties` + `required`
+  - array item validation
+  - primitive type checks for `string`, `number`, `integer`, `boolean`, and `null`
+- narrowed AJV-style coercion now exists for the high-value migrated cases:
+  - string -> integer
+  - string -> number
+  - string -> boolean
+  - number/bool -> string
+- validation failures now stay inside the normal agent loop protocol instead of surfacing as uncaught Rust errors:
+  - `tool_execution_end` emits `is_error: true`
+  - a tool-result message is still emitted with the formatted validation error text
+  - the turn then continues normally
+- before-hook mutation behavior remains intentionally unchanged after validation:
+  - validated arguments are shared into `before_tool_call(...)`
+  - hook mutations are not revalidated, matching the current TypeScript behavior
+
+Compatibility note for this slice:
+- this is a narrowed Rust validation slice, not full AJV parity
+- unsupported JSON-schema keywords still pass through without enforcement today
+- the migrated coercion/error formatting now covers the concrete schema shapes used by the current Rust agent/coding-agent tool surface and the TypeScript validation helper shape, without trying to port every AJV feature at once
+
+### Rust design summary
+
+New internal Rust module added:
+- `rust/crates/pi-agent/src/validation.rs`
+
+New internal validation surface:
+- `validate_tool_arguments(tool, arguments)`
+- recursive schema validation/coercion helpers over `serde_json::Value`
+- TS-shaped formatted error messages for tool validation failures
+
+Integration change:
+- `rust/crates/pi-agent/src/loop.rs`
+  - tool-call preparation now runs:
+    1. `prepare_arguments(...)`
+    2. `validate_tool_arguments(...)`
+    3. `before_tool_call(...)`
+  - validation failures now materialize as immediate error tool results inside the normal event stream
+
+Behavior-freeze coverage added in Rust:
+- unit tests in `validation.rs` for:
+  - root required-property formatting
+  - nested array-path formatting
+  - integer coercion from string input
+- integration tests in `rust/crates/pi-agent/tests/agent_loop.rs` for:
+  - validation failures becoming error tool results
+  - string-number coercion before tool execution
+
+### Validation summary
+
+New Rust coverage added for:
+- formatted validation failure text matching the current TS helper shape
+- nested array/object validation path formatting
+- integer coercion before tool execution
+- validation errors flowing through tool-result messages instead of aborting the loop
+- existing prepare/before-hook regression still proving there is no revalidation after hook mutation
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-agent` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-agent`:
+- full AJV/json-schema keyword parity beyond the currently exercised schema subset
+- proxy stream reconstruction parity for `packages/agent/src/proxy.ts`
+- broader wrapper/property-surface parity with the TypeScript `Agent` class
+- explicit re-grounding of agent-level parallel tool-execution semantics in the migration note now that the Rust implementation already supports the current narrowed parallel path
+
+## Milestone 10 update: proxy-stream reconstruction + HTTP proxy client slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/agent/src/proxy.ts`
+- `packages/agent/README.md` (proxy usage section)
+- previously grounded `packages/ai/src/types.ts` for camelCase wire-shape alignment
+
+Additional Rust files read for this slice:
+- `rust/Cargo.toml`
+- `rust/crates/pi-ai/src/lib.rs`
+- `rust/crates/pi-agent/src/lib.rs`
+- `rust/crates/pi-agent/Cargo.toml`
+- `rust/crates/pi-events/src/lib.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- `pi-agent` now has a proxy-stream helper corresponding to `packages/agent/src/proxy.ts`
+- Rust now supports browser-style backend proxy streaming through HTTP POST to `<proxyUrl>/api/stream` with:
+  - bearer auth via `Authorization: Bearer <token>`
+  - JSON request body containing model/context/options
+  - SSE response parsing from `data: ...` lines
+- Rust now reconstructs normalized assistant partials from proxy events that omit the `partial` payload, matching the TS bandwidth-saving design:
+  - `start`
+  - `text_start` / `text_delta` / `text_end`
+  - `thinking_start` / `thinking_delta` / `thinking_end`
+  - `toolcall_start` / `toolcall_delta` / `toolcall_end`
+  - terminal `done` / `error`
+- proxy request serialization now uses the TS camelCase wire shape instead of raw Rust struct serialization for the migrated slice, including:
+  - `baseUrl`
+  - `contextWindow`
+  - `maxTokens`
+  - `systemPrompt`
+  - `responseId`
+  - `stopReason`
+  - `toolCallId`
+  - `toolName`
+  - `isError`
+  - `mimeType`
+- proxy response usage payloads now deserialize from the TS camelCase wire shape into Rust `pi_events::Usage`
+- proxy error handling now follows the current TS behavior closely:
+  - non-2xx HTTP responses become terminal assistant `error` events
+  - JSON error bodies with `{ error: ... }` become `Proxy error: <message>`
+  - request/read/JSON failures become terminal assistant `error` events
+  - pre-aborted requests become terminal assistant `aborted` events with `Request aborted by user`
+
+Compatibility note for this slice:
+- the Rust proxy request body can only serialize the model/context fields present in the current Rust `pi_events` types, so TS-only metadata not yet represented there cannot be forwarded yet
+- partial tool-argument parsing is intentionally narrowed: Rust updates streamed tool-call arguments when the accumulated JSON becomes valid, and guarantees final tool-call arguments on `toolcall_end`; it does not yet port TS `partial-json` permissiveness for every incomplete intermediate shape
+
+### Rust design summary
+
+New Rust module added:
+- `rust/crates/pi-agent/src/proxy.rs`
+
+New public Rust surface:
+- `ProxyStreamConfig`
+- `ProxyStreamer`
+- `stream_proxy(...)`
+
+Design choices for this slice:
+- `ProxyStreamer` implements the existing `AssistantStreamer` trait so it can plug directly into the current Rust `Agent` / `AgentLoopConfig` integration points
+- `stream_proxy(...)` remains available as the lower-level helper corresponding to the TS public API
+- request/response wire-shape conversion is kept local to `proxy.rs` rather than widening `pi-events` serialization rules for every crate
+- proxy failures are encoded as terminal assistant `error` / `aborted` events inside the returned stream, matching the TS contract that stream functions should not throw normal request/runtime failures
+
+Behavior-freeze coverage added in Rust:
+- unit tests in `proxy.rs` for:
+  - camelCase request body shaping
+  - proxy event reconstruction for streamed tool calls and usage
+  - assistant/tool-result camelCase request field names
+- integration tests in `rust/crates/pi-agent/tests/proxy.rs` for:
+  - end-to-end HTTP proxy request/response behavior
+  - non-2xx JSON error mapping
+  - pre-aborted request behavior
+
+### Validation summary
+
+New Rust coverage added for:
+- end-to-end proxy POST body camelCase compatibility
+- reconstruction of text/tool-call/done event sequences from stripped proxy events
+- terminal usage propagation from camelCase proxy payloads into Rust `Usage`
+- JSON proxy error body mapping to terminal assistant error events
+- abort-before-request behavior without a network dependency
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-agent` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-agent`:
+- fuller intermediate partial-JSON tool-argument reconstruction parity with TS `partial-json`
+- broader wrapper/property-surface parity with the TypeScript `Agent` class
+- explicit re-grounding of agent-level parallel tool-execution semantics in the migration note now that the Rust implementation already supports the current narrowed parallel path

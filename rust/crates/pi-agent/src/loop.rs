@@ -1,6 +1,6 @@
 use crate::{
     AgentMessage, AgentTool, AgentToolResult, error::AgentError, state::AgentContext,
-    tool::AgentToolError,
+    tool::AgentToolError, validation::validate_tool_arguments,
 };
 use async_stream::{stream, try_stream};
 use futures::{Stream, StreamExt};
@@ -475,7 +475,41 @@ fn run_loop(
 
                         let prepared_args =
                             prepare_tool_arguments(&context.tools, &tool_name, raw_args.clone());
-                        let shared_args = Arc::new(Mutex::new(prepared_args));
+                        let validated_args = match validate_prepared_tool_arguments(
+                            &context.tools,
+                            &tool_name,
+                            prepared_args,
+                        ) {
+                            Ok(validated_args) => validated_args,
+                            Err(error) => {
+                                let result = error_tool_result(tool_error_message(&error));
+                                yield AgentEvent::ToolExecutionEnd {
+                                    tool_call_id: tool_call_id.clone(),
+                                    tool_name: tool_name.clone(),
+                                    result: result.clone(),
+                                    is_error: true,
+                                };
+
+                                let tool_result = build_tool_result_message(
+                                    tool_call_id.clone(),
+                                    tool_name.clone(),
+                                    result,
+                                    true,
+                                );
+                                let tool_result_message = tool_result_to_agent_message(&tool_result);
+                                yield AgentEvent::MessageStart {
+                                    message: tool_result_message.clone(),
+                                };
+                                yield AgentEvent::MessageEnd {
+                                    message: tool_result_message.clone(),
+                                };
+
+                                tool_results.push(tool_result);
+                                tool_result_messages.push(tool_result_message);
+                                continue;
+                            }
+                        };
+                        let shared_args = Arc::new(Mutex::new(validated_args));
 
                         let (result, is_error) = if let Some(blocked_result) = run_before_tool_call(
                             &config,
@@ -631,6 +665,18 @@ fn prepare_tool_arguments(tools: &[AgentTool], tool_name: &str, raw_args: Value)
         .find(|tool| tool.definition.name == tool_name)
         .map(|tool| tool.prepare_arguments(raw_args.clone()))
         .unwrap_or(raw_args)
+}
+
+fn validate_prepared_tool_arguments(
+    tools: &[AgentTool],
+    tool_name: &str,
+    prepared_args: Value,
+) -> Result<Value, AgentToolError> {
+    tools
+        .iter()
+        .find(|tool| tool.definition.name == tool_name)
+        .map(|tool| validate_tool_arguments(tool, prepared_args.clone()))
+        .unwrap_or(Ok(prepared_args))
 }
 
 async fn get_pending_messages(source: &Option<MessageQueueHook>) -> Vec<AgentMessage> {

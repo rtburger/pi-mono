@@ -698,6 +698,140 @@ async fn prepares_arguments_and_allows_before_hook_mutation_without_revalidation
 }
 
 #[tokio::test]
+async fn validation_failures_become_error_tool_results() {
+    let mut context = AgentContext::new("You are helpful.");
+    context.tools.push(echo_tool());
+
+    let streamer = Arc::new(ScriptedStreamer::new(vec![
+        vec![Ok(AssistantEvent::Done {
+            reason: StopReason::ToolUse,
+            message: assistant_tool_call_message("tool-1", "echo", serde_json::Map::new(), 20),
+        })],
+        vec![Ok(AssistantEvent::Done {
+            reason: StopReason::Stop,
+            message: assistant_message("done", StopReason::Stop, 30),
+        })],
+    ])) as Arc<dyn AssistantStreamer>;
+
+    let stream = agent_loop(
+        vec![user_message("run tool", 10).into()],
+        context,
+        AgentLoopConfig::new(model()).with_streamer(streamer),
+    );
+
+    let events = collect_events(stream).await.unwrap();
+    let tool_end = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolExecutionEnd {
+                result, is_error, ..
+            } => Some((result.clone(), *is_error)),
+            _ => None,
+        })
+        .expect("expected tool execution end event");
+
+    assert!(tool_end.1);
+    let error_text = tool_end
+        .0
+        .content
+        .iter()
+        .find_map(|content| match content {
+            UserContent::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .expect("expected validation error text");
+    assert!(error_text.contains("Validation failed for tool \"echo\""));
+    assert!(error_text.contains("value: must have required property 'value'"));
+    assert!(error_text.contains("Received arguments:\n{}"));
+
+    let messages = final_messages(&events);
+    assert_eq!(messages.len(), 4);
+    assert!(is_standard_tool_result_message(&messages[2]));
+    assert!(is_standard_assistant_message(&messages[3]));
+}
+
+#[tokio::test]
+async fn validation_coerces_string_numbers_before_tool_execution() {
+    let executed_args = Arc::new(Mutex::new(Vec::new()));
+    let tool = AgentTool::new(
+        ToolDefinition {
+            name: "counter".into(),
+            description: "Count things".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "count": { "type": "integer" }
+                },
+                "required": ["count"]
+            }),
+        },
+        {
+            let executed_args = executed_args.clone();
+            move |_tool_call_id, args, _signal| {
+                let executed_args = executed_args.clone();
+                async move {
+                    executed_args.lock().unwrap().push(args.clone());
+                    Ok(AgentToolResult {
+                        content: vec![UserContent::Text {
+                            text: format!("counted: {}", args["count"]),
+                        }],
+                        details: args,
+                    })
+                }
+            }
+        },
+    );
+
+    let mut context = AgentContext::new("You are helpful.");
+    context.tools.push(tool);
+
+    let streamer = Arc::new(ScriptedStreamer::new(vec![
+        vec![Ok(AssistantEvent::Done {
+            reason: StopReason::ToolUse,
+            message: assistant_tool_call_message(
+                "tool-1",
+                "counter",
+                serde_json::Map::from_iter([(String::from("count"), Value::String("42".into()))]),
+                20,
+            ),
+        })],
+        vec![Ok(AssistantEvent::Done {
+            reason: StopReason::Stop,
+            message: assistant_message("done", StopReason::Stop, 30),
+        })],
+    ])) as Arc<dyn AssistantStreamer>;
+
+    let stream = agent_loop(
+        vec![user_message("run tool", 10).into()],
+        context,
+        AgentLoopConfig::new(model()).with_streamer(streamer),
+    );
+
+    let events = collect_events(stream).await.unwrap();
+    assert_eq!(
+        executed_args.lock().unwrap().clone(),
+        vec![json!({ "count": 42 })]
+    );
+
+    let tool_end = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolExecutionEnd {
+                result, is_error, ..
+            } => Some((result.clone(), *is_error)),
+            _ => None,
+        })
+        .expect("expected tool execution end event");
+    assert!(!tool_end.1);
+    assert_eq!(
+        tool_end.0.content,
+        vec![UserContent::Text {
+            text: String::from("counted: 42"),
+        }]
+    );
+}
+
+#[tokio::test]
 async fn after_hook_can_override_tool_result_fields() {
     let mut context = AgentContext::new("You are helpful.");
     context.tools.push(AgentTool::new(
