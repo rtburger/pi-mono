@@ -3568,3 +3568,185 @@ Still deferred for the coding-agent interactive footer/live-update path:
 Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
 - use the new render-handle bridge to add the next interactive live-update slice, likely keybound transcript scrolling or another shell/runtime callback path that benefits from queued redraws
 - keep multiline editor parity and broader session/runtime wiring deferred until a few more live interactive control paths are landing on top of the current shell/TUI foundation
+
+## Milestone 49 update: startup-shell page-scroll + app-action routing slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (hotkeys/help text and key-handler sections)
+- `packages/coding-agent/src/core/keybindings.ts`
+- `packages/tui/src/components/editor.ts` (page-scroll behavior grounding)
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/src/transcript.rs`
+- `rust/crates/pi-coding-agent-tui/src/keybindings.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+- validation-related runner test grounding also reviewed after a parallel test collision surfaced:
+  - `rust/crates/pi-coding-agent-cli/tests/runner.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `StartupShellComponent` now has the first keybound transcript scroll controls for the migrated interactive shell slice
+- the Rust shell now consumes configured `tui.editor.pageUp` / `tui.editor.pageDown` bindings and scrolls the transcript by the currently visible transcript page size while preserving the prompt/footer budget
+- page-scroll behavior is now grounded in the existing shell layout rather than hardcoded line counts, so the scroll amount follows the actual transcript viewport remaining after header/pending/prompt/footer content
+- the Rust shell now also ports the first app-action routing behavior from TypeScript `CustomEditor`:
+  - `app.interrupt` triggers the shell escape/interrupt callback using the configured app keybinding, not a hardcoded `escape`
+  - `app.clear` and other registered app actions can now intercept input before it reaches the embedded prompt widget
+  - `app.exit` now only fires when the prompt is empty; otherwise the same key falls through to prompt editing behavior, matching the TS `Ctrl+D` rule more closely
+- this closes a prior Rust mismatch where startup-header keybinding hints could show custom app/editor bindings that the shell prompt itself did not yet honor at runtime
+
+Additional test-harness hardening now covered in Rust:
+- `pi-coding-agent-cli` runner tests now generate provider/model/api names with an atomic uniqueness suffix, preventing flaky global-provider-registry collisions during parallel workspace test runs
+
+Current intentional limitation for this slice:
+- transcript scrolling is now keybound, but Rust still does not render a visible scroll indicator or other transcript-scroll status UI yet
+- app-action routing is currently the startup-shell subset only; Rust still does not have the broader multiline/custom-editor parity from the TypeScript interactive mode
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::startup_shell` with:
+- stored coding-agent `KeybindingsManager` for runtime action matching
+- internal helpers for:
+  - transcript viewport-height calculation from shell layout
+  - page-scroll line-count calculation from the current viewport budget
+  - configured keybinding matching
+  - registered app-action dispatch
+- new shell callback/handler surface:
+  - `set_on_exit(...)`
+  - `clear_on_exit()`
+  - `on_action(...)`
+  - `clear_action(...)`
+- `set_on_escape(...)` now binds the shell-level interrupt callback directly instead of relying on the embedded prompt widget’s raw cancel path, which keeps custom `app.interrupt` bindings honest
+
+Test-harness change:
+- `rust/crates/pi-coding-agent-cli/tests/runner.rs`
+  - `unique_name(...)` now uses an atomic counter in addition to the timestamp so parallel tests cannot accidentally reuse the same global provider id
+
+Design choices for this slice:
+- keep transcript page scrolling local to `startup_shell.rs` instead of widening `pi-tui` with a broader shell/navigation abstraction before a real interactive runtime exists
+- keep app-action routing focused on the current TS `CustomEditor` ownership split: shell-level app actions first, then prompt-widget editing fallback
+- fix the runner-test uniqueness issue in place instead of serializing the whole test file, so validation remains representative of the eventual parallel workspace test shape
+
+### Validation summary
+
+New Rust coverage added for:
+- page-up/page-down transcript scrolling by the visible transcript page size
+- configured keybinding overrides for transcript page scrolling
+- configured `app.interrupt` handling through the shell escape callback
+- registered app-action handler execution before prompt editing fallback
+- `app.exit` firing only when the prompt is empty, with non-empty `Ctrl+D` still deleting forward through the prompt widget
+- parallel-safe runner test uniqueness for provider/api/model ids
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test startup_shell` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test -p pi-coding-agent-cli --test runner` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive shell path:
+- no transcript scroll-status indicator or richer transcript navigation controls yet beyond page up/down and the existing programmatic scroll helpers
+- no Rust multiline editor / custom-editor parity yet
+- no Rust inline image rendering parity yet inside transcript widgets
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates the shell/footer stack
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- build the next small interactive-control slice on top of the shell now that footer rerenders, transcript page scrolling, and basic app-action routing all exist; the best next candidate is a visible transcript scroll-status/indicator path or another shell-level action that benefits from the current live-render bridge
+- keep multiline editor parity and broader session/runtime wiring deferred until a few more of these shell-level interactive control paths are frozen in Rust
+
+## Milestone 50 update: startup-shell extension-shortcut + paste-image routing slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (extension-shortcut and clipboard-image handler sections)
+- `packages/coding-agent/src/core/keybindings.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+- existing shell/keybinding grounding kept in scope:
+  - `rust/crates/pi-coding-agent-tui/src/keybindings.rs`
+  - `rust/crates/pi-coding-agent-tui/src/transcript.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `StartupShellComponent` now ports the next app-level input-routing behaviors from TypeScript `CustomEditor`
+- Rust shell input handling now checks extension shortcuts first, before paste-image bindings, app actions, transcript page scrolling, or prompt editing
+- the new Rust extension-shortcut path matches the current TS ownership split for the migrated slice:
+  - a shell-level callback receives raw input data
+  - returning `true` consumes the input immediately
+  - returning `false` allows normal shell/prompt handling to continue
+- the Rust shell now also supports the TypeScript `app.clipboard.pasteImage` action path:
+  - configured paste-image keybindings trigger a dedicated shell callback
+  - the input is consumed even when no callback is installed, matching the TS `onPasteImage?.(); return;` behavior
+  - paste-image routing happens before the embedded prompt widget can treat the same key as ordinary input or another shell action
+- this closes another hint/runtime mismatch in the Rust shell: the startup header can already advertise the paste-image keybinding, and the shell now honors that binding through a dedicated callback path
+
+Current intentional limitation for this slice:
+- this is still the startup-shell subset only; Rust does not yet implement the full TypeScript clipboard-image workflow that writes a temp file and inserts its path into the editor
+- extension shortcuts are still a raw callback surface only; Rust does not yet have the broader extension runtime/registration path from the full interactive mode
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::startup_shell` with:
+- new shell callback surface:
+  - `set_on_paste_image(...)`
+  - `clear_on_paste_image()`
+  - `set_on_extension_shortcut(...)`
+  - `clear_on_extension_shortcut()`
+- internal callback storage for:
+  - shell-level paste-image action handling
+  - shell-level extension-shortcut interception
+- updated `handle_input(...)` ordering to match the current TypeScript `CustomEditor` shape more closely:
+  - extension shortcut interception first
+  - paste-image binding next
+  - then transcript page scrolling / app actions / prompt editing fallback
+
+Design choices for this slice:
+- keep this routing logic local to `startup_shell.rs` instead of introducing a wider interactive runtime/extension layer before the shell-level behavior is frozen
+- preserve the TypeScript callback ordering directly so future Rust interactive runtime work can plug in without reworking shell input precedence
+- stop at callback routing; clipboard image file creation/insertion remains a later runtime-integrated slice
+
+### Validation summary
+
+New Rust coverage added for:
+- extension shortcuts consuming input before prompt handling
+- extension shortcuts falling through to normal prompt input when they return `false`
+- extension-shortcut precedence over paste-image bindings on the same raw key
+- configured paste-image keybinding invoking the dedicated shell callback without mutating prompt text
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test startup_shell` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive shell path:
+- no visible transcript scroll-status indicator or richer transcript navigation controls yet beyond page up/down and the existing programmatic scroll helpers
+- no full clipboard-image runtime path yet (temp-file creation + prompt insertion)
+- no Rust multiline editor / custom-editor parity yet
+- no Rust inline image rendering parity yet inside transcript widgets
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates the shell/footer stack
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- continue with the next shell-level interactive-control slice that has visible user impact but does not require the full runtime yet; the best next candidate remains a transcript scroll-status/indicator path or a small shell-level status callback that can use the current render bridge
+- keep multiline editor parity, full clipboard-image runtime behavior, and broader session/runtime wiring deferred until a few more shell-level control paths are frozen in Rust

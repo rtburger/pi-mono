@@ -375,6 +375,195 @@ fn startup_shell_uses_shared_keybindings_for_header_and_input() {
 }
 
 #[test]
+fn startup_shell_interrupt_uses_app_keybinding_binding_and_escape_callback() {
+    let interrupted = Arc::new(Mutex::new(0usize));
+    let interrupted_for_callback = Arc::clone(&interrupted);
+
+    let keybindings = KeybindingsManager::new(config(&[("app.interrupt", &["ctrl+x"])]), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_on_escape(move || {
+        *interrupted_for_callback
+            .lock()
+            .expect("interrupt mutex poisoned") += 1;
+    });
+
+    shell.handle_input("\x18");
+    assert_eq!(*interrupted.lock().expect("interrupt mutex poisoned"), 1);
+
+    shell.handle_input("\x1b");
+    assert_eq!(*interrupted.lock().expect("interrupt mutex poisoned"), 1);
+}
+
+#[test]
+fn startup_shell_extension_shortcut_can_consume_or_fall_through() {
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen_for_callback = Arc::clone(&seen);
+
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_on_extension_shortcut(move |data| {
+        seen_for_callback
+            .lock()
+            .expect("shortcut mutex poisoned")
+            .push(data.clone());
+        data == "x"
+    });
+
+    shell.handle_input("x");
+    assert_eq!(shell.input_value(), "");
+
+    shell.handle_input("y");
+    assert_eq!(shell.input_value(), "y");
+    assert_eq!(
+        seen.lock().expect("shortcut mutex poisoned").as_slice(),
+        [String::from("x"), String::from("y")]
+    );
+}
+
+#[test]
+fn startup_shell_extension_shortcut_runs_before_paste_image_binding() {
+    let shortcut_calls = Arc::new(Mutex::new(0usize));
+    let shortcut_calls_for_callback = Arc::clone(&shortcut_calls);
+    let paste_calls = Arc::new(Mutex::new(0usize));
+    let paste_calls_for_callback = Arc::clone(&paste_calls);
+
+    let keybindings =
+        KeybindingsManager::new(config(&[("app.clipboard.pasteImage", &["ctrl+x"])]), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_on_extension_shortcut(move |data| {
+        if data == "\x18" {
+            *shortcut_calls_for_callback
+                .lock()
+                .expect("shortcut mutex poisoned") += 1;
+            return true;
+        }
+        false
+    });
+    shell.set_on_paste_image(move || {
+        *paste_calls_for_callback
+            .lock()
+            .expect("paste mutex poisoned") += 1;
+    });
+
+    shell.handle_input("\x18");
+
+    assert_eq!(*shortcut_calls.lock().expect("shortcut mutex poisoned"), 1);
+    assert_eq!(*paste_calls.lock().expect("paste mutex poisoned"), 0);
+    assert_eq!(shell.input_value(), "");
+}
+
+#[test]
+fn startup_shell_paste_image_uses_app_keybinding_binding() {
+    let paste_calls = Arc::new(Mutex::new(0usize));
+    let paste_calls_for_callback = Arc::clone(&paste_calls);
+
+    let keybindings =
+        KeybindingsManager::new(config(&[("app.clipboard.pasteImage", &["ctrl+x"])]), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_input_value("draft prompt");
+    shell.set_on_paste_image(move || {
+        *paste_calls_for_callback
+            .lock()
+            .expect("paste mutex poisoned") += 1;
+    });
+
+    shell.handle_input("\x18");
+
+    assert_eq!(*paste_calls.lock().expect("paste mutex poisoned"), 1);
+    assert_eq!(shell.input_value(), "draft prompt");
+}
+
+#[test]
+fn startup_shell_can_run_registered_app_action_handlers() {
+    let clear_calls = Arc::new(Mutex::new(0usize));
+    let clear_calls_for_handler = Arc::clone(&clear_calls);
+
+    let keybindings = KeybindingsManager::new(config(&[("app.clear", &["ctrl+x"])]), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.on_action("app.clear", move || {
+        *clear_calls_for_handler
+            .lock()
+            .expect("clear mutex poisoned") += 1;
+    });
+    shell.set_input_value("draft prompt");
+
+    shell.handle_input("\x18");
+
+    assert_eq!(*clear_calls.lock().expect("clear mutex poisoned"), 1);
+    assert_eq!(shell.input_value(), "draft prompt");
+}
+
+#[test]
+fn startup_shell_exit_handler_only_runs_when_input_is_empty() {
+    let exits = Arc::new(Mutex::new(0usize));
+    let exits_for_callback = Arc::clone(&exits);
+
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_on_exit(move || {
+        *exits_for_callback.lock().expect("exit mutex poisoned") += 1;
+    });
+
+    shell.set_input_value("abc");
+    shell.handle_input("\x01");
+    shell.handle_input("\x04");
+    assert_eq!(shell.input_value(), "bc");
+    assert_eq!(*exits.lock().expect("exit mutex poisoned"), 0);
+
+    shell.clear_input();
+    shell.handle_input("\x04");
+    assert_eq!(*exits.lock().expect("exit mutex poisoned"), 1);
+}
+
+#[test]
 fn startup_shell_renders_transcript_before_pending_messages_and_prompt() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let mut shell = StartupShellComponent::new(
@@ -492,6 +681,82 @@ fn startup_shell_can_scroll_transcript_without_hiding_prompt() {
     assert!(bottom[1].contains("line 5"));
     assert!(bottom[2].contains("line 6"));
     assert!(bottom[3].starts_with("> "));
+}
+
+#[test]
+fn startup_shell_page_keys_scroll_transcript_by_visible_page() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    for index in 1..=8 {
+        shell.add_transcript_item(Box::new(Text::new(format!("line {index}"), 0, 0)));
+    }
+    shell.set_input_value("draft prompt");
+    shell.set_viewport_size(24, 5);
+
+    let bottom = shell.render(24);
+    assert!(bottom[0].contains("line 5"));
+    assert!(bottom[1].contains("line 6"));
+    assert!(bottom[2].contains("line 7"));
+    assert!(bottom[3].contains("line 8"));
+    assert!(bottom[4].starts_with("> "));
+
+    shell.handle_input("\x1b[5~");
+    let page_up = shell.render(24);
+    assert_eq!(shell.transcript_scroll_offset(), 4);
+    assert!(page_up[0].contains("line 1"));
+    assert!(page_up[1].contains("line 2"));
+    assert!(page_up[2].contains("line 3"));
+    assert!(page_up[3].contains("line 4"));
+    assert!(page_up[4].starts_with("> "));
+    assert_eq!(shell.input_value(), "draft prompt");
+
+    shell.handle_input("\x1b[6~");
+    let page_down = shell.render(24);
+    assert_eq!(shell.transcript_scroll_offset(), 0);
+    assert!(page_down[0].contains("line 5"));
+    assert!(page_down[1].contains("line 6"));
+    assert!(page_down[2].contains("line 7"));
+    assert!(page_down[3].contains("line 8"));
+    assert!(page_down[4].starts_with("> "));
+}
+
+#[test]
+fn startup_shell_page_keys_use_configured_keybindings() {
+    let keybindings = KeybindingsManager::new(
+        config(&[
+            ("tui.editor.pageUp", &["alt+p"]),
+            ("tui.editor.pageDown", &["alt+n"]),
+        ]),
+        None,
+    );
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    for index in 1..=8 {
+        shell.add_transcript_item(Box::new(Text::new(format!("line {index}"), 0, 0)));
+    }
+    shell.set_viewport_size(24, 5);
+    let _ = shell.render(24);
+
+    shell.handle_input("\x1bp");
+    assert_eq!(shell.transcript_scroll_offset(), 4);
+
+    shell.handle_input("\x1bn");
+    assert_eq!(shell.transcript_scroll_offset(), 0);
 }
 
 #[test]
