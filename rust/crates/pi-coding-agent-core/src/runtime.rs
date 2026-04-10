@@ -14,7 +14,7 @@ use pi_events::{Context, Message, Model};
 use std::{
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -42,6 +42,7 @@ pub struct CodingAgentCore {
     model_registry: Arc<ModelRegistry>,
     auto_resize_images: Arc<AtomicBool>,
     block_images: Arc<AtomicBool>,
+    thinking_budgets: Arc<Mutex<pi_ai::ThinkingBudgets>>,
 }
 
 impl CodingAgentCore {
@@ -71,6 +72,15 @@ impl CodingAgentCore {
 
     pub fn set_block_images(&self, blocked: bool) {
         self.block_images.store(blocked, Ordering::Relaxed);
+    }
+
+    pub fn thinking_budgets(&self) -> pi_ai::ThinkingBudgets {
+        self.thinking_budgets.lock().unwrap().clone()
+    }
+
+    pub fn set_thinking_budgets(&self, thinking_budgets: pi_ai::ThinkingBudgets) {
+        self.agent.set_thinking_budgets(thinking_budgets.clone());
+        *self.thinking_budgets.lock().unwrap() = thinking_budgets;
     }
 
     pub async fn prompt_text(
@@ -132,6 +142,7 @@ pub fn create_coding_agent_core(
     };
 
     let auto_resize_images = Arc::new(AtomicBool::new(true));
+    let thinking_budgets = Arc::new(Mutex::new(pi_ai::ThinkingBudgets::default()));
 
     let mut state = AgentState::new(model);
     state.system_prompt = system_prompt;
@@ -144,6 +155,7 @@ pub fn create_coding_agent_core(
         state,
         Arc::new(RegistryBackedStreamer {
             model_registry: model_registry.clone(),
+            thinking_budgets: thinking_budgets.clone(),
         }),
         stream_options,
     );
@@ -167,6 +179,7 @@ pub fn create_coding_agent_core(
             model_registry,
             auto_resize_images,
             block_images,
+            thinking_budgets,
         },
         diagnostics: bootstrap.diagnostics,
         model_fallback_message: bootstrap.model_fallback_message,
@@ -175,6 +188,7 @@ pub fn create_coding_agent_core(
 
 struct RegistryBackedStreamer {
     model_registry: Arc<ModelRegistry>,
+    thinking_budgets: Arc<Mutex<pi_ai::ThinkingBudgets>>,
 }
 
 impl AssistantStreamer for RegistryBackedStreamer {
@@ -185,6 +199,7 @@ impl AssistantStreamer for RegistryBackedStreamer {
         options: StreamOptions,
     ) -> Result<AssistantEventStream, AiError> {
         let model_registry = self.model_registry.clone();
+        let thinking_budgets = self.thinking_budgets.clone();
         Ok(Box::pin(stream! {
             let auth = match model_registry.get_api_key_and_headers_async(&model).await {
                 Ok(auth) => auth,
@@ -202,7 +217,8 @@ impl AssistantStreamer for RegistryBackedStreamer {
                 stream_options.headers = merged_headers;
             }
 
-            match stream_simple(model, context, map_stream_options_to_simple_options(stream_options)) {
+            let thinking_budgets = thinking_budgets.lock().unwrap().clone();
+            match stream_simple(model, context, map_stream_options_to_simple_options(stream_options, thinking_budgets)) {
                 Ok(mut inner) => {
                     while let Some(event) = inner.next().await {
                         yield event;
@@ -216,7 +232,10 @@ impl AssistantStreamer for RegistryBackedStreamer {
     }
 }
 
-fn map_stream_options_to_simple_options(options: StreamOptions) -> SimpleStreamOptions {
+fn map_stream_options_to_simple_options(
+    options: StreamOptions,
+    thinking_budgets: pi_ai::ThinkingBudgets,
+) -> SimpleStreamOptions {
     let reasoning = options
         .reasoning_effort
         .as_deref()
@@ -234,7 +253,7 @@ fn map_stream_options_to_simple_options(options: StreamOptions) -> SimpleStreamO
         temperature: options.temperature,
         max_tokens: options.max_tokens,
         reasoning,
-        thinking_budgets: Default::default(),
+        thinking_budgets,
         tool_choice: options.tool_choice,
     }
 }

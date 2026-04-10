@@ -3,13 +3,13 @@ use crate::{
     ProcessFileOptions, build_initial_message, list_models::render_list_models, parse_args,
     process_file_arguments, resolve_app_mode, run_print_mode, to_print_output_mode,
 };
-use pi_ai::StreamOptions;
+use pi_ai::{StreamOptions, ThinkingBudgets};
 use pi_coding_agent_core::{
     AuthSource, BootstrapDiagnosticLevel, CodingAgentCoreError, CodingAgentCoreOptions,
     ModelRegistry, ScopedModel, SessionBootstrapOptions, create_coding_agent_core,
     resolve_cli_model, resolve_model_scope,
 };
-use pi_config::load_image_settings;
+use pi_config::{ThinkingBudgetsSettings, load_runtime_settings};
 use pi_events::Model;
 use std::{
     path::{Path, PathBuf},
@@ -131,11 +131,11 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         };
     };
 
-    let image_settings = agent_dir
+    let runtime_settings = agent_dir
         .as_deref()
-        .map(|agent_dir| load_image_settings(&cwd, agent_dir))
+        .map(|agent_dir| load_runtime_settings(&cwd, agent_dir))
         .unwrap_or_default();
-    stderr.push_str(&render_settings_warnings(&image_settings.warnings));
+    stderr.push_str(&render_settings_warnings(&runtime_settings.warnings));
 
     let scoped_models = if let Some(patterns) = parsed.models.as_ref() {
         let registry = ModelRegistry::new(
@@ -155,7 +155,7 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         &parsed.file_args,
         &cwd,
         ProcessFileOptions {
-            auto_resize_images: image_settings.settings.auto_resize_images,
+            auto_resize_images: runtime_settings.settings.images.auto_resize_images,
         },
     ) {
         Ok(files) => files,
@@ -236,10 +236,13 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
 
     created
         .core
-        .set_auto_resize_images(image_settings.settings.auto_resize_images);
+        .set_auto_resize_images(runtime_settings.settings.images.auto_resize_images);
     created
         .core
-        .set_block_images(image_settings.settings.block_images);
+        .set_block_images(runtime_settings.settings.images.block_images);
+    created.core.set_thinking_budgets(map_thinking_budgets(
+        &runtime_settings.settings.thinking_budgets,
+    ));
 
     stderr.push_str(&render_bootstrap_diagnostics(&created.diagnostics));
     if created
@@ -346,6 +349,15 @@ fn resolve_system_prompt(
     }
 
     system_prompt
+}
+
+fn map_thinking_budgets(settings: &ThinkingBudgetsSettings) -> ThinkingBudgets {
+    ThinkingBudgets {
+        minimal: settings.minimal,
+        low: settings.low,
+        medium: settings.medium,
+        high: settings.high,
+    }
 }
 
 fn render_parse_diagnostics(diagnostics: &[Diagnostic]) -> String {
