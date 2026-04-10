@@ -763,3 +763,84 @@ Still deferred in `pi-ai`:
 - Unicode/surrogate sanitization parity for the OpenAI-backed Rust providers (current migrated OpenAI Rust code still carries placeholder sanitization)
 - context-overflow detection helper parity with TS `isContextOverflow()`
 - Codex retry/WebSocket transport parity beyond the current SSE slice
+
+## Milestone 13 update: overflow helper + abort regression coverage slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/ai/src/utils/overflow.ts`
+- `packages/ai/test/overflow.test.ts`
+- previously reviewed narrowed-regression references kept in scope for alignment:
+  - `packages/ai/test/abort.test.ts`
+  - `packages/ai/test/context-overflow.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/src/lib.rs`
+- `rust/crates/pi-ai/src/anthropic_messages.rs`
+- `rust/crates/pi-ai/src/openai_codex_responses.rs`
+- `rust/crates/pi-ai/src/openai_responses.rs`
+- `rust/crates/pi-ai/tests/anthropic_messages_http.rs`
+- `rust/crates/pi-ai/tests/openai_codex_responses_http.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- `pi-ai` now exposes a shared `is_context_overflow()` helper with TS-aligned regex detection for:
+  - Anthropic-style prompt-too-long errors
+  - request-too-large / byte-size overflow errors
+  - OpenAI context-window errors
+  - Google token-count overflow errors
+  - xAI / Groq / OpenRouter / Copilot / llama.cpp / LM Studio / MiniMax / Kimi / Mistral patterns
+  - Cerebras-style `400/413 (no body)` overflow signatures
+  - silent-overflow detection via `usage.input + cache_read > context_window`
+- Rust overflow detection also ports the TS non-overflow exclusions for rate-limit/throttling-style messages so `too many tokens` throttling is not misclassified as overflow
+- abort regression coverage has been widened for the narrowed provider set:
+  - `anthropic-messages` now has immediate-abort coverage before request send
+  - `anthropic-messages` now has mid-stream abort coverage while waiting for the next HTTP body chunk
+  - `openai-codex-responses` now has immediate-abort coverage before request send
+  - `openai-codex-responses` now has mid-stream abort coverage while waiting for the next HTTP body chunk
+
+Compatibility note for this slice:
+- Unicode/surrogate sanitization parity is still intentionally deferred; Rust now has the overflow helper parity that TS uses in the `context-overflow` regression suite, but the OpenAI/Anthropic text sanitizers remain a separate remaining slice
+
+### Rust design summary
+
+New Rust module added:
+- `rust/crates/pi-ai/src/overflow.rs`
+
+Public surface added:
+- `is_context_overflow()`
+- `overflow_patterns()`
+
+Integration update:
+- `rust/crates/pi-ai/src/lib.rs`
+  - now exports the overflow helper surface from the crate root
+
+Test coverage updates:
+- `rust/crates/pi-ai/tests/overflow.rs`
+- expanded HTTP abort coverage in:
+  - `rust/crates/pi-ai/tests/anthropic_messages_http.rs`
+  - `rust/crates/pi-ai/tests/openai_codex_responses_http.rs`
+
+### Validation summary
+
+New Rust coverage added for:
+- explicit overflow-pattern detection
+- non-overflow exclusion handling
+- silent overflow detection via usage > context window
+- Anthropic abort-before-send and abort-mid-stream
+- Codex abort-before-send and abort-mid-stream
+
+Validation run results:
+- `cd rust && cargo test -p pi-ai --test anthropic_messages_http --test openai_codex_responses_http --test overflow -- --nocapture` passed
+- `cd rust && cargo fmt --all && cargo test -p pi-ai && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- empty-message / empty-assistant regression coverage for the narrowed provider set
+- explicit narrowed regression files for response-id, image-tool-result, and tool-call-without-result across all four in-scope providers
+- Unicode/surrogate sanitization parity for request shaping
+- Codex retry/WebSocket transport parity beyond the current SSE slice

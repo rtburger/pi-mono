@@ -1,10 +1,13 @@
 use futures::StreamExt;
 use httpmock::prelude::*;
 use pi_ai::{StreamOptions, complete, stream_response};
-use pi_events::{AssistantEvent, Context, Message, Model, UserContent};
+use pi_events::{
+    AssistantContent, AssistantEvent, Context, Message, Model, StopReason, UserContent,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
+    sync::watch,
     time::{Duration, sleep, timeout},
 };
 
@@ -253,6 +256,92 @@ async fn clamps_minimal_reasoning_effort_for_newer_codex_models() {
 
     mock.assert();
     assert_eq!(response.response_id.as_deref(), Some("resp_1"));
+}
+
+#[tokio::test]
+async fn emits_aborted_terminal_error_before_http_send() {
+    let (tx, rx) = watch::channel(false);
+    tx.send(true).unwrap();
+
+    let response = complete(
+        model("https://chatgpt.com/backend-api".into()),
+        context(),
+        StreamOptions {
+            api_key: Some(mock_token()),
+            signal: Some(rx),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.stop_reason, StopReason::Aborted);
+    assert_eq!(
+        response.error_message.as_deref(),
+        Some("Request was aborted")
+    );
+}
+
+#[tokio::test]
+async fn aborts_while_waiting_for_next_http_body_chunk() {
+    let base_url = start_chunked_sse_server(vec![
+        (
+            concat!(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_abort\"}}\n\n",
+                "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n"
+            ),
+            0,
+        ),
+        (
+            concat!(
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello there\"}]}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_abort\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":4,\"total_tokens\":9,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n"
+            ),
+            250,
+        ),
+    ])
+    .await;
+
+    let (tx, rx) = watch::channel(false);
+    let mut stream = stream_response(
+        model(base_url),
+        context(),
+        StreamOptions {
+            api_key: Some(mock_token()),
+            signal: Some(rx),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut names = Vec::new();
+
+    while let Some(event) = stream.next().await {
+        match event.unwrap() {
+            AssistantEvent::Start { .. } => names.push("start"),
+            AssistantEvent::TextStart { .. } => names.push("text_start"),
+            AssistantEvent::TextDelta { .. } => {
+                names.push("text_delta");
+                tx.send(true).unwrap();
+            }
+            AssistantEvent::Error { reason, error } => {
+                names.push("error");
+                assert_eq!(reason, StopReason::Aborted);
+                assert_eq!(error.error_message.as_deref(), Some("Request was aborted"));
+                assert_eq!(
+                    error.content,
+                    vec![AssistantContent::Text {
+                        text: "Hello".into(),
+                        text_signature: None,
+                    }]
+                );
+                break;
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    assert_eq!(names, vec!["start", "text_start", "text_delta", "error"]);
 }
 
 #[tokio::test]

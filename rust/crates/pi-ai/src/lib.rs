@@ -3,10 +3,12 @@ pub mod models;
 pub mod openai_codex_responses;
 pub mod openai_completions;
 pub mod openai_responses;
+pub mod overflow;
 
 pub use models::{
     built_in_models, get_model, get_models, get_providers, models_are_equal, supports_xhigh,
 };
+pub use overflow::{is_context_overflow, overflow_patterns};
 
 use async_stream::stream;
 use futures::{Stream, StreamExt};
