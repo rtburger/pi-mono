@@ -1,6 +1,6 @@
 # packages/ai migration inventory
 
-Status: milestone 9 adds TS-generated static model-header extraction and provider-level fallback wiring so Anthropic Messages and OpenAI Responses can consume built-in Copilot headers from `models.generated.ts` instead of provider-local constants
+Status: milestone 18 centralizes Rust-side provider text sanitization at the Rust `String` boundary and freezes Unicode-bearing request shaping across Anthropic Messages, OpenAI Responses, OpenAI Completions, and OpenAI Codex Responses
 Target crate: `rust/crates/pi-ai`
 
 ## 1. Files analyzed
@@ -1118,4 +1118,87 @@ Validation run results:
 
 Still deferred in `pi-ai`:
 - Unicode/surrogate sanitization parity for request shaping
+- Codex retry/WebSocket transport parity beyond the current SSE slice
+
+## Milestone 18 update: Unicode request-text freeze slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/ai/src/utils/sanitize-unicode.ts`
+- `packages/ai/test/unicode-surrogate.test.ts`
+- targeted provider request-shaping references:
+  - `packages/ai/src/providers/anthropic.ts`
+  - `packages/ai/src/providers/openai-responses-shared.ts`
+  - `packages/ai/src/providers/openai-completions.ts`
+  - `packages/ai/src/providers/openai-codex-responses.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/src/lib.rs`
+- `rust/crates/pi-ai/src/anthropic_messages.rs`
+- `rust/crates/pi-ai/src/openai_responses.rs`
+- `rust/crates/pi-ai/src/openai_completions.rs`
+- `rust/crates/pi-ai/src/openai_codex_responses.rs`
+- `migration/packages/ai.md`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- request-shaping regression coverage now explicitly freezes Unicode-bearing text across all four in-scope provider paths:
+  - `anthropic-messages`
+  - `openai-responses`
+  - `openai-completions`
+  - `openai-codex-responses`
+- the new Rust regression slice freezes the practical behavior exercised by `packages/ai/test/unicode-surrogate.test.ts` at the Rust string boundary:
+  - valid emoji and multilingual text survive request shaping unchanged
+  - text that has already crossed into Rust via lossy UTF-16 decoding (`String::from_utf16_lossy`) remains JSON-serializable and stable through provider request builders
+- OpenAI Completions now routes request text through the same explicit sanitization hook used elsewhere in the migrated provider surface for:
+  - system prompts
+  - user text content
+  - assistant text/thinking replay
+  - tool-result text replay
+- OpenAI Codex Responses now routes `instructions` through the same explicit sanitization hook
+- Anthropic Messages and OpenAI Responses now keep their existing request-shaping call sites but delegate to the shared helper instead of provider-local placeholder no-ops
+
+Compatibility note for this slice:
+- TypeScript removes unpaired UTF-16 surrogate code units before JSON serialization. Rust `String` values cannot represent standalone UTF-16 surrogates at all, so exact surrogate-removal behavior is structurally unrepresentable on the Rust side.
+- This milestone therefore freezes the observable Rust-side compatibility boundary honestly: once text has crossed into a Rust `String`, provider request shaping preserves valid Unicode unchanged and remains safe for JSON serialization.
+
+### Rust design summary
+
+New Rust module added:
+- `rust/crates/pi-ai/src/unicode.rs`
+  - `sanitize_provider_text(...)`
+
+Integration updates:
+- `rust/crates/pi-ai/src/lib.rs`
+  - now declares the shared internal Unicode helper module
+- `rust/crates/pi-ai/src/openai_responses.rs`
+- `rust/crates/pi-ai/src/anthropic_messages.rs`
+- `rust/crates/pi-ai/src/openai_completions.rs`
+- `rust/crates/pi-ai/src/openai_codex_responses.rs`
+  - request-shaping text paths now go through the shared helper, keeping the Rust/TypeScript compatibility boundary explicit in one place
+
+Behavior-freeze artifact added:
+- `rust/crates/pi-ai/tests/unicode_request_text.rs`
+
+### Validation summary
+
+New Rust coverage added for:
+- Anthropic request shaping preserving emoji/multilingual text and lossy UTF-16 fallback text
+- OpenAI Responses request shaping preserving emoji/multilingual text and lossy UTF-16 fallback text
+- OpenAI Completions request shaping preserving emoji/multilingual text and lossy UTF-16 fallback text across system/user/assistant/tool-result paths
+- OpenAI Codex request shaping preserving emoji/multilingual text and lossy UTF-16 fallback text across `instructions` and replayed input items
+- internal helper tests documenting the Rust string-boundary behavior directly
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-ai --test unicode_request_text` passed
+- `cd rust && cargo test -p pi-ai` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
 - Codex retry/WebSocket transport parity beyond the current SSE slice

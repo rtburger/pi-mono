@@ -2,6 +2,7 @@ use crate::{
     AiProvider, AssistantEventStream, StreamOptions,
     models::{get_model_headers, get_provider_headers},
     register_provider,
+    unicode::sanitize_provider_text,
 };
 use async_stream::stream;
 use pi_events::{
@@ -286,7 +287,7 @@ pub fn convert_openai_completions_messages(
         };
         params.push(OpenAiCompletionsMessageParam {
             role: role.to_string(),
-            content: OpenAiCompletionsMessageContent::Text(system_prompt.clone()),
+            content: OpenAiCompletionsMessageContent::Text(sanitize_provider_text(system_prompt)),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -339,7 +340,7 @@ pub fn convert_openai_completions_messages(
                     .iter()
                     .filter_map(|block| match block {
                         AssistantContent::Text { text, .. } if !text.trim().is_empty() => {
-                            Some(text.as_str())
+                            Some(sanitize_provider_text(text))
                         }
                         _ => None,
                     })
@@ -354,7 +355,7 @@ pub fn convert_openai_completions_messages(
                         AssistantContent::Thinking { thinking, .. }
                             if !thinking.trim().is_empty() =>
                         {
-                            Some(thinking.as_str())
+                            Some(sanitize_provider_text(thinking))
                         }
                         _ => None,
                     })
@@ -460,13 +461,14 @@ pub fn convert_openai_completions_messages(
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
+                    let text_result = sanitize_provider_text(&text_result);
                     let has_images = content
                         .iter()
                         .any(|item| matches!(item, UserContent::Image { .. }));
                     params.push(OpenAiCompletionsMessageParam {
                         role: "tool".into(),
                         content: OpenAiCompletionsMessageContent::Text(if text_result.is_empty() {
-                            "(see attached image)".into()
+                            sanitize_provider_text("(see attached image)")
                         } else {
                             text_result
                         }),
@@ -584,14 +586,18 @@ fn convert_user_content(
             })
             .collect::<Vec<_>>()
             .join("\n");
-        return (!text.is_empty()).then_some(OpenAiCompletionsMessageContent::Text(text));
+        return (!text.is_empty()).then_some(OpenAiCompletionsMessageContent::Text(
+            sanitize_provider_text(&text),
+        ));
     }
 
     let mut parts = Vec::new();
     for item in content {
         match item {
             UserContent::Text { text } if !text.is_empty() => {
-                parts.push(OpenAiCompletionsContentPart::Text { text: text.clone() });
+                parts.push(OpenAiCompletionsContentPart::Text {
+                    text: sanitize_provider_text(text),
+                });
             }
             UserContent::Image { data, mime_type } if supports_images => {
                 parts.push(OpenAiCompletionsContentPart::ImageUrl {

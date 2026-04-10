@@ -1702,7 +1702,7 @@ fn from_claude_code_name(name: &str, tools: &[ToolDefinition]) -> String {
 }
 
 fn sanitize_text(text: &str) -> String {
-    text.to_string()
+    crate::unicode::sanitize_provider_text(text)
 }
 
 fn parse_tool_arguments_best_effort(partial_json: &str) -> BTreeMap<String, Value> {

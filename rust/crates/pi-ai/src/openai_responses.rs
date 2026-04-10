@@ -707,7 +707,7 @@ fn short_hash(input: &str) -> String {
 }
 
 fn sanitize_surrogates(text: &str) -> String {
-    text.to_owned()
+    crate::unicode::sanitize_provider_text(text)
 }
 
 pub fn tool_call_arguments(arguments: &[(&str, Value)]) -> BTreeMap<String, Value> {

@@ -7,6 +7,7 @@ use crate::{
         convert_openai_responses_messages, is_signal_aborted, is_terminal_event, wait_for_abort,
     },
     register_provider,
+    unicode::sanitize_provider_text,
 };
 use async_stream::stream;
 use pi_events::{
@@ -92,7 +93,7 @@ pub fn build_openai_codex_responses_request_params(
         model: model.id.clone(),
         store: false,
         stream: true,
-        instructions: context.system_prompt.clone(),
+        instructions: context.system_prompt.as_deref().map(sanitize_provider_text),
         input,
         tools: (!context.tools.is_empty()).then(|| convert_codex_tools(&context.tools)),
         tool_choice: "auto".into(),
