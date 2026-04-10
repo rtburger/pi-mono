@@ -74,6 +74,18 @@ fn ctrl_w_deletes_previous_word() {
 }
 
 #[test]
+fn public_insert_text_at_cursor_inserts_at_current_cursor_position() {
+    let mut input = Input::new();
+    input.set_value("ac");
+    input.set_cursor(1);
+
+    input.insert_text_at_cursor("b");
+
+    assert_eq!(input.get_value(), "abc");
+    assert_eq!(input.cursor(), 2);
+}
+
+#[test]
 fn render_does_not_overflow_with_wide_text() {
     let width = 93;
     let cases = [

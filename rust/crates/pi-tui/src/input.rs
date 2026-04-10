@@ -218,7 +218,7 @@ impl Input {
             .any(|key| matches_key(data, key.as_str()))
     }
 
-    fn insert_text_at_cursor(&mut self, text: &str) {
+    pub fn insert_text_at_cursor(&mut self, text: &str) {
         self.value.insert_str(self.cursor, text);
         self.cursor += text.len();
     }

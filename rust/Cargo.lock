@@ -1499,6 +1499,7 @@ dependencies = [
 name = "pi-coding-agent-tui"
 version = "0.1.0"
 dependencies = [
+ "image",
  "pi-coding-agent-core",
  "pi-events",
  "pi-tui",

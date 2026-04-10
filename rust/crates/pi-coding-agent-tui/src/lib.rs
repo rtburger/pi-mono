@@ -1,5 +1,6 @@
 mod assistant_message;
 mod branch_summary;
+mod clipboard_image;
 mod compaction_summary;
 mod custom_message;
 mod footer;
@@ -15,6 +16,11 @@ mod user_message;
 
 pub use assistant_message::{AssistantMessageComponent, DEFAULT_HIDDEN_THINKING_LABEL};
 pub use branch_summary::BranchSummaryMessageComponent;
+pub use clipboard_image::{
+    ClipboardCommandRunner, ClipboardImage, ClipboardImageSource, ClipboardPlatform, CommandOutput,
+    StdClipboardCommandRunner, SystemClipboardImageSource, extension_for_image_mime_type,
+    is_wayland_session, paste_clipboard_image_into_shell,
+};
 pub use compaction_summary::CompactionSummaryMessageComponent;
 pub use custom_message::CustomMessageComponent;
 pub use footer::{FooterComponent, FooterState};
@@ -30,7 +36,7 @@ pub use startup_header::{
     BuiltInHeaderComponent, StartupHeaderComponent, StartupHeaderStyler,
     build_condensed_changelog_notice, build_startup_header_text,
 };
-pub use startup_shell::StartupShellComponent;
+pub use startup_shell::{StartupShellComponent, StatusHandle};
 pub use tool_execution::{
     ToolExecutionComponent, ToolExecutionOptions, ToolExecutionRendererDefinition,
     ToolExecutionResult, ToolRenderContext, ToolRenderResultOptions,

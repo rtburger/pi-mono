@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
 pi-coding-agent-core = { path = "../pi-coding-agent-core" }
 pi-events = { path = "../pi-events" }
 pi-tui = { path = "../pi-tui" }

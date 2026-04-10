@@ -3,11 +3,53 @@ use crate::{
     PendingMessagesComponent, StartupHeaderStyler, TranscriptComponent,
 };
 use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
-use pi_tui::{Component, ComponentId, Input, RenderHandle, matches_key};
-use std::{cell::Cell, ops::Deref};
+use pi_tui::{Component, ComponentId, Input, RenderHandle, matches_key, truncate_to_width};
+use std::{
+    cell::Cell,
+    ops::Deref,
+    sync::{Arc, Mutex},
+};
 
 type ActionCallback = Box<dyn FnMut() + Send + 'static>;
 type ShortcutCallback = Box<dyn FnMut(String) -> bool + Send + 'static>;
+
+#[derive(Clone)]
+pub struct StatusHandle {
+    status_message: Arc<Mutex<Option<String>>>,
+    render_handle: Option<RenderHandle>,
+}
+
+impl StatusHandle {
+    fn new(
+        status_message: Arc<Mutex<Option<String>>>,
+        render_handle: Option<RenderHandle>,
+    ) -> Self {
+        Self {
+            status_message,
+            render_handle,
+        }
+    }
+
+    pub fn set_message(&self, message: impl Into<String>) {
+        *self
+            .status_message
+            .lock()
+            .expect("status message mutex poisoned") = Some(message.into());
+        if let Some(render_handle) = &self.render_handle {
+            render_handle.request_render();
+        }
+    }
+
+    pub fn clear(&self) {
+        *self
+            .status_message
+            .lock()
+            .expect("status message mutex poisoned") = None;
+        if let Some(render_handle) = &self.render_handle {
+            render_handle.request_render();
+        }
+    }
+}
 
 pub struct StartupShellComponent {
     header: BuiltInHeaderComponent,
@@ -16,6 +58,7 @@ pub struct StartupShellComponent {
     input: Input,
     footer: FooterComponent,
     keybindings: KeybindingsManager,
+    status_message: Arc<Mutex<Option<String>>>,
     on_escape: Option<ActionCallback>,
     on_exit: Option<ActionCallback>,
     on_paste_image: Option<ActionCallback>,
@@ -49,6 +92,7 @@ impl StartupShellComponent {
             input: Input::with_keybindings(keybindings.deref().clone()),
             footer: FooterComponent::default(),
             keybindings: keybindings.clone(),
+            status_message: Arc::new(Mutex::new(None)),
             on_escape: None,
             on_exit: None,
             on_paste_image: None,
@@ -62,9 +106,19 @@ impl StartupShellComponent {
         let (_, total_height) = self.viewport_size.get()?;
         let occupied_height = self.header.render(width).len()
             + self.pending_messages.render(width).len()
+            + self.render_status(width).len()
             + self.input.render(width).len()
             + self.footer.render(width).len();
         Some(total_height.saturating_sub(occupied_height))
+    }
+
+    fn render_status(&self, width: usize) -> Vec<String> {
+        self.status_message
+            .lock()
+            .expect("status message mutex poisoned")
+            .as_ref()
+            .map(|message| vec![truncate_to_width(message, width, "...", false)])
+            .unwrap_or_default()
     }
 
     fn page_scroll_lines(&self) -> usize {
@@ -181,6 +235,14 @@ impl StartupShellComponent {
         self.input.set_value(value);
     }
 
+    pub fn insert_input_text_at_cursor(&mut self, text: &str) {
+        self.input.insert_text_at_cursor(text);
+    }
+
+    pub fn set_input_cursor(&mut self, cursor: usize) {
+        self.input.set_cursor(cursor);
+    }
+
     pub fn clear_input(&mut self) {
         self.input.clear();
     }
@@ -244,6 +306,28 @@ impl StartupShellComponent {
         self.pending_messages.has_messages()
     }
 
+    pub fn set_status_message(&mut self, message: impl Into<String>) {
+        *self
+            .status_message
+            .lock()
+            .expect("status message mutex poisoned") = Some(message.into());
+    }
+
+    pub fn clear_status_message(&mut self) {
+        *self
+            .status_message
+            .lock()
+            .expect("status message mutex poisoned") = None;
+    }
+
+    pub fn status_handle(&self) -> StatusHandle {
+        StatusHandle::new(Arc::clone(&self.status_message), None)
+    }
+
+    pub fn status_handle_with_render_handle(&self, render_handle: RenderHandle) -> StatusHandle {
+        StatusHandle::new(Arc::clone(&self.status_message), Some(render_handle))
+    }
+
     pub fn set_footer_state(&mut self, state: FooterState) {
         self.footer.set_state(state);
     }
@@ -284,6 +368,7 @@ impl Component for StartupShellComponent {
         let pending_lines = self.pending_messages.render(width);
         let input_lines = self.input.render(width);
         let footer_lines = self.footer.render(width);
+        let status_lines = self.render_status(width);
         let transcript_height = self.transcript_viewport_height_for_width(width);
         self.transcript.set_viewport_height(transcript_height);
         let transcript_lines = self.transcript.render(width);
@@ -291,6 +376,7 @@ impl Component for StartupShellComponent {
         let mut lines = header_lines;
         lines.extend(transcript_lines);
         lines.extend(pending_lines);
+        lines.extend(status_lines);
         lines.extend(input_lines);
         lines.extend(footer_lines);
         lines

@@ -616,6 +616,176 @@ fn startup_shell_renders_transcript_before_pending_messages_and_prompt() {
 }
 
 #[test]
+fn startup_shell_renders_status_message_between_pending_messages_and_prompt() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_pending_messages(
+        &PlainKeyHintStyler,
+        ["queued steering message"],
+        std::iter::empty::<&str>(),
+    );
+    shell.set_status_message("Working...");
+
+    let mut tui = Tui::new(NoopTerminal);
+    let shell_id = tui.add_child(Box::new(shell));
+    assert!(tui.set_focus_child(shell_id));
+
+    let lines = tui.render_for_size(40, 10);
+    let pending = lines
+        .iter()
+        .position(|line| line.contains("Steering: queued steering message"))
+        .expect("pending line should render");
+    let status = lines
+        .iter()
+        .position(|line| line.contains("Working..."))
+        .expect("status line should render");
+    let prompt = lines
+        .iter()
+        .position(|line| line.starts_with("> "))
+        .expect("prompt should render");
+
+    assert!(pending < status);
+    assert!(status < prompt);
+}
+
+#[test]
+fn startup_shell_budgets_transcript_height_for_status_line() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    for index in 1..=6 {
+        shell.add_transcript_item(Box::new(Text::new(format!("line {index}"), 0, 0)));
+    }
+    shell.set_status_message("Working...");
+    shell.set_viewport_size(24, 4);
+
+    let lines = shell.render(24);
+
+    assert_eq!(lines.len(), 4);
+    assert!(lines[0].contains("line 5"));
+    assert!(lines[1].contains("line 6"));
+    assert!(lines[2].contains("Working..."));
+    assert!(lines[3].starts_with("> "));
+}
+
+#[test]
+fn startup_shell_truncates_and_clears_status_message() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_status_message("this is a very long working message that must be truncated");
+
+    let lines = shell.render(24);
+    assert_eq!(lines.len(), 2);
+    assert!(visible_width(&lines[0]) <= 24);
+    assert!(lines[0].contains("..."));
+    assert!(lines[1].starts_with("> "));
+
+    shell.clear_status_message();
+    let cleared = shell.render(24);
+    assert_eq!(cleared.len(), 1);
+    assert!(cleared[0].starts_with("> "));
+}
+
+#[test]
+fn startup_shell_status_handle_updates_shell_after_component_is_moved() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    let status_handle = shell.status_handle();
+
+    let mut tui = Tui::new(NoopTerminal);
+    let shell_id = tui.add_child(Box::new(shell));
+    assert!(tui.set_focus_child(shell_id));
+
+    status_handle.set_message("Working...");
+    let lines = tui.render_for_size(24, 10);
+    assert!(lines.iter().any(|line| line.contains("Working...")));
+
+    status_handle.clear();
+    let cleared = tui.render_for_size(24, 10);
+    assert!(!cleared.iter().any(|line| line.contains("Working...")));
+    assert!(cleared.iter().any(|line| line.starts_with("> ")));
+}
+
+#[test]
+fn startup_shell_status_handle_can_queue_tui_rerenders() {
+    let terminal = RecordingTerminal::new();
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    let render_handle = tui.render_handle();
+
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    let status_handle = shell.status_handle_with_render_handle(render_handle);
+
+    let shell_id = tui.add_child(Box::new(shell));
+    assert!(tui.set_focus_child(shell_id));
+    tui.start().expect("start should succeed");
+    let writes_before = inspector.write_count();
+
+    status_handle.set_message("Working...");
+    tui.drain_terminal_events()
+        .expect("queued status rerender should drain successfully");
+    assert!(inspector.write_count() > writes_before);
+    assert!(
+        tui.render_current()
+            .iter()
+            .any(|line| line.contains("Working..."))
+    );
+
+    let writes_after_set = inspector.write_count();
+    status_handle.clear();
+    tui.drain_terminal_events()
+        .expect("queued status clear rerender should drain successfully");
+    assert!(inspector.write_count() > writes_after_set);
+    assert!(
+        !tui.render_current()
+            .iter()
+            .any(|line| line.contains("Working..."))
+    );
+
+    tui.stop().expect("stop should succeed");
+}
+
+#[test]
 fn startup_shell_clips_transcript_to_remaining_viewport_height() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let mut shell = StartupShellComponent::new(
