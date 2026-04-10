@@ -4,6 +4,8 @@ use pi_tui::{Component, TruncatedText};
 #[derive(Debug, Clone, Default)]
 pub struct PendingMessagesComponent {
     dequeue_key_text: String,
+    steering_messages: Vec<String>,
+    follow_up_messages: Vec<String>,
     lines: Vec<String>,
 }
 
@@ -11,6 +13,8 @@ impl PendingMessagesComponent {
     pub fn new(keybindings: &KeybindingsManager) -> Self {
         Self {
             dequeue_key_text: key_text(keybindings, "app.message.dequeue"),
+            steering_messages: Vec::new(),
+            follow_up_messages: Vec::new(),
             lines: Vec::new(),
         }
     }
@@ -26,16 +30,19 @@ impl PendingMessagesComponent {
         S: AsRef<str>,
         T: AsRef<str>,
     {
-        self.lines.clear();
+        self.clear_messages();
 
         for message in steering {
-            self.lines
-                .push(styler.dim(&format!("Steering: {}", message.as_ref())));
+            let message = message.as_ref().to_owned();
+            self.lines.push(styler.dim(&format!("Steering: {message}")));
+            self.steering_messages.push(message);
         }
 
         for message in follow_up {
+            let message = message.as_ref().to_owned();
             self.lines
-                .push(styler.dim(&format!("Follow-up: {}", message.as_ref())));
+                .push(styler.dim(&format!("Follow-up: {message}")));
+            self.follow_up_messages.push(message);
         }
 
         if !self.lines.is_empty() {
@@ -47,11 +54,25 @@ impl PendingMessagesComponent {
     }
 
     pub fn clear_messages(&mut self) {
+        self.steering_messages.clear();
+        self.follow_up_messages.clear();
         self.lines.clear();
     }
 
     pub fn has_messages(&self) -> bool {
-        !self.lines.is_empty()
+        self.message_count() > 0
+    }
+
+    pub fn message_count(&self) -> usize {
+        self.steering_messages.len() + self.follow_up_messages.len()
+    }
+
+    pub fn drain_messages(&mut self) -> Vec<String> {
+        let mut messages = Vec::with_capacity(self.message_count());
+        messages.append(&mut self.steering_messages);
+        messages.append(&mut self.follow_up_messages);
+        self.lines.clear();
+        messages
     }
 }
 

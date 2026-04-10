@@ -140,7 +140,7 @@ pub fn extension_for_image_mime_type(mime_type: &str) -> Option<&'static str> {
     }
 }
 
-pub fn paste_clipboard_image_into_shell<S: ClipboardImageSource>(
+pub fn paste_clipboard_image_into_shell<S: ClipboardImageSource + ?Sized>(
     shell: &mut StartupShellComponent,
     source: &S,
     temp_dir: &Path,

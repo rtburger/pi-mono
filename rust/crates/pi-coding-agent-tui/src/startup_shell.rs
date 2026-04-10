@@ -1,22 +1,33 @@
 use crate::{
-    BuiltInHeaderComponent, FooterComponent, FooterState, KeyHintStyler, KeybindingsManager,
-    PendingMessagesComponent, StartupHeaderStyler, TranscriptComponent,
+    BuiltInHeaderComponent, ClipboardImageSource, FooterComponent, FooterState, KeyHintStyler,
+    KeybindingsManager, PendingMessagesComponent, StartupHeaderStyler, TranscriptComponent,
+    paste_clipboard_image_into_shell,
 };
 use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
 use pi_tui::{Component, ComponentId, Input, RenderHandle, matches_key, truncate_to_width};
 use std::{
     cell::Cell,
     ops::Deref,
+    path::PathBuf,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 type ActionCallback = Box<dyn FnMut() + Send + 'static>;
 type ShortcutCallback = Box<dyn FnMut(String) -> bool + Send + 'static>;
 
+const CLEAR_EXIT_WINDOW: Duration = Duration::from_millis(500);
+
 #[derive(Clone)]
 pub struct StatusHandle {
     status_message: Arc<Mutex<Option<String>>>,
     render_handle: Option<RenderHandle>,
+}
+
+#[derive(Clone)]
+struct ClipboardImagePasteConfig {
+    source: Arc<dyn ClipboardImageSource + Send + Sync>,
+    temp_dir: PathBuf,
 }
 
 impl StatusHandle {
@@ -65,6 +76,8 @@ pub struct StartupShellComponent {
     on_extension_shortcut: Option<ShortcutCallback>,
     action_handlers: Vec<(String, ActionCallback)>,
     viewport_size: Cell<Option<(usize, usize)>>,
+    last_clear_action: Cell<Option<Instant>>,
+    clipboard_image_paste: Option<ClipboardImagePasteConfig>,
 }
 
 impl StartupShellComponent {
@@ -99,6 +112,8 @@ impl StartupShellComponent {
             on_extension_shortcut: None,
             action_handlers: Vec::new(),
             viewport_size: Cell::new(None),
+            last_clear_action: Cell::new(None),
+            clipboard_image_paste: None,
         }
     }
 
@@ -151,6 +166,41 @@ impl StartupShellComponent {
         false
     }
 
+    fn handle_default_clear_action(&mut self) {
+        let now = Instant::now();
+        let should_exit = self
+            .last_clear_action
+            .get()
+            .is_some_and(|last| now.duration_since(last) < CLEAR_EXIT_WINDOW);
+        if should_exit {
+            self.last_clear_action.set(None);
+            if let Some(on_exit) = &mut self.on_exit {
+                on_exit();
+                return;
+            }
+            if self.invoke_registered_action("app.exit") {
+                return;
+            }
+        }
+
+        self.clear_input();
+        self.last_clear_action.set(Some(now));
+    }
+
+    fn handle_default_paste_image_action(&mut self) {
+        let Some(config) = self.clipboard_image_paste.clone() else {
+            return;
+        };
+        let _ = paste_clipboard_image_into_shell(self, config.source.as_ref(), &config.temp_dir);
+    }
+
+    fn handle_default_follow_up_action(&mut self) {
+        if self.input_value().trim().is_empty() {
+            return;
+        }
+        self.input.handle_input("\r");
+    }
+
     pub fn set_on_submit<F>(&mut self, on_submit: F)
     where
         F: FnMut(String) + Send + 'static,
@@ -193,6 +243,20 @@ impl StartupShellComponent {
 
     pub fn clear_on_paste_image(&mut self) {
         self.on_paste_image = None;
+    }
+
+    pub fn set_clipboard_image_source<S>(&mut self, source: S, temp_dir: impl Into<PathBuf>)
+    where
+        S: ClipboardImageSource + Send + Sync + 'static,
+    {
+        self.clipboard_image_paste = Some(ClipboardImagePasteConfig {
+            source: Arc::new(source),
+            temp_dir: temp_dir.into(),
+        });
+    }
+
+    pub fn clear_clipboard_image_source(&mut self) {
+        self.clipboard_image_paste = None;
     }
 
     pub fn set_on_extension_shortcut<F>(&mut self, on_extension_shortcut: F)
@@ -400,6 +464,8 @@ impl Component for StartupShellComponent {
         if self.matches_binding(data, "app.clipboard.pasteImage") {
             if let Some(on_paste_image) = &mut self.on_paste_image {
                 on_paste_image();
+            } else {
+                self.handle_default_paste_image_action();
             }
             return;
         }
@@ -417,6 +483,14 @@ impl Component for StartupShellComponent {
             if page_lines > 0 {
                 self.transcript.scroll_down(page_lines);
             }
+            return;
+        }
+
+        if self.matches_binding(data, "app.clear") {
+            if self.invoke_registered_action("app.clear") {
+                return;
+            }
+            self.handle_default_clear_action();
             return;
         }
 
@@ -440,12 +514,21 @@ impl Component for StartupShellComponent {
             }
         }
 
+        if self.matches_binding(data, "app.message.followUp") {
+            if self.invoke_registered_action("app.message.followUp") {
+                return;
+            }
+            self.handle_default_follow_up_action();
+            return;
+        }
+
         let matched_action = self
             .action_handlers
             .iter()
             .map(|(action, _)| action.as_str())
             .find(|action| {
-                *action != "app.interrupt"
+                *action != "app.clear"
+                    && *action != "app.interrupt"
                     && *action != "app.exit"
                     && self.matches_binding(data, action)
             })

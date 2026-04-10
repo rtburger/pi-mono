@@ -3750,3 +3750,176 @@ Still deferred for the coding-agent interactive shell path:
 Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
 - continue with the next shell-level interactive-control slice that has visible user impact but does not require the full runtime yet; the best next candidate remains a transcript scroll-status/indicator path or a small shell-level status callback that can use the current render bridge
 - keep multiline editor parity, full clipboard-image runtime behavior, and broader session/runtime wiring deferred until a few more shell-level control paths are frozen in Rust
+
+## Milestone 51 update: startup-shell built-in clear + clipboard-image default-action slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (app-action registration, `handleCtrlC()`, and clipboard image handler sections)
+- `packages/coding-agent/src/core/keybindings.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/src/pending_messages.rs`
+- `rust/crates/pi-coding-agent-tui/src/clipboard_image.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/tests/clipboard_image.rs`
+- supporting prompt behavior grounding reviewed from:
+  - `rust/crates/pi-tui/src/input.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `StartupShellComponent` now has built-in default action coverage for two previously advertised shell bindings that still relied entirely on external callbacks in Rust:
+  - `app.clear`
+  - `app.clipboard.pasteImage`
+- the new Rust clear behavior matches the current TypeScript `handleCtrlC()` shape for the migrated shell subset:
+  - first clear keypress clears the prompt input
+  - a second clear keypress within `500ms` triggers the shell exit callback path
+- the new Rust default paste-image behavior matches the current TypeScript `handleClipboardImagePaste()` shape for the migrated shell subset:
+  - when a clipboard image source is configured
+  - pressing the configured paste-image binding writes the clipboard image to a temp file
+  - the file path is inserted directly at the prompt cursor
+- empty clipboard reads remain a no-op, matching the TypeScript behavior of silently ignoring the action when no image is available
+- callback/handler precedence is preserved across both behaviors:
+  - registered `app.clear` handlers still override the built-in clear default
+  - shell-level `on_paste_image` still overrides the built-in clipboard paste default when present
+- this closes two startup-shell hint/runtime mismatches without pulling in the full interactive runtime yet
+
+Compatibility note for this slice:
+- this milestone ports the shell-local default behaviors only
+- Rust still does not port the full interactive runtime shutdown path from TypeScript (`runtimeHost.dispose()`, terminal drain, process exit)
+- Rust still does not yet have the broader interactive runtime wiring around clipboard-image paste beyond prompt insertion
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::startup_shell` with:
+- `CLEAR_EXIT_WINDOW` (`500ms`)
+- internal `last_clear_action` tracking
+- built-in `app.clear` handling inside `handle_input(...)`
+- internal `handle_default_clear_action()` helper that:
+  - clears input on the first press
+  - triggers the existing exit callback/action path on the second press within the window
+- internal clipboard paste configuration storage
+- `set_clipboard_image_source(...)`
+- `clear_clipboard_image_source()`
+- internal built-in paste handler invoked from `app.clipboard.pasteImage` when no explicit callback is installed
+
+Expanded supporting Rust slices with:
+- `pi-coding-agent-tui::pending_messages`
+  - raw queued-message storage plus `message_count()` / `drain_messages()` helpers
+- `pi-coding-agent-tui::clipboard_image`
+  - `paste_clipboard_image_into_shell(...)` now accepts `?Sized` clipboard sources so the startup shell can store and use a trait object directly
+
+Design choices for this slice:
+- keep both default behaviors local to `startup_shell.rs` instead of widening `pi-tui` with a more generic editor/runtime abstraction before multiline/custom-editor parity exists
+- preserve registered action-handler and callback precedence so future runtime/extension wiring can still override shell defaults where needed
+- reuse the existing tested clipboard/temp-file helper rather than duplicating file-writing logic in the shell
+
+### Validation summary
+
+New Rust coverage added for:
+- built-in clear behavior emptying the prompt input on the first clear keypress
+- second clear within the configured window triggering the shell exit callback
+- built-in paste-image behavior writing a temp file and inserting its path into the prompt input
+- empty clipboard reads leaving the prompt untouched
+- explicit paste-image callback precedence over the built-in default path
+- existing registered `app.clear` handler tests continue to pass, proving handler precedence over the new built-in clear default
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test startup_shell` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive shell path:
+- no visible transcript scroll-status indicator or richer transcript navigation controls yet beyond page up/down and the existing programmatic scroll helpers
+- no Rust multiline editor / custom-editor parity yet
+- no Rust inline image rendering parity yet inside transcript widgets
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates the shell/footer stack
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- continue with the next shell-level interactive-control slice that has visible user impact but still fits the current startup-shell architecture, most likely a transcript scroll-status/indicator path or another shell-local status/control behavior
+- keep multiline editor parity and broader session/runtime wiring deferred until a few more shell-level control paths are frozen in Rust
+
+## Milestone 52 update: startup-shell built-in follow-up default-action slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (`handleFollowUp()` section)
+- `packages/coding-agent/src/core/keybindings.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+- supporting prompt behavior grounding reviewed from:
+  - `rust/crates/pi-tui/src/input.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `StartupShellComponent` now has a built-in default path for `app.message.followUp`, closing another shell-level hint/runtime gap
+- the new Rust behavior follows the current TypeScript `handleFollowUp()` non-streaming branch for the migrated shell subset:
+  - if a follow-up action handler is registered, it still takes precedence
+  - otherwise the follow-up keybinding falls back to the shell submit path
+  - whitespace-only prompt input is ignored
+- this matches the TypeScript intent that follow-up has special queueing behavior only when the agent is streaming; when not streaming, it behaves like a regular submit
+- because the current Rust startup shell has no interactive session/streaming runtime yet, the built-in default is the non-streaming behavior only
+
+Compatibility note for this slice:
+- Rust still does not implement the streaming/session-backed follow-up queueing path from TypeScript interactive mode
+- this milestone only ports the startup-shell default for the current no-runtime shell state
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::startup_shell` with:
+- internal `handle_default_follow_up_action()` helper
+- built-in `app.message.followUp` handling inside `handle_input(...)`
+- default behavior that:
+  - returns early for whitespace-only input
+  - routes to the existing prompt submit path when no explicit follow-up handler is installed
+
+Design choices for this slice:
+- keep follow-up behavior local to `startup_shell.rs` instead of introducing fake queue/runtime state before the interactive runtime exists
+- preserve registered action-handler precedence so future runtime wiring can replace the default shell behavior cleanly
+- reuse the existing input submit path rather than adding a second shell-level submission mechanism
+
+### Validation summary
+
+New Rust coverage added for:
+- built-in follow-up behavior submitting current input when no handler is installed
+- whitespace-only follow-up input being ignored
+- registered `app.message.followUp` handlers overriding the built-in submit fallback
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test startup_shell` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive shell path:
+- no visible transcript scroll-status indicator or richer transcript navigation controls yet beyond page up/down and the existing programmatic scroll helpers
+- no Rust multiline editor / custom-editor parity yet
+- no Rust inline image rendering parity yet inside transcript widgets
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no streaming/session-backed follow-up queueing behavior yet
+- no top-level Rust interactive command path yet that instantiates the shell/footer stack
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- continue with the next shell-level interactive-control slice that has visible user impact but still fits the current startup-shell architecture, most likely a transcript scroll-status/indicator path or another shell-local status/control behavior
+- keep multiline editor parity and broader session/runtime wiring deferred until a few more shell-level control paths are frozen in Rust

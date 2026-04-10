@@ -1,6 +1,7 @@
 use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
 use pi_coding_agent_tui::{
-    FooterState, KeyId, KeybindingsManager, PlainKeyHintStyler, StartupShellComponent,
+    ClipboardImage, ClipboardImageSource, FooterState, KeyId, KeybindingsManager,
+    PlainKeyHintStyler, StartupShellComponent,
 };
 use pi_events::Model;
 use pi_tui::{Component, Terminal, Text, Tui, TuiError, visible_width};
@@ -234,6 +235,16 @@ fn model(id: &str, provider: &str, reasoning: bool) -> Model {
     }
 }
 
+struct StaticClipboardImageSource {
+    image: Option<ClipboardImage>,
+}
+
+impl ClipboardImageSource for StaticClipboardImageSource {
+    fn read_clipboard_image(&self) -> std::io::Result<Option<ClipboardImage>> {
+        Ok(self.image.clone())
+    }
+}
+
 #[test]
 fn startup_shell_renders_header_above_prompt() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
@@ -403,6 +414,60 @@ fn startup_shell_interrupt_uses_app_keybinding_binding_and_escape_callback() {
 }
 
 #[test]
+fn startup_shell_clear_binding_clears_input_by_default() {
+    let exits = Arc::new(Mutex::new(0usize));
+    let exits_for_callback = Arc::clone(&exits);
+
+    let keybindings = KeybindingsManager::new(config(&[("app.clear", &["ctrl+x"])]), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_on_exit(move || {
+        *exits_for_callback.lock().expect("exit mutex poisoned") += 1;
+    });
+    shell.set_input_value("draft prompt");
+
+    shell.handle_input("\x18");
+
+    assert_eq!(shell.input_value(), "");
+    assert_eq!(*exits.lock().expect("exit mutex poisoned"), 0);
+}
+
+#[test]
+fn startup_shell_second_clear_binding_within_window_uses_exit_handler() {
+    let exits = Arc::new(Mutex::new(0usize));
+    let exits_for_callback = Arc::clone(&exits);
+
+    let keybindings = KeybindingsManager::new(config(&[("app.clear", &["ctrl+x"])]), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_on_exit(move || {
+        *exits_for_callback.lock().expect("exit mutex poisoned") += 1;
+    });
+    shell.set_input_value("draft prompt");
+
+    shell.handle_input("\x18");
+    assert_eq!(shell.input_value(), "");
+    assert_eq!(*exits.lock().expect("exit mutex poisoned"), 0);
+
+    shell.handle_input("\x18");
+    assert_eq!(*exits.lock().expect("exit mutex poisoned"), 1);
+}
+
+#[test]
 fn startup_shell_extension_shortcut_can_consume_or_fall_through() {
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let seen_for_callback = Arc::clone(&seen);
@@ -506,6 +571,122 @@ fn startup_shell_paste_image_uses_app_keybinding_binding() {
 }
 
 #[test]
+fn startup_shell_default_paste_image_writes_temp_file_and_inserts_path() {
+    let temp_dir = TestDir::new("startup-shell-paste-image");
+    let keybindings =
+        KeybindingsManager::new(config(&[("app.clipboard.pasteImage", &["ctrl+x"])]), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_input_value("prefix  suffix");
+    shell.set_input_cursor("prefix ".len());
+    shell.set_clipboard_image_source(
+        StaticClipboardImageSource {
+            image: Some(ClipboardImage {
+                bytes: vec![1, 2, 3],
+                mime_type: "image/png".to_owned(),
+            }),
+        },
+        temp_dir.path(),
+    );
+
+    shell.handle_input("\x18");
+
+    let written_paths = fs::read_dir(temp_dir.path())
+        .expect("temp dir should be readable")
+        .map(|entry| entry.expect("dir entry should be readable").path())
+        .collect::<Vec<_>>();
+    assert_eq!(written_paths.len(), 1);
+    let written_path = &written_paths[0];
+    assert_eq!(
+        fs::read(written_path).expect("written file should be readable"),
+        vec![1, 2, 3]
+    );
+
+    let expected = format!("prefix {} suffix", written_path.to_string_lossy());
+    assert_eq!(shell.input_value(), expected);
+}
+
+#[test]
+fn startup_shell_default_paste_image_ignores_empty_clipboard() {
+    let temp_dir = TestDir::new("startup-shell-empty-paste-image");
+    let keybindings =
+        KeybindingsManager::new(config(&[("app.clipboard.pasteImage", &["ctrl+x"])]), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_input_value("draft prompt");
+    shell.set_clipboard_image_source(StaticClipboardImageSource { image: None }, temp_dir.path());
+
+    shell.handle_input("\x18");
+
+    assert_eq!(shell.input_value(), "draft prompt");
+    assert!(
+        fs::read_dir(temp_dir.path())
+            .expect("temp dir should be readable")
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
+fn startup_shell_paste_image_callback_overrides_default_clipboard_insert() {
+    let temp_dir = TestDir::new("startup-shell-paste-image-callback");
+    let paste_calls = Arc::new(Mutex::new(0usize));
+    let paste_calls_for_callback = Arc::clone(&paste_calls);
+
+    let keybindings =
+        KeybindingsManager::new(config(&[("app.clipboard.pasteImage", &["ctrl+x"])]), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_input_value("draft prompt");
+    shell.set_clipboard_image_source(
+        StaticClipboardImageSource {
+            image: Some(ClipboardImage {
+                bytes: vec![1, 2, 3],
+                mime_type: "image/png".to_owned(),
+            }),
+        },
+        temp_dir.path(),
+    );
+    shell.set_on_paste_image(move || {
+        *paste_calls_for_callback
+            .lock()
+            .expect("paste mutex poisoned") += 1;
+    });
+
+    shell.handle_input("\x18");
+
+    assert_eq!(*paste_calls.lock().expect("paste mutex poisoned"), 1);
+    assert_eq!(shell.input_value(), "draft prompt");
+    assert!(
+        fs::read_dir(temp_dir.path())
+            .expect("temp dir should be readable")
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
 fn startup_shell_can_run_registered_app_action_handlers() {
     let clear_calls = Arc::new(Mutex::new(0usize));
     let clear_calls_for_handler = Arc::clone(&clear_calls);
@@ -531,6 +712,107 @@ fn startup_shell_can_run_registered_app_action_handlers() {
 
     assert_eq!(*clear_calls.lock().expect("clear mutex poisoned"), 1);
     assert_eq!(shell.input_value(), "draft prompt");
+}
+
+#[test]
+fn startup_shell_follow_up_binding_submits_current_input_by_default() {
+    let submitted = Arc::new(Mutex::new(None::<String>));
+    let submitted_for_callback = Arc::clone(&submitted);
+
+    let keybindings =
+        KeybindingsManager::new(config(&[("app.message.followUp", &["ctrl+x"])]), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_input_value("queued message");
+    shell.set_on_submit(move |value| {
+        *submitted_for_callback
+            .lock()
+            .expect("submitted mutex poisoned") = Some(value);
+    });
+
+    shell.handle_input("\x18");
+
+    assert_eq!(
+        submitted
+            .lock()
+            .expect("submitted mutex poisoned")
+            .as_deref(),
+        Some("queued message")
+    );
+}
+
+#[test]
+fn startup_shell_follow_up_binding_ignores_whitespace_only_input() {
+    let submitted = Arc::new(Mutex::new(0usize));
+    let submitted_for_callback = Arc::clone(&submitted);
+
+    let keybindings =
+        KeybindingsManager::new(config(&[("app.message.followUp", &["ctrl+x"])]), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_input_value("   ");
+    shell.set_on_submit(move |_| {
+        *submitted_for_callback
+            .lock()
+            .expect("submitted mutex poisoned") += 1;
+    });
+
+    shell.handle_input("\x18");
+
+    assert_eq!(*submitted.lock().expect("submitted mutex poisoned"), 0);
+}
+
+#[test]
+fn startup_shell_registered_follow_up_action_overrides_default_submit() {
+    let submitted = Arc::new(Mutex::new(0usize));
+    let submitted_for_callback = Arc::clone(&submitted);
+    let follow_up_calls = Arc::new(Mutex::new(0usize));
+    let follow_up_calls_for_handler = Arc::clone(&follow_up_calls);
+
+    let keybindings =
+        KeybindingsManager::new(config(&[("app.message.followUp", &["ctrl+x"])]), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_input_value("queued message");
+    shell.set_on_submit(move |_| {
+        *submitted_for_callback
+            .lock()
+            .expect("submitted mutex poisoned") += 1;
+    });
+    shell.on_action("app.message.followUp", move || {
+        *follow_up_calls_for_handler
+            .lock()
+            .expect("follow-up mutex poisoned") += 1;
+    });
+
+    shell.handle_input("\x18");
+
+    assert_eq!(
+        *follow_up_calls.lock().expect("follow-up mutex poisoned"),
+        1
+    );
+    assert_eq!(*submitted.lock().expect("submitted mutex poisoned"), 0);
 }
 
 #[test]
