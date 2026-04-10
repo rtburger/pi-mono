@@ -5,6 +5,7 @@ use crate::{
     unicode::sanitize_provider_text,
 };
 use async_stream::stream;
+use futures::StreamExt;
 use pi_events::{
     AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason,
     ToolDefinition, Usage, UserContent,
@@ -1402,22 +1403,28 @@ pub fn stream_openai_completions_chunks(
     })
 }
 
-pub fn stream_openai_completions_http(
+pub fn stream_openai_completions_http<T>(
     model: Model,
-    params: OpenAiCompletionsRequestParams,
+    params: T,
     api_key: String,
     signal: Option<tokio::sync::watch::Receiver<bool>>,
-) -> AssistantEventStream {
+) -> AssistantEventStream
+where
+    T: Serialize + Send + Sync + 'static,
+{
     stream_openai_completions_http_with_headers(model, params, api_key, signal, BTreeMap::new())
 }
 
-pub fn stream_openai_completions_http_with_headers(
+pub fn stream_openai_completions_http_with_headers<T>(
     model: Model,
-    params: OpenAiCompletionsRequestParams,
+    params: T,
     api_key: String,
     signal: Option<tokio::sync::watch::Receiver<bool>>,
     request_headers: BTreeMap<String, String>,
-) -> AssistantEventStream {
+) -> AssistantEventStream
+where
+    T: Serialize + Send + Sync + 'static,
+{
     Box::pin(stream! {
         let mut signal = signal;
         let mut state = OpenAiCompletionsStreamState::new(&model);
@@ -1581,40 +1588,56 @@ impl AiProvider for OpenAiCompletionsProvider {
         context: Context,
         options: StreamOptions,
     ) -> AssistantEventStream {
-        let compat = detect_openai_completions_compat(&model);
-        let params = build_openai_completions_request_params(
-            &model,
-            &context,
-            &compat,
-            &OpenAiCompletionsRequestOptions {
-                tool_choice: options.tool_choice.clone(),
-                reasoning_effort: parse_reasoning_effort(options.reasoning_effort.as_deref()),
-                max_tokens: options.max_tokens,
-                temperature: options.temperature,
-            },
-        );
-        let request_headers = build_runtime_request_headers(&model, &options.headers);
+        Box::pin(stream! {
+            let compat = detect_openai_completions_compat(&model);
+            let params = build_openai_completions_request_params(
+                &model,
+                &context,
+                &compat,
+                &OpenAiCompletionsRequestOptions {
+                    tool_choice: options.tool_choice.clone(),
+                    reasoning_effort: parse_reasoning_effort(options.reasoning_effort.as_deref()),
+                    max_tokens: options.max_tokens,
+                    temperature: options.temperature,
+                },
+            );
+            let payload = match crate::apply_payload_hook(&model, params, options.on_payload.as_ref()).await {
+                Ok(payload) => payload,
+                Err(error) => {
+                    yield Ok(AssistantEvent::Error {
+                        reason: StopReason::Error,
+                        error: error_message(&model, error.to_string()),
+                    });
+                    return;
+                }
+            };
+            let request_headers = build_runtime_request_headers(&model, &options.headers);
 
-        let api_key = options
-            .api_key
-            .clone()
-            .or_else(|| crate::get_env_api_key(&model.provider));
+            let api_key = options
+                .api_key
+                .clone()
+                .or_else(|| crate::get_env_api_key(&model.provider));
 
-        match api_key {
-            Some(api_key) => stream_openai_completions_http_with_headers(
-                model,
-                params,
-                api_key,
-                options.signal.clone(),
-                request_headers,
-            ),
-            None => Box::pin(stream! {
-                yield Ok(AssistantEvent::Error {
-                    reason: StopReason::Error,
-                    error: error_message(&model, "OpenAI Completions API key is required".into()),
-                });
-            }),
-        }
+            let mut inner = match api_key {
+                Some(api_key) => stream_openai_completions_http_with_headers(
+                    model,
+                    payload,
+                    api_key,
+                    options.signal.clone(),
+                    request_headers,
+                ),
+                None => Box::pin(stream! {
+                    yield Ok(AssistantEvent::Error {
+                        reason: StopReason::Error,
+                        error: error_message(&model, "OpenAI Completions API key is required".into()),
+                    });
+                }),
+            };
+
+            while let Some(event) = inner.next().await {
+                yield event;
+            }
+        })
     }
 }
 

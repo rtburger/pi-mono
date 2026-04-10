@@ -1471,3 +1471,99 @@ Validation run results:
 Still deferred in `pi-ai`:
 - broader `streamSimple()` / `completeSimple()` API parity beyond the narrowed in-scope providers and current high-value passthrough fields
 - provider-specific simple-option parity that is outside the current migration scope
+
+## Milestone 22 update: `metadata` + async `on_payload` simple-option parity slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/ai/src/types.ts`
+- `packages/ai/src/providers/simple-options.ts`
+- `packages/ai/src/providers/anthropic.ts`
+- `packages/ai/src/providers/openai-responses.ts`
+- `packages/ai/src/providers/openai-completions.ts`
+- `packages/ai/src/providers/openai-codex-responses.ts`
+- focused TS usage/tests grounding:
+  - `packages/ai/test/anthropic-thinking-disable.test.ts`
+  - `packages/ai/test/openai-completions-tool-choice.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/src/lib.rs`
+- `rust/crates/pi-ai/src/anthropic_messages.rs`
+- `rust/crates/pi-ai/src/openai_responses.rs`
+- `rust/crates/pi-ai/src/openai_completions.rs`
+- `rust/crates/pi-ai/src/openai_codex_responses.rs`
+- `rust/crates/pi-ai/tests/simple_stream.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- `StreamOptions` and `SimpleStreamOptions` now carry the remaining high-value shared request fields from the narrowed TS `buildBaseOptions()` slice:
+  - `metadata`
+  - async `on_payload`
+- `stream_simple()` / `complete_simple()` now preserve those fields when mapping into the existing runtime provider path instead of dropping them
+- the four in-scope real-provider Rust paths now apply `on_payload` before request dispatch:
+  - `anthropic-messages`
+  - `openai-responses`
+  - `openai-completions`
+  - `openai-codex-responses`
+- post-hook payloads now flow to transport as raw JSON values, so arbitrary added or replaced JSON fields are preserved instead of being collapsed back into the typed Rust request structs before dispatch
+- Anthropic request shaping now honors the narrowed TS metadata behavior already present in the provider source:
+  - `metadata.user_id` is extracted from the shared metadata map and serialized into the Anthropic request body
+- payload replacement errors are now surfaced as normal terminal assistant error events instead of panicking or silently ignoring invalid replacements
+
+Compatibility note for this slice:
+- this milestone intentionally narrows metadata parity to the currently exercised Anthropic `user_id` extraction path from the TypeScript provider code
+- the new Rust `PayloadHook` surface is an explicit strongly typed Rust wrapper around the TS `onPayload` concept; the observable behavior preserved here is request inspection/replacement before dispatch, not the TypeScript function signature verbatim
+- Rust now matches the important TypeScript dynamic-object behavior more closely on this path: provider payload hooks can add fields that are not part of the typed request structs and those fields still reach the final HTTP/WebSocket request body
+
+### Rust design summary
+
+Core API changes in `rust/crates/pi-ai/src/lib.rs`:
+- added `PayloadHookResult`
+- added `PayloadHookFuture`
+- added `PayloadHook`
+- added internal `apply_payload_hook()` helper returning raw JSON after optional replacement
+- expanded `StreamOptions` with:
+  - `metadata`
+  - `on_payload`
+- expanded `SimpleStreamOptions` with:
+  - `metadata`
+  - `on_payload`
+- `map_simple_stream_options()` now forwards those fields into the runtime provider path
+
+Provider runtime changes:
+- `rust/crates/pi-ai/src/anthropic_messages.rs`
+  - extracts `metadata.user_id` into Anthropic request metadata
+  - applies typed payload replacement before HTTP dispatch
+- `rust/crates/pi-ai/src/openai_responses.rs`
+  - applies typed payload replacement before HTTP dispatch
+- `rust/crates/pi-ai/src/openai_completions.rs`
+  - applies typed payload replacement before HTTP dispatch
+- `rust/crates/pi-ai/src/openai_codex_responses.rs`
+  - applies typed payload replacement before SSE/WebSocket dispatch
+
+Behavior-freeze coverage extended in:
+- `rust/crates/pi-ai/tests/simple_stream.rs`
+
+### Validation summary
+
+New Rust coverage added for:
+- OpenAI Responses simple-path payload replacement before request send, including preservation of added unknown JSON fields
+- OpenAI Completions simple-path payload replacement before request send, including preservation of added unknown JSON fields
+- OpenAI Codex simple-path payload replacement before request send, including preservation of added unknown JSON fields
+- Anthropic simple-path `metadata.user_id` request serialization plus preservation of added unknown JSON fields
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-ai --test simple_stream` passed
+- `cd rust && cargo test -p pi-ai` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- broader `streamSimple()` / `completeSimple()` API parity beyond the narrowed in-scope providers and current shared-option slice
+- provider-specific simple-option parity outside the current migration scope
+- downstream `pi-agent` / `pi-coding-agent` exposure of the new Rust `on_payload` hook remains a later crate-integration step, not part of this `pi-ai` milestone

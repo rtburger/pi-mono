@@ -17,10 +17,12 @@ use pi_events::{
     AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason, Usage,
     UserContent,
 };
+use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     env,
+    future::Future,
     pin::Pin,
     sync::{
         Arc, Mutex, Once, OnceLock,
@@ -32,6 +34,59 @@ use thiserror::Error;
 use tokio::time::{Duration, sleep};
 
 pub type AssistantEventStream = Pin<Box<dyn Stream<Item = Result<AssistantEvent, AiError>> + Send>>;
+pub type PayloadHookResult = Result<Option<Value>, String>;
+pub type PayloadHookFuture = Pin<Box<dyn Future<Output = PayloadHookResult> + Send>>;
+type PayloadHookFn = dyn Fn(Value, Model) -> PayloadHookFuture + Send + Sync;
+
+#[derive(Clone)]
+pub struct PayloadHook {
+    inner: Arc<PayloadHookFn>,
+}
+
+impl PayloadHook {
+    pub fn new<F, Fut>(hook: F) -> Self
+    where
+        F: Fn(Value, Model) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = PayloadHookResult> + Send + 'static,
+    {
+        Self {
+            inner: Arc::new(move |payload, model| Box::pin(hook(payload, model))),
+        }
+    }
+
+    pub async fn call(&self, payload: Value, model: Model) -> PayloadHookResult {
+        (self.inner)(payload, model).await
+    }
+}
+
+impl std::fmt::Debug for PayloadHook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PayloadHook(..)")
+    }
+}
+
+pub(crate) async fn apply_payload_hook<T>(
+    model: &Model,
+    payload: T,
+    hook: Option<&PayloadHook>,
+) -> Result<Value, AiError>
+where
+    T: Serialize,
+{
+    let payload = serde_json::to_value(&payload).map_err(|error| {
+        AiError::Message(format!("Failed to serialize request payload: {error}"))
+    })?;
+
+    let Some(hook) = hook else {
+        return Ok(payload);
+    };
+
+    Ok(hook
+        .call(payload.clone(), model.clone())
+        .await
+        .map_err(AiError::Message)?
+        .unwrap_or(payload))
+}
 
 type Registry = HashMap<String, Arc<dyn AiProvider>>;
 
@@ -55,6 +110,8 @@ pub struct StreamOptions {
     pub api_key: Option<String>,
     pub transport: Option<Transport>,
     pub headers: BTreeMap<String, String>,
+    pub metadata: BTreeMap<String, Value>,
+    pub on_payload: Option<PayloadHook>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
     pub reasoning_effort: Option<String>,
@@ -106,6 +163,8 @@ pub struct SimpleStreamOptions {
     pub api_key: Option<String>,
     pub transport: Option<Transport>,
     pub headers: BTreeMap<String, String>,
+    pub metadata: BTreeMap<String, Value>,
+    pub on_payload: Option<PayloadHook>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
     pub reasoning: Option<ThinkingLevel>,
@@ -247,6 +306,8 @@ fn map_simple_stream_options(model: &Model, options: SimpleStreamOptions) -> Str
         api_key,
         transport,
         headers,
+        metadata,
+        on_payload,
         temperature,
         max_tokens,
         reasoning,
@@ -289,6 +350,8 @@ fn map_simple_stream_options(model: &Model, options: SimpleStreamOptions) -> Str
         api_key,
         transport,
         headers,
+        metadata,
+        on_payload,
         temperature,
         max_tokens: resolved_max_tokens,
         reasoning_effort,

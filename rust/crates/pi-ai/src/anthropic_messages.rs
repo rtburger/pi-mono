@@ -4,6 +4,7 @@ use crate::{
     register_provider,
 };
 use async_stream::stream;
+use futures::StreamExt;
 use pi_events::{
     AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason,
     ToolDefinition, Usage, UserContent,
@@ -398,15 +399,18 @@ pub fn normalize_anthropic_tool_call_id(id: &str) -> String {
         .collect()
 }
 
-pub fn stream_anthropic_http(
+pub fn stream_anthropic_http<T>(
     model: Model,
-    params: AnthropicRequestParams,
+    params: T,
     api_key: String,
     is_oauth_token: bool,
     tools: Vec<ToolDefinition>,
     signal: Option<tokio::sync::watch::Receiver<bool>>,
     request_headers: BTreeMap<String, String>,
-) -> AssistantEventStream {
+) -> AssistantEventStream
+where
+    T: Serialize + Send + Sync + 'static,
+{
     Box::pin(stream! {
         let mut signal = signal;
         let mut state = AnthropicStreamState::new(&model, is_oauth_token, tools);
@@ -1033,38 +1037,62 @@ impl AiProvider for AnthropicMessagesProvider {
         context: Context,
         options: StreamOptions,
     ) -> AssistantEventStream {
-        let api_key = options
-            .api_key
-            .clone()
-            .or_else(|| get_env_api_key(&model.provider));
-        let Some(api_key) = api_key else {
-            return terminal_error_stream(
+        Box::pin(stream! {
+            let api_key = options
+                .api_key
+                .clone()
+                .or_else(|| get_env_api_key(&model.provider));
+            let Some(api_key) = api_key else {
+                let mut inner = terminal_error_stream(
+                    &model,
+                    format!("{} API key is required", provider_label(&model)),
+                );
+                while let Some(event) = inner.next().await {
+                    yield event;
+                }
+                return;
+            };
+
+            let anthropic_options = anthropic_options_from_stream_options(&model, &options);
+            let is_oauth_token = is_oauth_token(&api_key);
+            let params = build_anthropic_request_params(
                 &model,
-                format!("{} API key is required", provider_label(&model)),
+                &context,
+                is_oauth_token,
+                &anthropic_options,
             );
-        };
+            let payload = match crate::apply_payload_hook(&model, params, options.on_payload.as_ref()).await {
+                Ok(payload) => payload,
+                Err(error) => {
+                    let message = error.to_string();
+                    let mut inner = terminal_error_stream(&model, message);
+                    while let Some(event) = inner.next().await {
+                        yield event;
+                    }
+                    return;
+                }
+            };
+            let request_headers = build_runtime_request_headers(
+                &model,
+                &context,
+                &anthropic_options.headers,
+                anthropic_options.interleaved_thinking,
+                is_oauth_token,
+            );
 
-        let anthropic_options = anthropic_options_from_stream_options(&model, &options);
-        let is_oauth_token = is_oauth_token(&api_key);
-        let params =
-            build_anthropic_request_params(&model, &context, is_oauth_token, &anthropic_options);
-        let request_headers = build_runtime_request_headers(
-            &model,
-            &context,
-            &anthropic_options.headers,
-            anthropic_options.interleaved_thinking,
-            is_oauth_token,
-        );
-
-        stream_anthropic_http(
-            model,
-            params,
-            api_key,
-            is_oauth_token,
-            context.tools.clone(),
-            anthropic_options.signal,
-            request_headers,
-        )
+            let mut inner = stream_anthropic_http(
+                model,
+                payload,
+                api_key,
+                is_oauth_token,
+                context.tools.clone(),
+                anthropic_options.signal,
+                request_headers,
+            );
+            while let Some(event) = inner.next().await {
+                yield event;
+            }
+        })
     }
 }
 
@@ -1079,6 +1107,11 @@ fn anthropic_options_from_stream_options(
         max_tokens: options.max_tokens,
         temperature: options.temperature,
         cache_retention: Some(options.cache_retention),
+        metadata_user_id: options
+            .metadata
+            .get("user_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
         ..AnthropicOptions::default()
     };
 

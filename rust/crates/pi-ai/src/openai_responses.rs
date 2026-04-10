@@ -4,6 +4,7 @@ use crate::{
     register_provider,
 };
 use async_stream::stream;
+use futures::StreamExt;
 use pi_events::{
     AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason,
     ToolDefinition, Usage, UserContent,
@@ -1272,22 +1273,28 @@ impl OpenAiResponsesStreamState {
     }
 }
 
-pub fn stream_openai_responses_http(
+pub fn stream_openai_responses_http<T>(
     model: Model,
-    params: OpenAiResponsesRequestParams,
+    params: T,
     api_key: String,
     signal: Option<tokio::sync::watch::Receiver<bool>>,
-) -> AssistantEventStream {
+) -> AssistantEventStream
+where
+    T: Serialize + Send + Sync + 'static,
+{
     stream_openai_responses_http_with_headers(model, params, api_key, signal, BTreeMap::new())
 }
 
-pub fn stream_openai_responses_http_with_headers(
+pub fn stream_openai_responses_http_with_headers<T>(
     model: Model,
-    params: OpenAiResponsesRequestParams,
+    params: T,
     api_key: String,
     signal: Option<tokio::sync::watch::Receiver<bool>>,
     request_headers: BTreeMap<String, String>,
-) -> AssistantEventStream {
+) -> AssistantEventStream
+where
+    T: Serialize + Send + Sync + 'static,
+{
     Box::pin(stream! {
         let mut signal = signal;
         let mut state = OpenAiResponsesStreamState::new(&model);
@@ -1619,46 +1626,62 @@ impl AiProvider for OpenAiResponsesProvider {
         context: Context,
         options: StreamOptions,
     ) -> AssistantEventStream {
-        let params = build_openai_responses_request_params(
-            &model,
-            &context,
-            &["openai", "openai-codex"],
-            OpenAiResponsesConvertOptions::default(),
-            OpenAiResponsesParamsOptions {
-                max_output_tokens: options.max_tokens,
-                temperature: options.temperature,
-                reasoning_effort: options.reasoning_effort.clone(),
-                reasoning_summary: options.reasoning_summary.clone(),
-                session_id: options.session_id.clone(),
-                cache_retention: Some(match options.cache_retention {
-                    crate::CacheRetention::None => "none".into(),
-                    crate::CacheRetention::Short => "short".into(),
-                    crate::CacheRetention::Long => "long".into(),
+        Box::pin(stream! {
+            let params = build_openai_responses_request_params(
+                &model,
+                &context,
+                &["openai", "openai-codex"],
+                OpenAiResponsesConvertOptions::default(),
+                OpenAiResponsesParamsOptions {
+                    max_output_tokens: options.max_tokens,
+                    temperature: options.temperature,
+                    reasoning_effort: options.reasoning_effort.clone(),
+                    reasoning_summary: options.reasoning_summary.clone(),
+                    session_id: options.session_id.clone(),
+                    cache_retention: Some(match options.cache_retention {
+                        crate::CacheRetention::None => "none".into(),
+                        crate::CacheRetention::Short => "short".into(),
+                        crate::CacheRetention::Long => "long".into(),
+                    }),
+                },
+            );
+            let payload = match crate::apply_payload_hook(&model, params, options.on_payload.as_ref()).await {
+                Ok(payload) => payload,
+                Err(error) => {
+                    yield Ok(AssistantEvent::Error {
+                        reason: StopReason::Error,
+                        error: error_message(&model, error.to_string()),
+                    });
+                    return;
+                }
+            };
+            let request_headers = build_runtime_request_headers(&model, &context, &options.headers);
+
+            let api_key = options
+                .api_key
+                .clone()
+                .or_else(|| crate::get_env_api_key(&model.provider));
+
+            let mut inner = match api_key {
+                Some(api_key) => stream_openai_responses_http_with_headers(
+                    model,
+                    payload,
+                    api_key,
+                    options.signal.clone(),
+                    request_headers,
+                ),
+                None => Box::pin(stream! {
+                    yield Ok(AssistantEvent::Error {
+                        reason: StopReason::Error,
+                        error: error_message(&model, "OpenAI Responses API key is required".into()),
+                    });
                 }),
-            },
-        );
-        let request_headers = build_runtime_request_headers(&model, &context, &options.headers);
+            };
 
-        let api_key = options
-            .api_key
-            .clone()
-            .or_else(|| crate::get_env_api_key(&model.provider));
-
-        match api_key {
-            Some(api_key) => stream_openai_responses_http_with_headers(
-                model,
-                params,
-                api_key,
-                options.signal.clone(),
-                request_headers,
-            ),
-            None => Box::pin(stream! {
-                yield Ok(AssistantEvent::Error {
-                    reason: StopReason::Error,
-                    error: error_message(&model, "OpenAI Responses API key is required".into()),
-                });
-            }),
-        }
+            while let Some(event) = inner.next().await {
+                yield event;
+            }
+        })
     }
 }
 

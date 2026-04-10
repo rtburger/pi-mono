@@ -162,12 +162,15 @@ pub fn stream_openai_codex_sse_text(
     ))
 }
 
-pub fn stream_openai_codex_http(
+pub fn stream_openai_codex_http<T>(
     model: Model,
-    params: OpenAiCodexResponsesRequestParams,
+    params: T,
     request_headers: BTreeMap<String, String>,
     signal: Option<tokio::sync::watch::Receiver<bool>>,
-) -> AssistantEventStream {
+) -> AssistantEventStream
+where
+    T: Serialize + Send + Sync + 'static,
+{
     Box::pin(stream! {
         let mut signal = signal;
         let mut state = OpenAiResponsesStreamState::new(&model);
@@ -258,13 +261,16 @@ pub fn stream_openai_codex_http(
     })
 }
 
-pub fn stream_openai_codex_websocket(
+pub fn stream_openai_codex_websocket<T>(
     model: Model,
-    params: OpenAiCodexResponsesRequestParams,
+    params: T,
     request_headers: BTreeMap<String, String>,
     session_cache_id: Option<String>,
     signal: Option<tokio::sync::watch::Receiver<bool>>,
-) -> AssistantEventStream {
+) -> AssistantEventStream
+where
+    T: Serialize + Send + Sync + 'static,
+{
     Box::pin(stream! {
         let mut signal = signal;
         let state = OpenAiResponsesStreamState::new(&model);
@@ -300,14 +306,17 @@ pub fn stream_openai_codex_websocket(
     })
 }
 
-pub fn stream_openai_codex_auto(
+pub fn stream_openai_codex_auto<T>(
     model: Model,
-    params: OpenAiCodexResponsesRequestParams,
+    params: T,
     http_request_headers: BTreeMap<String, String>,
     websocket_request_headers: BTreeMap<String, String>,
     session_cache_id: Option<String>,
     signal: Option<tokio::sync::watch::Receiver<bool>>,
-) -> AssistantEventStream {
+) -> AssistantEventStream
+where
+    T: Serialize + Clone + Send + Sync + 'static,
+{
     Box::pin(stream! {
         let mut signal = signal;
         let state = OpenAiResponsesStreamState::new(&model);
@@ -552,13 +561,16 @@ fn stream_openai_codex_connected_websocket(
     })
 }
 
-async fn connect_and_start_codex_websocket(
+async fn connect_and_start_codex_websocket<T>(
     url: &str,
     request_headers: &BTreeMap<String, String>,
     session_cache_id: Option<&str>,
-    params: &OpenAiCodexResponsesRequestParams,
+    params: &T,
     signal: &mut Option<tokio::sync::watch::Receiver<bool>>,
-) -> Result<AcquiredCodexWebSocket, String> {
+) -> Result<AcquiredCodexWebSocket, String>
+where
+    T: Serialize + Sync,
+{
     let mut websocket =
         acquire_codex_websocket(url, request_headers, session_cache_id, signal).await?;
     match send_codex_websocket_request(
@@ -689,11 +701,14 @@ fn build_codex_websocket_request(
     Ok(request)
 }
 
-async fn send_codex_websocket_request(
+async fn send_codex_websocket_request<T>(
     socket: &mut CodexWebSocket,
-    params: &OpenAiCodexResponsesRequestParams,
+    params: &T,
     signal: &mut Option<tokio::sync::watch::Receiver<bool>>,
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    T: Serialize + Sync,
+{
     let payload = build_codex_websocket_payload(params)?;
     let send_future = socket.send(WebSocketMessage::Text(payload.into()));
     tokio::pin!(send_future);
@@ -710,9 +725,10 @@ async fn send_codex_websocket_request(
     }
 }
 
-fn build_codex_websocket_payload(
-    params: &OpenAiCodexResponsesRequestParams,
-) -> Result<String, String> {
+fn build_codex_websocket_payload<T>(params: &T) -> Result<String, String>
+where
+    T: Serialize,
+{
     let value = serde_json::to_value(params)
         .map_err(|error| format!("Failed to serialize WebSocket payload: {error}"))?;
     let Value::Object(mut object) = value else {
@@ -743,12 +759,15 @@ fn parse_codex_websocket_event(
     }))
 }
 
-async fn send_codex_http_request_with_retry(
+async fn send_codex_http_request_with_retry<T>(
     model: &Model,
-    params: &OpenAiCodexResponsesRequestParams,
+    params: &T,
     request_headers: &BTreeMap<String, String>,
     signal: &mut Option<tokio::sync::watch::Receiver<bool>>,
-) -> Result<reqwest::Response, String> {
+) -> Result<reqwest::Response, String>
+where
+    T: Serialize + Sync,
+{
     let client = reqwest::Client::new();
     let url = resolve_codex_url(&model.base_url);
     let mut last_error = None;
@@ -877,74 +896,107 @@ impl AiProvider for OpenAiCodexResponsesProvider {
         context: Context,
         options: StreamOptions,
     ) -> AssistantEventStream {
-        let Some(api_key) = options.api_key.clone() else {
-            return terminal_error_stream(&model, "OpenAI Codex API key is required");
-        };
-
-        let params = build_openai_codex_responses_request_params(
-            &model,
-            &context,
-            &OpenAiCodexResponsesRequestOptions {
-                reasoning_effort: options.reasoning_effort.clone(),
-                reasoning_summary: options.reasoning_summary.clone(),
-                temperature: options.temperature,
-                session_id: options.session_id.clone(),
-                text_verbosity: None,
-            },
-        );
-
-        let http_request_headers = match build_sse_request_headers(
-            &model,
-            &options.headers,
-            &api_key,
-            options.session_id.as_deref(),
-        ) {
-            Ok(headers) => headers,
-            Err(error) => return terminal_error_stream(&model, &error),
-        };
-
-        match options.transport.unwrap_or(Transport::Sse) {
-            Transport::Sse => stream_openai_codex_http(
-                model,
-                params,
-                http_request_headers,
-                options.signal.clone(),
-            ),
-            Transport::WebSocket | Transport::Auto => {
-                let websocket_request_id = options
-                    .session_id
-                    .clone()
-                    .unwrap_or_else(create_codex_request_id);
-                let websocket_request_headers = match build_websocket_request_headers(
-                    &model,
-                    &options.headers,
-                    &api_key,
-                    &websocket_request_id,
-                ) {
-                    Ok(headers) => headers,
-                    Err(error) => return terminal_error_stream(&model, &error),
-                };
-
-                match options.transport.unwrap_or(Transport::Sse) {
-                    Transport::WebSocket => stream_openai_codex_websocket(
-                        model,
-                        params,
-                        websocket_request_headers,
-                        options.session_id.clone(),
-                        options.signal.clone(),
-                    ),
-                    Transport::Auto => stream_openai_codex_auto(
-                        model,
-                        params,
-                        http_request_headers,
-                        websocket_request_headers,
-                        options.session_id.clone(),
-                        options.signal.clone(),
-                    ),
-                    Transport::Sse => unreachable!(),
+        Box::pin(stream! {
+            let Some(api_key) = options.api_key.clone() else {
+                let mut inner = terminal_error_stream(&model, "OpenAI Codex API key is required");
+                while let Some(event) = inner.next().await {
+                    yield event;
                 }
+                return;
+            };
+
+            let params = build_openai_codex_responses_request_params(
+                &model,
+                &context,
+                &OpenAiCodexResponsesRequestOptions {
+                    reasoning_effort: options.reasoning_effort.clone(),
+                    reasoning_summary: options.reasoning_summary.clone(),
+                    temperature: options.temperature,
+                    session_id: options.session_id.clone(),
+                    text_verbosity: None,
+                },
+            );
+            let payload = match crate::apply_payload_hook(&model, params, options.on_payload.as_ref()).await {
+                Ok(payload) => payload,
+                Err(error) => {
+                    let message = error.to_string();
+                    let mut inner = terminal_error_stream(&model, &message);
+                    while let Some(event) = inner.next().await {
+                        yield event;
+                    }
+                    return;
+                }
+            };
+
+            let http_request_headers = match build_sse_request_headers(
+                &model,
+                &options.headers,
+                &api_key,
+                options.session_id.as_deref(),
+            ) {
+                Ok(headers) => headers,
+                Err(error) => {
+                    let mut inner = terminal_error_stream(&model, &error);
+                    while let Some(event) = inner.next().await {
+                        yield event;
+                    }
+                    return;
+                }
+            };
+
+            let mut inner = match options.transport.unwrap_or(Transport::Sse) {
+                Transport::Sse => stream_openai_codex_http(
+                    model,
+                    payload,
+                    http_request_headers,
+                    options.signal.clone(),
+                ),
+                Transport::WebSocket | Transport::Auto => {
+                    let websocket_request_id = options
+                        .session_id
+                        .clone()
+                        .unwrap_or_else(create_codex_request_id);
+                    let websocket_request_headers = match build_websocket_request_headers(
+                        &model,
+                        &options.headers,
+                        &api_key,
+                        &websocket_request_id,
+                    ) {
+                        Ok(headers) => headers,
+                        Err(error) => {
+                            let mut inner = terminal_error_stream(&model, &error);
+                            while let Some(event) = inner.next().await {
+                                yield event;
+                            }
+                            return;
+                        }
+                    };
+
+                    match options.transport.unwrap_or(Transport::Sse) {
+                        Transport::WebSocket => stream_openai_codex_websocket(
+                            model,
+                            payload,
+                            websocket_request_headers,
+                            options.session_id.clone(),
+                            options.signal.clone(),
+                        ),
+                        Transport::Auto => stream_openai_codex_auto(
+                            model,
+                            payload,
+                            http_request_headers,
+                            websocket_request_headers,
+                            options.session_id.clone(),
+                            options.signal.clone(),
+                        ),
+                        Transport::Sse => unreachable!(),
+                    }
+                }
+            };
+
+            while let Some(event) = inner.next().await {
+                yield event;
             }
-        }
+        })
     }
 }
 
