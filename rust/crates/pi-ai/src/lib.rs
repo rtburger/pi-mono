@@ -1,5 +1,6 @@
 pub mod anthropic_messages;
 pub mod models;
+pub mod openai_codex_responses;
 pub mod openai_completions;
 pub mod openai_responses;
 
@@ -100,6 +101,7 @@ fn env_var(name: &str) -> Option<String> {
 
 pub fn register_builtin_providers() {
     anthropic_messages::register_anthropic_provider();
+    openai_codex_responses::register_openai_codex_responses_provider();
     openai_completions::register_openai_completions_provider();
     openai_responses::register_openai_responses_provider();
 }

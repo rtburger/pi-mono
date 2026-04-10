@@ -654,3 +654,112 @@ Still deferred in `pi-ai`:
 - fuller `openai-completions` parity for provider-specific compat overrides sourced from TS model metadata
 - broader token/cost parity against the TS suite beyond the current streamed usage normalization slice
 - additional Rust ports for TS regressions around empty streams, Unicode, cross-provider handoff, and context-overflow behavior within the narrowed provider scope
+
+## Milestone 12 update: OpenAI Codex Responses runtime/provider slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/ai/src/providers/openai-codex-responses.ts`
+- `packages/ai/src/providers/openai-responses-shared.ts`
+- `packages/ai/src/env-api-keys.ts`
+- `packages/ai/test/openai-codex-stream.test.ts`
+- targeted narrowed-regression references reviewed before the next slice:
+  - `packages/ai/test/abort.test.ts`
+  - `packages/ai/test/empty.test.ts`
+  - `packages/ai/test/responseid.test.ts`
+  - `packages/ai/test/tool-call-without-result.test.ts`
+  - `packages/ai/test/image-tool-result.test.ts`
+  - `packages/ai/test/unicode-surrogate.test.ts`
+  - `packages/ai/test/context-overflow.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/src/lib.rs`
+- `rust/crates/pi-ai/src/openai_responses.rs`
+- `rust/crates/pi-ai/src/models.rs`
+- `rust/crates/pi-ai/tests/openai_responses_http.rs`
+- `rust/crates/pi-ai/tests/openai_responses_stream.rs`
+- `rust/crates/pi-ai/tests/openai_responses_payload.rs`
+- `rust/crates/pi-ai/tests/openai_completions_http.rs`
+- `rust/crates/pi-ai/tests/openai_completions_stream.rs`
+- `rust/crates/pi-ai/tests/anthropic_messages_http.rs`
+- `rust/crates/pi-ai/tests/anthropic_messages_stream.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- `openai-codex-responses` now has its own built-in Rust provider registration and runtime API path
+- Codex request shaping now reuses the migrated OpenAI Responses message-replay conversion while preserving Codex-specific request-body differences:
+  - `instructions` carries the system prompt instead of replaying it as an input message
+  - `text.verbosity` defaults to `medium`
+  - `tool_choice: "auto"` and `parallel_tool_calls: true`
+  - `prompt_cache_key` follows `session_id`
+  - Rust now also sends `prompt_cache_retention: "in-memory"` when `session_id` is present, following the current TS test expectation for the Codex path
+  - Codex reasoning-effort clamping now matches the current TS source for the migrated model families (`gpt-5.2+ minimal -> low`, `gpt-5.1 xhigh -> high`, `gpt-5.1-codex-mini` remap)
+- Codex SSE transport now reuses/adapts the migrated OpenAI Responses decoder/state machine rather than reimplementing a separate event model
+- Codex terminal-stream compatibility now covers the event-name differences exercised by the TS tests:
+  - `response.done` -> normalized completed response
+  - `response.completed` -> completed response
+  - `response.incomplete` -> completed response with `status: incomplete` so Rust emits `StopReason::Length`
+- Codex auth/header behavior now covers the current migration target:
+  - bearer token auth
+  - JWT account-id extraction into `chatgpt-account-id`
+  - `originator: pi`
+  - Codex beta header (`OpenAI-Beta: responses=experimental`)
+  - `session_id` plus `conversation_id` when a session id is provided
+- registry/HTTP coverage now exists for the Codex endpoint path `/codex/responses`
+- immediate terminal error behavior now exists for missing Codex credentials and invalid/non-decodable OAuth-style tokens
+
+Compatibility note for this slice:
+- current Rust Codex transport intentionally implements only the SSE runtime path; the TS WebSocket transport/fallback and retry loop remain deferred
+- there is a source-vs-test ambiguity in current TypeScript around Codex session handling: the TS provider source currently shows only `session_id` + `prompt_cache_key`, while the TS test explicitly expects `conversation_id` and `prompt_cache_retention: "in-memory"`; Rust follows the explicit test-observed behavior for this migration slice
+
+### Rust design summary
+
+New Rust module added:
+- `rust/crates/pi-ai/src/openai_codex_responses.rs`
+
+Internal reuse/refactor in existing Rust code:
+- `rust/crates/pi-ai/src/openai_responses.rs`
+  - OpenAI Responses SSE decoder/state helpers are now crate-visible so the new Codex provider can reuse the existing transport/event-normalization machinery without introducing another parallel implementation
+
+Provider-facing Rust surface added in the Codex module:
+- `OpenAiCodexResponsesRequestOptions`
+- `OpenAiCodexResponsesRequestParams`
+- `OpenAiCodexResponsesTextConfig`
+- `OpenAiCodexResponsesToolDefinition`
+- `build_openai_codex_responses_request_params()`
+- `parse_openai_codex_sse_text()`
+- `stream_openai_codex_sse_text()`
+- `stream_openai_codex_http()`
+- `register_openai_codex_responses_provider()`
+
+Integration update:
+- `rust/crates/pi-ai/src/lib.rs`
+  - built-in provider registration now includes `openai-codex-responses`
+
+### Validation summary
+
+New Rust coverage added for:
+- Codex raw SSE stream normalization of `response.done`
+- Codex raw SSE stream normalization of `response.incomplete` -> `StopReason::Length`
+- registry dispatch through `stream_response()` for `openai-codex-responses`
+- Codex bearer/account-id/originator/beta-header behavior on `/codex/responses`
+- early completion after terminal SSE event even when the HTTP body remains open
+- session header + prompt-cache field shaping for the Codex path
+- reasoning-effort clamping for newer Codex models
+- missing API-key terminal error behavior
+
+Validation run results:
+- `cd rust && cargo test -p pi-ai --test openai_codex_responses_stream --test openai_codex_responses_http -- --nocapture` passed
+- `cd rust && cargo fmt --all && cargo test -p pi-ai` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- porting the narrowed AI regression set for `anthropic-messages`, `openai-responses`, `openai-completions`, and `openai-codex-responses`
+- Unicode/surrogate sanitization parity for the OpenAI-backed Rust providers (current migrated OpenAI Rust code still carries placeholder sanitization)
+- context-overflow detection helper parity with TS `isContextOverflow()`
+- Codex retry/WebSocket transport parity beyond the current SSE slice

@@ -726,13 +726,13 @@ pub struct OpenAiResponsesStreamEnvelope {
 }
 
 #[derive(Default)]
-struct OpenAiResponsesSseDecoder {
+pub(crate) struct OpenAiResponsesSseDecoder {
     buffer: Vec<u8>,
     current_data_lines: Vec<String>,
 }
 
 impl OpenAiResponsesSseDecoder {
-    fn push_bytes(
+    pub(crate) fn push_bytes(
         &mut self,
         chunk: &[u8],
     ) -> Result<Vec<OpenAiResponsesStreamEnvelope>, crate::AiError> {
@@ -760,7 +760,7 @@ impl OpenAiResponsesSseDecoder {
         Ok(events)
     }
 
-    fn finish(&mut self) -> Result<Vec<OpenAiResponsesStreamEnvelope>, crate::AiError> {
+    pub(crate) fn finish(&mut self) -> Result<Vec<OpenAiResponsesStreamEnvelope>, crate::AiError> {
         let mut events = Vec::new();
 
         if !self.buffer.is_empty() {
@@ -823,14 +823,14 @@ pub fn stream_openai_responses_sse_text(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpenAiResponsesBlockKind {
+pub(crate) enum OpenAiResponsesBlockKind {
     Text,
     Thinking,
     ToolCall,
 }
 
 #[derive(Debug, Clone)]
-struct OpenAiResponsesStreamState {
+pub(crate) struct OpenAiResponsesStreamState {
     output: AssistantMessage,
     current_block_index: Option<usize>,
     current_block_kind: Option<OpenAiResponsesBlockKind>,
@@ -838,7 +838,7 @@ struct OpenAiResponsesStreamState {
 }
 
 impl OpenAiResponsesStreamState {
-    fn new(model: &Model) -> Self {
+    pub(crate) fn new(model: &Model) -> Self {
         let mut output =
             AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone());
         output.timestamp = now_ms();
@@ -850,13 +850,13 @@ impl OpenAiResponsesStreamState {
         }
     }
 
-    fn start_event(&self) -> AssistantEvent {
+    pub(crate) fn start_event(&self) -> AssistantEvent {
         AssistantEvent::Start {
             partial: self.output.clone(),
         }
     }
 
-    fn aborted_event(&self) -> AssistantEvent {
+    pub(crate) fn aborted_event(&self) -> AssistantEvent {
         let mut error = self.output.clone();
         error.stop_reason = StopReason::Aborted;
         error.error_message = Some("Request was aborted".into());
@@ -866,7 +866,7 @@ impl OpenAiResponsesStreamState {
         }
     }
 
-    fn error_event(&self, error_message: impl Into<String>) -> AssistantEvent {
+    pub(crate) fn error_event(&self, error_message: impl Into<String>) -> AssistantEvent {
         let mut error = self.output.clone();
         error.stop_reason = StopReason::Error;
         error.error_message = Some(error_message.into());
@@ -876,7 +876,10 @@ impl OpenAiResponsesStreamState {
         }
     }
 
-    fn process_event(&mut self, event: OpenAiResponsesStreamEnvelope) -> Vec<AssistantEvent> {
+    pub(crate) fn process_event(
+        &mut self,
+        event: OpenAiResponsesStreamEnvelope,
+    ) -> Vec<AssistantEvent> {
         let mut emitted = Vec::new();
 
         match event.event_type.as_str() {
@@ -1467,14 +1470,14 @@ fn error_message(model: &Model, error_message: String) -> AssistantMessage {
     }
 }
 
-fn is_signal_aborted(signal: &Option<tokio::sync::watch::Receiver<bool>>) -> bool {
+pub(crate) fn is_signal_aborted(signal: &Option<tokio::sync::watch::Receiver<bool>>) -> bool {
     signal
         .as_ref()
         .map(|signal| *signal.borrow())
         .unwrap_or(false)
 }
 
-async fn wait_for_abort(signal: &mut tokio::sync::watch::Receiver<bool>) {
+pub(crate) async fn wait_for_abort(signal: &mut tokio::sync::watch::Receiver<bool>) {
     while !*signal.borrow() {
         if signal.changed().await.is_err() {
             return;
@@ -1599,7 +1602,7 @@ fn thinking_content(output: &AssistantMessage, index: usize) -> Option<String> {
     }
 }
 
-fn is_terminal_event(event: &AssistantEvent) -> bool {
+pub(crate) fn is_terminal_event(event: &AssistantEvent) -> bool {
     matches!(
         event,
         AssistantEvent::Done { .. } | AssistantEvent::Error { .. }
