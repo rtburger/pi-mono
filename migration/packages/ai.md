@@ -557,3 +557,100 @@ Still deferred in `pi-ai`:
 - token/cost accounting parity for `openai-completions` streamed chunks
 - broader compat override plumbing from TS model metadata (`model.compat`) instead of only the current Rust detection/request-option surface
 - next provider/runtime slice should stay on `openai-completions` and add the actual HTTP/SSE stream path before moving on to another provider
+
+## Milestone 11 update: OpenAI Completions runtime + scope-pruning slice
+
+### Files analyzed
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/src/lib.rs`
+- `rust/crates/pi-ai/src/models.rs`
+- `rust/crates/pi-ai/src/openai_completions.rs`
+- `rust/crates/pi-ai/src/openai_responses.rs`
+- `rust/crates/pi-ai/tests/models.rs`
+- `rust/crates/pi-ai/tests/openai_completions_params.rs`
+- `rust/crates/pi-ai/tests/openai_completions_stream.rs`
+- `rust/crates/pi-ai/tests/openai_completions_http.rs`
+- `rust/crates/pi-ai/tests/openai_responses_http.rs`
+- `rust/crates/pi-ai/tests/openai_responses_payload.rs`
+- `rust/crates/pi-coding-agent-core/src/model_resolver.rs`
+- `rust/crates/pi-coding-agent-core/src/auth.rs`
+- `rust/crates/pi-coding-agent-core/tests/model_resolver.rs`
+- `rust/crates/pi-coding-agent-core/tests/model_registry.rs`
+- `rust/crates/pi-coding-agent-core/tests/auth.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- `openai-completions` now has a runtime provider path in `pi-ai`
+- Rust now supports live `openai-completions` HTTP POST + SSE streaming for the current migration scope:
+  - `/chat/completions` transport via `reqwest`
+  - incremental SSE decoding across arbitrary chunk boundaries
+  - `[DONE]` sentinel handling
+  - abort before send and while waiting for the next response chunk
+  - terminal assistant error messages for missing API key, HTTP failures, and aborted requests
+- normalized streamed event coverage now exists for `openai-completions`:
+  - text start/delta/end
+  - thinking start/delta/end from `reasoning_content` / `reasoning` / `reasoning_text`
+  - tool-call start/delta/end from streamed `tool_calls`
+  - terminal `done` / `error` mapping from `finish_reason`
+  - streamed usage normalization including cached-token and reasoning-token handling
+- built-in provider registration now includes `openai-completions`
+- Rust migration scope pruning now removes the remaining non-target provider branches from the current Rust AI/core surface:
+  - `pi-ai` built-in model catalog now exposes only `anthropic`, `openai`, and `openai-codex`
+  - `pi-ai` env-key lookup now resolves only the current in-scope provider env vars
+  - `openai-responses` replay/provider allowlists no longer mention out-of-scope runtime providers
+  - `pi-coding-agent-core` default-model table now only contains Anthropic/OpenAI/OpenAI Codex entries
+  - `pi-coding-agent-core` OAuth/auth-file handling no longer carries Google refresh/translation logic in Rust
+
+Compatibility note for this slice:
+- the prior request-shaping-only `openai-completions` compat branches for OpenRouter/Groq/z.ai were intentionally removed from the current Rust migration scope rather than preserved behind dead compatibility toggles
+
+### Rust design summary
+
+`rust/crates/pi-ai/src/openai_completions.rs` now includes runtime/provider-facing additions:
+- `OpenAiCompletionsChunk` SSE payload model
+- SSE decoder + text parser helpers
+- `stream_openai_completions_sse_text()`
+- `stream_openai_completions_chunks()`
+- `stream_openai_completions_http()`
+- `stream_openai_completions_http_with_headers()`
+- `OpenAiCompletionsProvider`
+- `register_openai_completions_provider()`
+
+Integration updates:
+- `rust/crates/pi-ai/src/lib.rs`
+  - built-in env-key resolution narrowed to the currently migrated providers
+  - built-in provider registration now includes `openai-completions`
+- `rust/crates/pi-ai/src/models.rs`
+  - catalog filtering narrowed to the currently migrated providers
+- `rust/crates/pi-coding-agent-core/src/model_resolver.rs`
+  - default model table narrowed to the current migration scope
+- `rust/crates/pi-coding-agent-core/src/auth.rs`
+  - removed Google OAuth refresh/credential-translation branches, leaving Anthropic + OpenAI Codex handling for the current scope
+
+### Validation summary
+
+New Rust coverage added for:
+- `openai-completions` SSE parsing with `[DONE]`
+- text streaming event order
+- tool-call streaming event order
+- reasoning streaming event order
+- live HTTP transport for `openai-completions`
+- registry dispatch through `stream_response()` for `openai-completions`
+- abort while waiting for next streamed body chunk
+- missing API-key terminal error behavior
+- filtered provider catalog / env-key behavior for the narrowed migration scope
+- narrowed coding-agent-core default-model/auth/model-registry behavior
+
+Validation run results:
+- `cd rust && cargo test -p pi-ai --test models --test openai_completions_params --test openai_responses_http --test openai_responses_payload --test openai_completions_stream --test openai_completions_http` passed
+- `cd rust && cargo test -p pi-coding-agent-core --test auth --test model_registry --test model_resolver` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- `openai-codex-responses` runtime/provider registration as a distinct Rust API path
+- fuller `openai-completions` parity for provider-specific compat overrides sourced from TS model metadata
+- broader token/cost parity against the TS suite beyond the current streamed usage normalization slice
+- additional Rust ports for TS regressions around empty streams, Unicode, cross-provider handoff, and context-overflow behavior within the narrowed provider scope

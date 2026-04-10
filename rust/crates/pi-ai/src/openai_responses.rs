@@ -1619,7 +1619,7 @@ impl AiProvider for OpenAiResponsesProvider {
         let params = build_openai_responses_request_params(
             &model,
             &context,
-            &["openai", "openai-codex", "opencode"],
+            &["openai", "openai-codex"],
             OpenAiResponsesConvertOptions::default(),
             OpenAiResponsesParamsOptions {
                 max_output_tokens: options.max_tokens,

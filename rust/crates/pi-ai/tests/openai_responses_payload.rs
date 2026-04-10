@@ -86,7 +86,7 @@ fn converts_foreign_assistant_tool_call_to_function_call() {
     let items = convert_openai_responses_messages(
         &model("openai-codex", "gpt-5.3-codex"),
         &context,
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions::default(),
     );
 
@@ -153,7 +153,7 @@ fn inserts_synthetic_tool_result_for_orphaned_tool_call() {
     let items = convert_openai_responses_messages(
         &model("openai", "gpt-5-mini"),
         &context,
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions {
             include_system_prompt: false,
         },
@@ -218,7 +218,7 @@ fn skips_aborted_assistant_messages_during_replay() {
     let items = convert_openai_responses_messages(
         &model("openai", "gpt-5-mini"),
         &context,
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions {
             include_system_prompt: false,
         },
@@ -259,7 +259,7 @@ fn omits_fc_item_id_for_same_provider_different_model_handoff() {
     let items = convert_openai_responses_messages(
         &model("openai", "gpt-5.2-codex"),
         &context,
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions {
             include_system_prompt: false,
         },
@@ -299,7 +299,7 @@ fn converts_different_model_thinking_to_assistant_output_text() {
     let items = convert_openai_responses_messages(
         &model("openai", "gpt-5.2-codex"),
         &context,
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions {
             include_system_prompt: false,
         },
@@ -362,7 +362,7 @@ fn replays_same_model_reasoning_and_text_signatures() {
     let items = convert_openai_responses_messages(
         &model("openai", "gpt-5-mini"),
         &context,
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions {
             include_system_prompt: false,
         },
@@ -463,7 +463,7 @@ fn keeps_tool_result_images_inside_function_call_output() {
     let items = convert_openai_responses_messages(
         &model("openai", "gpt-5-mini"),
         &context,
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions::default(),
     );
 

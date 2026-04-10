@@ -94,14 +94,11 @@ impl AuthFileSource {
         match credential {
             AuthFileCredential::ApiKey { key } => resolve_config_value_uncached(&key),
             AuthFileCredential::OAuth {
-                access,
-                expires,
-                project_id,
-                ..
+                access, expires, ..
             } => {
                 let access = access.filter(|value| !value.is_empty())?;
                 if expires.is_none_or(|expires| expires > now_ms()) {
-                    return oauth_api_key(provider, &access, project_id.as_deref());
+                    return oauth_api_key(provider, &access);
                 }
                 refresh_auth_file_provider_api_key(&self.path, provider).await
             }
@@ -120,16 +117,13 @@ impl AuthSource for AuthFileSource {
         match credential {
             AuthFileCredential::ApiKey { key } => resolve_config_value_uncached(&key),
             AuthFileCredential::OAuth {
-                access,
-                expires,
-                project_id,
-                ..
+                access, expires, ..
             } => {
                 let access = access.filter(|value| !value.is_empty())?;
                 if expires.is_some_and(|expires| expires <= now_ms()) {
                     return None;
                 }
-                oauth_api_key(provider, &access, project_id.as_deref())
+                oauth_api_key(provider, &access)
             }
         }
     }
@@ -203,15 +197,11 @@ async fn refresh_auth_file_provider_api_key(path: &Path, provider: &str) -> Opti
         .refresh
         .as_deref()
         .filter(|value| !value.is_empty())?;
-    let refreshed = refresh_auth_provider(
-        provider,
-        refresh_token,
-        &credential,
-        &OAuthRefreshOverrides::default(),
-    )
-    .await
-    .ok()?;
-    let api_key = oauth_api_key(provider, &refreshed.access, refreshed.project_id.as_deref())?;
+    let refreshed =
+        refresh_auth_provider(provider, refresh_token, &OAuthRefreshOverrides::default())
+            .await
+            .ok()?;
+    let api_key = oauth_api_key(provider, &refreshed.access)?;
     apply_refreshed_oauth_credentials(entry, refreshed);
 
     let serialized = serde_json::to_string_pretty(&root).ok()?;
@@ -230,8 +220,6 @@ enum AuthFileCredential {
     OAuth {
         access: Option<String>,
         expires: Option<i64>,
-        #[serde(rename = "projectId")]
-        project_id: Option<String>,
     },
 }
 
@@ -241,8 +229,6 @@ struct AuthFileOAuthCredentialView {
     credential_type: String,
     refresh: Option<String>,
     expires: Option<i64>,
-    #[serde(rename = "projectId")]
-    project_id: Option<String>,
 }
 
 impl AuthFileOAuthCredentialView {
@@ -257,7 +243,6 @@ struct RefreshedOAuthCredentials {
     refresh: String,
     access: String,
     expires: i64,
-    project_id: Option<String>,
     account_id: Option<String>,
 }
 
@@ -267,14 +252,8 @@ impl RefreshedOAuthCredentials {
             refresh,
             access,
             expires,
-            project_id: None,
             account_id: None,
         }
-    }
-
-    fn with_project_id(mut self, project_id: impl Into<String>) -> Self {
-        self.project_id = Some(project_id.into());
-        self
     }
 
     fn with_account_id(mut self, account_id: impl Into<String>) -> Self {
@@ -291,9 +270,6 @@ impl RefreshedOAuthCredentials {
             "expires".into(),
             Value::Number(serde_json::Number::from(self.expires)),
         );
-        if let Some(project_id) = self.project_id {
-            object.insert("projectId".into(), Value::String(project_id));
-        }
         if let Some(account_id) = self.account_id {
             object.insert("accountId".into(), Value::String(account_id));
         }
@@ -309,13 +285,6 @@ struct AnthropicTokenResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct GoogleTokenResponse {
-    access_token: String,
-    expires_in: i64,
-    refresh_token: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 struct OpenAiCodexTokenResponse {
     access_token: String,
     refresh_token: String,
@@ -325,21 +294,12 @@ struct OpenAiCodexTokenResponse {
 #[derive(Debug, Default, Clone, Copy)]
 struct OAuthRefreshOverrides<'a> {
     anthropic_token_url: Option<&'a str>,
-    google_gemini_cli_token_url: Option<&'a str>,
-    google_antigravity_token_url: Option<&'a str>,
     openai_codex_token_url: Option<&'a str>,
 }
 
 const OAUTH_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const ANTHROPIC_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-const GOOGLE_GEMINI_CLIENT_ID: &str =
-    "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
-const GOOGLE_GEMINI_CLIENT_SECRET: &str = "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";
-const GOOGLE_ANTIGRAVITY_CLIENT_ID: &str =
-    "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
-const GOOGLE_ANTIGRAVITY_CLIENT_SECRET: &str = "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";
 const OPENAI_CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_CODEX_AUTH_CLAIM: &str = "https://api.openai.com/auth";
@@ -385,16 +345,13 @@ fn auth_file_api_key(provider: &str, entry: &Value) -> Option<String> {
     match serde_json::from_value::<AuthFileCredential>(entry.clone()).ok()? {
         AuthFileCredential::ApiKey { key } => resolve_config_value_uncached(&key),
         AuthFileCredential::OAuth {
-            access,
-            expires,
-            project_id,
-            ..
+            access, expires, ..
         } => {
             let access = access.filter(|value| !value.is_empty())?;
             if expires.is_some_and(|expires| expires <= now_ms()) {
                 return None;
             }
-            oauth_api_key(provider, &access, project_id.as_deref())
+            oauth_api_key(provider, &access)
         }
     }
 }
@@ -402,41 +359,10 @@ fn auth_file_api_key(provider: &str, entry: &Value) -> Option<String> {
 async fn refresh_auth_provider(
     provider: &str,
     refresh_token: &str,
-    credential: &AuthFileOAuthCredentialView,
     overrides: &OAuthRefreshOverrides<'_>,
 ) -> Result<RefreshedOAuthCredentials, String> {
     match provider {
         "anthropic" => refresh_anthropic_token(refresh_token, overrides.anthropic_token_url).await,
-        "google-gemini-cli" => {
-            let project_id = credential
-                .project_id
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "Google Cloud credentials missing projectId".to_string())?;
-            refresh_google_token(
-                refresh_token,
-                project_id,
-                GOOGLE_GEMINI_CLIENT_ID,
-                GOOGLE_GEMINI_CLIENT_SECRET,
-                overrides.google_gemini_cli_token_url,
-            )
-            .await
-        }
-        "google-antigravity" => {
-            let project_id = credential
-                .project_id
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "Antigravity credentials missing projectId".to_string())?;
-            refresh_google_token(
-                refresh_token,
-                project_id,
-                GOOGLE_ANTIGRAVITY_CLIENT_ID,
-                GOOGLE_ANTIGRAVITY_CLIENT_SECRET,
-                overrides.google_antigravity_token_url,
-            )
-            .await
-        }
         "openai-codex" => {
             refresh_openai_codex_token(refresh_token, overrides.openai_codex_token_url).await
         }
@@ -493,12 +419,11 @@ async fn refresh_auth_file_oauth_inner(
             continue;
         };
 
-        let refreshed =
-            match refresh_auth_provider(provider, refresh_token, &credential, overrides).await {
-                Ok(refreshed) => Ok(refreshed),
-                Err(error) if error.starts_with("Unsupported OAuth provider:") => continue,
-                Err(error) => Err(error),
-            };
+        let refreshed = match refresh_auth_provider(provider, refresh_token, overrides).await {
+            Ok(refreshed) => Ok(refreshed),
+            Err(error) if error.starts_with("Unsupported OAuth provider:") => continue,
+            Err(error) => Err(error),
+        };
 
         match refreshed {
             Ok(refreshed) => {
@@ -572,48 +497,6 @@ async fn refresh_anthropic_token(
             .saturating_add(payload.expires_in.saturating_mul(1000))
             .saturating_sub(5 * 60 * 1000),
     ))
-}
-
-async fn refresh_google_token(
-    refresh_token: &str,
-    project_id: &str,
-    client_id: &str,
-    client_secret: &str,
-    token_url_override: Option<&str>,
-) -> Result<RefreshedOAuthCredentials, String> {
-    let token_url = token_url_override.unwrap_or(GOOGLE_TOKEN_URL);
-    let client = oauth_http_client()?;
-    let response = client
-        .post(token_url)
-        .form(&[
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-            ("refresh_token", refresh_token),
-            ("grant_type", "refresh_token"),
-        ])
-        .send()
-        .await
-        .map_err(|error| format!("Google token refresh request failed: {error}"))?;
-
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!("Google token refresh failed: {status}: {body}"));
-    }
-
-    let payload = serde_json::from_str::<GoogleTokenResponse>(&body)
-        .map_err(|error| format!("Google token refresh returned invalid JSON: {error}"))?;
-
-    Ok(RefreshedOAuthCredentials::new(
-        payload
-            .refresh_token
-            .unwrap_or_else(|| refresh_token.to_string()),
-        payload.access_token,
-        now_ms()
-            .saturating_add(payload.expires_in.saturating_mul(1000))
-            .saturating_sub(5 * 60 * 1000),
-    )
-    .with_project_id(project_id))
 }
 
 async fn refresh_openai_codex_token(
@@ -692,16 +575,9 @@ fn decode_base64_token_component(input: &str) -> Option<Vec<u8>> {
     Some(output)
 }
 
-fn oauth_api_key(provider: &str, access: &str, project_id: Option<&str>) -> Option<String> {
+fn oauth_api_key(provider: &str, access: &str) -> Option<String> {
     match provider {
         "anthropic" | "openai-codex" => Some(access.to_string()),
-        "google-gemini-cli" | "google-antigravity" => Some(
-            serde_json::json!({
-                "token": access,
-                "projectId": project_id?,
-            })
-            .to_string(),
-        ),
         _ => None,
     }
 }
@@ -909,143 +785,6 @@ mod tests {
                 .and_then(Value::as_i64)
                 .unwrap()
                 > now_ms()
-        );
-
-        server.join().unwrap();
-    }
-
-    #[tokio::test]
-    async fn refresh_auth_file_oauth_updates_expired_google_gemini_cli_credentials() {
-        let (token_url, server) = spawn_single_response_server(
-            |request| {
-                let request_lower = request.to_ascii_lowercase();
-                assert!(request_lower.starts_with("post /token http/1.1"));
-                let body = request_body(request);
-                assert!(body.contains("client_id=681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"));
-                assert!(body.contains("client_secret=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"));
-                assert!(body.contains("refresh_token=refresh-token"));
-                assert!(body.contains("grant_type=refresh_token"));
-            },
-            serde_json::json!({
-                "access_token": "new-google-access-token",
-                "expires_in": 3600
-            })
-            .to_string(),
-            "application/json",
-        );
-
-        let temp_dir = unique_temp_dir("google-refresh");
-        let auth_path = temp_dir.join("auth.json");
-        fs::write(
-            &auth_path,
-            serde_json::json!({
-                "google-gemini-cli": {
-                    "type": "oauth",
-                    "refresh": "refresh-token",
-                    "access": "expired-token",
-                    "expires": 0,
-                    "projectId": "demo-project",
-                    "email": "user@example.com"
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let errors = refresh_auth_file_oauth_inner(
-            &auth_path,
-            &OAuthRefreshOverrides {
-                google_gemini_cli_token_url: Some(&token_url),
-                ..OAuthRefreshOverrides::default()
-            },
-        )
-        .await;
-
-        assert!(errors.is_empty(), "unexpected refresh errors: {errors:?}");
-
-        let refreshed: Value =
-            serde_json::from_str(&fs::read_to_string(&auth_path).unwrap()).unwrap();
-        let credential = refreshed.get("google-gemini-cli").unwrap();
-        assert_eq!(
-            credential.get("access").and_then(Value::as_str),
-            Some("new-google-access-token")
-        );
-        assert_eq!(
-            credential.get("refresh").and_then(Value::as_str),
-            Some("refresh-token")
-        );
-        assert_eq!(
-            credential.get("projectId").and_then(Value::as_str),
-            Some("demo-project")
-        );
-        assert!(credential.get("email").is_none());
-
-        server.join().unwrap();
-    }
-
-    #[tokio::test]
-    async fn refresh_auth_file_oauth_updates_expired_google_antigravity_credentials() {
-        let (token_url, server) = spawn_single_response_server(
-            |request| {
-                let request_lower = request.to_ascii_lowercase();
-                assert!(request_lower.starts_with("post /token http/1.1"));
-                let body = request_body(request);
-                assert!(body.contains("client_id=1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"));
-                assert!(body.contains("client_secret=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"));
-                assert!(body.contains("refresh_token=refresh-token"));
-                assert!(body.contains("grant_type=refresh_token"));
-            },
-            serde_json::json!({
-                "access_token": "new-antigravity-access-token",
-                "expires_in": 3600,
-                "refresh_token": "new-refresh-token"
-            })
-            .to_string(),
-            "application/json",
-        );
-
-        let temp_dir = unique_temp_dir("antigravity-refresh");
-        let auth_path = temp_dir.join("auth.json");
-        fs::write(
-            &auth_path,
-            serde_json::json!({
-                "google-antigravity": {
-                    "type": "oauth",
-                    "refresh": "refresh-token",
-                    "access": "expired-token",
-                    "expires": 0,
-                    "projectId": "antigravity-project"
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let errors = refresh_auth_file_oauth_inner(
-            &auth_path,
-            &OAuthRefreshOverrides {
-                google_antigravity_token_url: Some(&token_url),
-                ..OAuthRefreshOverrides::default()
-            },
-        )
-        .await;
-
-        assert!(errors.is_empty(), "unexpected refresh errors: {errors:?}");
-
-        let refreshed: Value =
-            serde_json::from_str(&fs::read_to_string(&auth_path).unwrap()).unwrap();
-        let credential = refreshed.get("google-antigravity").unwrap();
-        assert_eq!(
-            credential.get("access").and_then(Value::as_str),
-            Some("new-antigravity-access-token")
-        );
-        assert_eq!(
-            credential.get("refresh").and_then(Value::as_str),
-            Some("new-refresh-token")
-        );
-        assert_eq!(
-            credential.get("projectId").and_then(Value::as_str),
-            Some("antigravity-project")
         );
 
         server.join().unwrap();

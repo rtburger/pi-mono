@@ -89,23 +89,7 @@ pub fn unregister_provider(api: &str) {
 pub fn get_env_api_key(provider: &str) -> Option<String> {
     match provider {
         "anthropic" => env_var("ANTHROPIC_OAUTH_TOKEN").or_else(|| env_var("ANTHROPIC_API_KEY")),
-        "google-vertex" => env_var("GOOGLE_CLOUD_API_KEY").or_else(vertex_adc_placeholder),
-        "amazon-bedrock" => bedrock_placeholder(),
         "openai" => env_var("OPENAI_API_KEY"),
-        "azure-openai-responses" => env_var("AZURE_OPENAI_API_KEY"),
-        "google" => env_var("GEMINI_API_KEY"),
-        "groq" => env_var("GROQ_API_KEY"),
-        "cerebras" => env_var("CEREBRAS_API_KEY"),
-        "xai" => env_var("XAI_API_KEY"),
-        "openrouter" => env_var("OPENROUTER_API_KEY"),
-        "vercel-ai-gateway" => env_var("AI_GATEWAY_API_KEY"),
-        "zai" => env_var("ZAI_API_KEY"),
-        "mistral" => env_var("MISTRAL_API_KEY"),
-        "minimax" => env_var("MINIMAX_API_KEY"),
-        "minimax-cn" => env_var("MINIMAX_CN_API_KEY"),
-        "huggingface" => env_var("HF_TOKEN"),
-        "opencode" | "opencode-go" => env_var("OPENCODE_API_KEY"),
-        "kimi-coding" => env_var("KIMI_API_KEY"),
         _ => None,
     }
 }
@@ -114,38 +98,9 @@ fn env_var(name: &str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-fn vertex_adc_placeholder() -> Option<String> {
-    let credentials_path = env_var("GOOGLE_APPLICATION_CREDENTIALS").or_else(|| {
-        env::var_os("HOME")
-            .map(|home| home.to_string_lossy().into_owned())
-            .map(|home| format!("{home}/.config/gcloud/application_default_credentials.json"))
-    })?;
-
-    let has_project =
-        env_var("GOOGLE_CLOUD_PROJECT").is_some() || env_var("GCLOUD_PROJECT").is_some();
-    let has_location = env_var("GOOGLE_CLOUD_LOCATION").is_some();
-    if std::fs::metadata(credentials_path).is_ok() && has_project && has_location {
-        Some("<authenticated>".into())
-    } else {
-        None
-    }
-}
-
-fn bedrock_placeholder() -> Option<String> {
-    let has_standard_keys =
-        env_var("AWS_ACCESS_KEY_ID").is_some() && env_var("AWS_SECRET_ACCESS_KEY").is_some();
-    let has_auth = env_var("AWS_PROFILE").is_some()
-        || has_standard_keys
-        || env_var("AWS_BEARER_TOKEN_BEDROCK").is_some()
-        || env_var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").is_some()
-        || env_var("AWS_CONTAINER_CREDENTIALS_FULL_URI").is_some()
-        || env_var("AWS_WEB_IDENTITY_TOKEN_FILE").is_some();
-
-    has_auth.then(|| "<authenticated>".into())
-}
-
 pub fn register_builtin_providers() {
     anthropic_messages::register_anthropic_provider();
+    openai_completions::register_openai_completions_provider();
     openai_responses::register_openai_responses_provider();
 }
 

@@ -42,18 +42,18 @@ fn auth_file_source_reads_api_key_entries() {
 }
 
 #[test]
-fn auth_file_source_translates_google_gemini_cli_oauth_credentials() {
+fn auth_file_source_reads_openai_codex_oauth_credentials() {
     let temp_dir = unique_temp_dir("oauth");
     let auth_path = temp_dir.join("auth.json");
     fs::write(
         &auth_path,
         serde_json::json!({
-            "google-gemini-cli": {
+            "openai-codex": {
                 "type": "oauth",
                 "access": "oauth-access-token",
                 "refresh": "oauth-refresh-token",
                 "expires": i64::MAX,
-                "projectId": "demo-project"
+                "accountId": "acc_123"
             }
         })
         .to_string(),
@@ -62,17 +62,10 @@ fn auth_file_source_translates_google_gemini_cli_oauth_credentials() {
 
     let auth = AuthFileSource::new(auth_path);
 
-    assert!(auth.has_auth("google-gemini-cli"));
-    let api_key = auth
-        .get_api_key("google-gemini-cli")
-        .expect("expected oauth api key");
-    let parsed: serde_json::Value = serde_json::from_str(&api_key).unwrap();
+    assert!(auth.has_auth("openai-codex"));
     assert_eq!(
-        parsed,
-        serde_json::json!({
-            "token": "oauth-access-token",
-            "projectId": "demo-project"
-        })
+        auth.get_api_key("openai-codex").as_deref(),
+        Some("oauth-access-token")
     );
 }
 

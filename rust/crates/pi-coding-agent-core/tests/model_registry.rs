@@ -12,7 +12,11 @@ fn mock_model(provider: &str, id: &str, name: &str) -> Model {
     Model {
         id: id.into(),
         name: name.into(),
-        api: "openai-completions".into(),
+        api: if provider == "anthropic" {
+            "anthropic-messages".into()
+        } else {
+            "openai-completions".into()
+        },
         provider: provider.into(),
         base_url: format!("https://{provider}.example.com/v1"),
         reasoning: false,
@@ -25,8 +29,8 @@ fn mock_model(provider: &str, id: &str, name: &str) -> Model {
 fn built_in_models() -> Vec<Model> {
     vec![
         mock_model("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5"),
-        mock_model("openrouter", "anthropic/claude-sonnet-4", "Claude Sonnet 4"),
-        mock_model("openrouter", "anthropic/claude-opus-4", "Claude Opus 4"),
+        mock_model("openai", "gpt-4o", "GPT-4o"),
+        mock_model("openai", "gpt-5.4", "GPT-5.4"),
     ]
 }
 
@@ -52,7 +56,7 @@ fn base_url_override_keeps_built_in_models() {
         &models_json_path,
         json!({
             "providers": {
-                "openrouter": {
+                "openai": {
                     "baseUrl": "https://proxy.example.com/v1"
                 }
             }
@@ -65,15 +69,15 @@ fn base_url_override_keeps_built_in_models() {
         Some(models_json_path),
     );
 
-    let openrouter_models: Vec<_> = registry
+    let openai_models: Vec<_> = registry
         .get_all()
         .iter()
-        .filter(|model| model.provider == "openrouter")
+        .filter(|model| model.provider == "openai")
         .collect();
 
-    assert_eq!(openrouter_models.len(), 2);
+    assert_eq!(openai_models.len(), 2);
     assert!(
-        openrouter_models
+        openai_models
             .iter()
             .all(|model| model.base_url == "https://proxy.example.com/v1")
     );
@@ -87,14 +91,14 @@ fn custom_models_merge_with_built_ins() {
         &models_json_path,
         json!({
             "providers": {
-                "openrouter": {
+                "openai": {
                     "baseUrl": "https://proxy.example.com/v1",
-                    "apiKey": "OPENROUTER_API_KEY",
+                    "apiKey": "OPENAI_API_KEY",
                     "api": "openai-completions",
                     "models": [
                         {
-                            "id": "custom/openrouter-model",
-                            "name": "Custom OpenRouter Model"
+                            "id": "custom-openai-model",
+                            "name": "Custom OpenAI Model"
                         }
                     ]
                 }
@@ -108,20 +112,20 @@ fn custom_models_merge_with_built_ins() {
         Some(models_json_path),
     );
 
-    let openrouter_models: Vec<_> = registry
+    let openai_models: Vec<_> = registry
         .get_all()
         .iter()
-        .filter(|model| model.provider == "openrouter")
+        .filter(|model| model.provider == "openai")
         .collect();
 
-    assert_eq!(openrouter_models.len(), 3);
+    assert_eq!(openai_models.len(), 3);
     assert!(
-        openrouter_models
+        openai_models
             .iter()
-            .any(|model| model.id == "custom/openrouter-model")
+            .any(|model| model.id == "custom-openai-model")
     );
     assert!(
-        openrouter_models
+        openai_models
             .iter()
             .all(|model| model.base_url == "https://proxy.example.com/v1")
     );
@@ -135,14 +139,14 @@ fn custom_model_replaces_built_in_by_provider_and_id() {
         &models_json_path,
         json!({
             "providers": {
-                "openrouter": {
+                "openai": {
                     "baseUrl": "https://replacement.example.com/v1",
-                    "apiKey": "OPENROUTER_API_KEY",
+                    "apiKey": "OPENAI_API_KEY",
                     "api": "openai-completions",
                     "models": [
                         {
-                            "id": "anthropic/claude-sonnet-4",
-                            "name": "Replacement Sonnet"
+                            "id": "gpt-4o",
+                            "name": "Replacement GPT-4o"
                         }
                     ]
                 }
@@ -159,11 +163,11 @@ fn custom_model_replaces_built_in_by_provider_and_id() {
     let matching: Vec<_> = registry
         .get_all()
         .iter()
-        .filter(|model| model.provider == "openrouter" && model.id == "anthropic/claude-sonnet-4")
+        .filter(|model| model.provider == "openai" && model.id == "gpt-4o")
         .collect();
 
     assert_eq!(matching.len(), 1);
-    assert_eq!(matching[0].name, "Replacement Sonnet");
+    assert_eq!(matching[0].name, "Replacement GPT-4o");
     assert_eq!(matching[0].base_url, "https://replacement.example.com/v1");
 }
 
@@ -175,11 +179,11 @@ fn model_override_applies_to_built_in_model() {
         &models_json_path,
         json!({
             "providers": {
-                "openrouter": {
+                "openai": {
                     "baseUrl": "https://proxy.example.com/v1",
                     "modelOverrides": {
-                        "anthropic/claude-sonnet-4": {
-                            "name": "Overridden Sonnet",
+                        "gpt-4o": {
+                            "name": "Overridden GPT-4o",
                             "maxTokens": 4096
                         }
                     }
@@ -193,13 +197,11 @@ fn model_override_applies_to_built_in_model() {
         built_in_models(),
         Some(models_json_path),
     );
-    let sonnet = registry
-        .find("openrouter", "anthropic/claude-sonnet-4")
-        .unwrap();
+    let model = registry.find("openai", "gpt-4o").unwrap();
 
-    assert_eq!(sonnet.name, "Overridden Sonnet");
-    assert_eq!(sonnet.max_tokens, 4096);
-    assert_eq!(sonnet.base_url, "https://proxy.example.com/v1");
+    assert_eq!(model.name, "Overridden GPT-4o");
+    assert_eq!(model.max_tokens, 4096);
+    assert_eq!(model.base_url, "https://proxy.example.com/v1");
 }
 
 #[test]
@@ -210,7 +212,7 @@ fn refresh_reloads_models_json_from_disk() {
         &models_json_path,
         json!({
             "providers": {
-                "openrouter": {
+                "openai": {
                     "baseUrl": "https://first.example.com/v1"
                 }
             }
@@ -223,10 +225,7 @@ fn refresh_reloads_models_json_from_disk() {
         Some(models_json_path.clone()),
     );
     assert_eq!(
-        registry
-            .find("openrouter", "anthropic/claude-sonnet-4")
-            .unwrap()
-            .base_url,
+        registry.find("openai", "gpt-4o").unwrap().base_url,
         "https://first.example.com/v1"
     );
 
@@ -234,7 +233,7 @@ fn refresh_reloads_models_json_from_disk() {
         &models_json_path,
         json!({
             "providers": {
-                "openrouter": {
+                "openai": {
                     "baseUrl": "https://second.example.com/v1"
                 }
             }
@@ -243,10 +242,7 @@ fn refresh_reloads_models_json_from_disk() {
     registry.refresh();
 
     assert_eq!(
-        registry
-            .find("openrouter", "anthropic/claude-sonnet-4")
-            .unwrap()
-            .base_url,
+        registry.find("openai", "gpt-4o").unwrap().base_url,
         "https://second.example.com/v1"
     );
 }
@@ -358,7 +354,7 @@ fn get_api_key_and_headers_merges_provider_and_model_headers() {
         &models_json_path,
         json!({
             "providers": {
-                "openrouter": {
+                "openai": {
                     "baseUrl": "https://proxy.example.com/v1",
                     "apiKey": "literal-token",
                     "headers": {
@@ -366,7 +362,7 @@ fn get_api_key_and_headers_merges_provider_and_model_headers() {
                     },
                     "authHeader": true,
                     "modelOverrides": {
-                        "anthropic/claude-sonnet-4": {
+                        "gpt-4o": {
                             "headers": {
                                 "X-Model-Header": "model-value"
                             }
@@ -382,9 +378,7 @@ fn get_api_key_and_headers_merges_provider_and_model_headers() {
         built_in_models(),
         Some(models_json_path),
     );
-    let model = registry
-        .find("openrouter", "anthropic/claude-sonnet-4")
-        .unwrap();
+    let model = registry.find("openai", "gpt-4o").unwrap();
 
     let auth = registry.get_api_key_and_headers(&model).unwrap();
     assert_eq!(
@@ -412,7 +406,7 @@ fn get_api_key_and_headers_returns_error_for_failed_auth_header_resolution() {
         &models_json_path,
         json!({
             "providers": {
-                "openrouter": {
+                "openai": {
                     "baseUrl": "https://proxy.example.com/v1",
                     "apiKey": "!exit 1",
                     "authHeader": true
@@ -426,10 +420,8 @@ fn get_api_key_and_headers_returns_error_for_failed_auth_header_resolution() {
         built_in_models(),
         Some(models_json_path),
     );
-    let model = registry
-        .find("openrouter", "anthropic/claude-sonnet-4")
-        .unwrap();
+    let model = registry.find("openai", "gpt-4o").unwrap();
 
     let error = registry.get_api_key_and_headers(&model).unwrap_err();
-    assert!(error.contains("Failed to resolve API key for provider \"openrouter\""));
+    assert!(error.contains("Failed to resolve API key for provider \"openai\""));
 }

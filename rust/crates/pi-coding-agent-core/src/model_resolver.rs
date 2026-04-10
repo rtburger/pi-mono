@@ -5,29 +5,10 @@ use std::collections::HashMap;
 
 pub const DEFAULT_THINKING_LEVEL: ThinkingLevel = ThinkingLevel::Medium;
 
-pub const DEFAULT_MODELS: [(&str, &str); 22] = [
-    ("amazon-bedrock", "us.anthropic.claude-opus-4-6-v1"),
+pub const DEFAULT_MODELS: [(&str, &str); 3] = [
     ("anthropic", "claude-opus-4-6"),
     ("openai", "gpt-5.4"),
-    ("azure-openai-responses", "gpt-5.2"),
     ("openai-codex", "gpt-5.4"),
-    ("google", "gemini-2.5-pro"),
-    ("google-gemini-cli", "gemini-2.5-pro"),
-    ("google-antigravity", "gemini-3.1-pro-high"),
-    ("google-vertex", "gemini-3-pro-preview"),
-    ("openrouter", "openai/gpt-5.1-codex"),
-    ("vercel-ai-gateway", "anthropic/claude-opus-4-6"),
-    ("xai", "grok-4-fast-non-reasoning"),
-    ("groq", "openai/gpt-oss-120b"),
-    ("cerebras", "zai-glm-4.7"),
-    ("zai", "glm-5"),
-    ("mistral", "devstral-medium-latest"),
-    ("minimax", "MiniMax-M2.7"),
-    ("minimax-cn", "MiniMax-M2.7"),
-    ("huggingface", "moonshotai/Kimi-K2.5"),
-    ("opencode", "claude-opus-4-6"),
-    ("opencode-go", "kimi-k2.5"),
-    ("kimi-coding", "kimi-k2-thinking"),
 ];
 
 #[derive(Debug, Clone, Default)]

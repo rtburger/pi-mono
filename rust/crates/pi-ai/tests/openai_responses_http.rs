@@ -131,7 +131,7 @@ async fn streams_openai_responses_over_http() {
     let params = build_openai_responses_request_params(
         &model,
         &context(),
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions::default(),
         OpenAiResponsesParamsOptions::default(),
     );
@@ -161,7 +161,7 @@ async fn emits_terminal_error_for_http_failure() {
     let params = build_openai_responses_request_params(
         &model,
         &context(),
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions::default(),
         OpenAiResponsesParamsOptions::default(),
     );
@@ -213,7 +213,7 @@ async fn passes_runtime_options_into_http_request_body() {
     let params = build_openai_responses_request_params(
         &model,
         &context(),
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions::default(),
         OpenAiResponsesParamsOptions {
             max_output_tokens: Some(123),
@@ -242,7 +242,7 @@ async fn emits_aborted_terminal_error_before_http_send() {
     let params = build_openai_responses_request_params(
         &model,
         &context(),
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions::default(),
         OpenAiResponsesParamsOptions::default(),
     );
@@ -294,7 +294,7 @@ async fn streams_incrementally_across_http_body_chunks() {
     let params = build_openai_responses_request_params(
         &model,
         &context(),
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions::default(),
         OpenAiResponsesParamsOptions::default(),
     );
@@ -367,7 +367,7 @@ async fn aborts_while_waiting_for_next_http_body_chunk() {
     let params = build_openai_responses_request_params(
         &model,
         &context(),
-        &["openai", "openai-codex", "opencode"],
+        &["openai", "openai-codex"],
         OpenAiResponsesConvertOptions::default(),
         OpenAiResponsesParamsOptions::default(),
     );

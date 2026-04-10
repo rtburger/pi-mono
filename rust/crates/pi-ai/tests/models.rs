@@ -1,4 +1,3 @@
-use pi_ai::models::{get_model_headers, get_provider_headers};
 use pi_ai::{
     built_in_models, get_env_api_key, get_model, get_models, get_providers, models_are_equal,
     supports_xhigh,
@@ -54,10 +53,16 @@ fn loads_known_models_from_typescript_generated_catalog() {
 }
 
 #[test]
-fn returns_provider_lists_from_catalog() {
+fn exposes_only_migrated_providers() {
     let providers = get_providers();
-    assert!(providers.iter().any(|provider| provider == "openai"));
-    assert!(providers.iter().any(|provider| provider == "anthropic"));
+    assert_eq!(
+        providers,
+        vec![
+            String::from("anthropic"),
+            String::from("openai"),
+            String::from("openai-codex"),
+        ]
+    );
 
     let anthropic_models = get_models("anthropic");
     assert!(
@@ -65,14 +70,8 @@ fn returns_provider_lists_from_catalog() {
             .iter()
             .any(|model| model.id == "claude-opus-4-6")
     );
-}
-
-#[test]
-fn excludes_removed_github_copilot_models_from_filtered_catalog() {
-    assert!(get_model("github-copilot", "gpt-4o").is_none());
-    assert!(get_models("github-copilot").is_empty());
-    assert!(get_model_headers("github-copilot", "claude-sonnet-4").is_none());
-    assert!(get_provider_headers("github-copilot").is_none());
+    assert!(get_models("missing-provider").is_empty());
+    assert!(get_model("missing-provider", "missing-model").is_none());
 }
 
 #[test]
@@ -114,5 +113,12 @@ fn env_api_key_prefers_anthropic_oauth_token() {
 fn env_api_key_reads_openai_api_key() {
     with_env_vars(&[("OPENAI_API_KEY", Some("openai-token"))], || {
         assert_eq!(get_env_api_key("openai").as_deref(), Some("openai-token"));
+    });
+}
+
+#[test]
+fn env_api_key_returns_none_for_unsupported_provider() {
+    with_env_vars(&[("UNUSED_API_KEY", Some("unused"))], || {
+        assert_eq!(get_env_api_key("unsupported-provider"), None);
     });
 }

@@ -35,6 +35,8 @@ struct RawModel {
 
 type RawCatalog = BTreeMap<String, BTreeMap<String, RawModel>>;
 
+const SUPPORTED_PROVIDERS: &[&str] = &["anthropic", "openai", "openai-codex"];
+
 pub fn built_in_models() -> &'static [Model] {
     catalog().all_models.as_slice()
 }
@@ -106,7 +108,7 @@ fn load_catalog() -> BuiltInModelCatalog {
     let mut all_models = Vec::new();
 
     for (provider, models) in raw_catalog {
-        if provider == "github-copilot" {
+        if !SUPPORTED_PROVIDERS.contains(&provider.as_str()) {
             continue;
         }
 

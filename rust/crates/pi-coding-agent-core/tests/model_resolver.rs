@@ -24,18 +24,8 @@ fn base_models() -> Vec<Model> {
     vec![
         mock_model("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5", true),
         mock_model("openai", "gpt-4o", "GPT-4o", false),
-        mock_model(
-            "openrouter",
-            "qwen/qwen3-coder:exacto",
-            "Qwen3 Coder Exacto",
-            true,
-        ),
-        mock_model(
-            "openrouter",
-            "openai/gpt-4o:extended",
-            "GPT-4o Extended",
-            false,
-        ),
+        mock_model("openai-codex", "gpt-5.4:exacto", "GPT-5.4 Exacto", true),
+        mock_model("openai-codex", "gpt-5.4:extended", "GPT-5.4 Extended", true),
     ]
 }
 
@@ -72,16 +62,16 @@ fn parse_model_pattern_extracts_valid_thinking_level() {
 }
 
 #[test]
-fn parse_model_pattern_handles_openrouter_ids_with_colons() {
+fn parse_model_pattern_handles_model_ids_with_colons() {
     let result = parse_model_pattern(
-        "qwen/qwen3-coder:exacto:high",
+        "gpt-5.4:exacto:high",
         &base_models(),
         ParseModelPatternOptions::default(),
     );
 
     assert_eq!(
         result.model.as_ref().map(|model| model.id.as_str()),
-        Some("qwen/qwen3-coder:exacto")
+        Some("gpt-5.4:exacto")
     );
     assert_eq!(result.thinking_level, Some(ThinkingLevel::High));
     assert_eq!(result.warning, None);
@@ -90,14 +80,14 @@ fn parse_model_pattern_handles_openrouter_ids_with_colons() {
 #[test]
 fn parse_model_pattern_warns_on_invalid_thinking_level_in_scope_mode() {
     let result = parse_model_pattern(
-        "qwen/qwen3-coder:exacto:random",
+        "gpt-5.4:exacto:random",
         &base_models(),
         ParseModelPatternOptions::default(),
     );
 
     assert_eq!(
         result.model.as_ref().map(|model| model.id.as_str()),
-        Some("qwen/qwen3-coder:exacto")
+        Some("gpt-5.4:exacto")
     );
     assert_eq!(result.thinking_level, None);
     assert!(
@@ -195,44 +185,19 @@ fn resolve_cli_model_supports_fuzzy_matching_with_explicit_provider() {
 }
 
 #[test]
-fn resolve_cli_model_prefers_provider_split_over_gateway_model_id() {
-    let mut models = base_models();
-    models.push(mock_model("zai", "glm-5", "GLM-5", true));
-    models.push(mock_model(
-        "vercel-ai-gateway",
-        "zai/glm-5",
-        "GLM-5 Gateway",
-        true,
-    ));
-    let catalog = ModelCatalog::from_all_models(models);
-
-    let result = resolve_cli_model(&catalog, None, Some("zai/glm-5"));
-
-    assert_eq!(result.error, None);
-    assert_eq!(
-        result.model.as_ref().map(|model| model.provider.as_str()),
-        Some("zai")
-    );
-    assert_eq!(
-        result.model.as_ref().map(|model| model.id.as_str()),
-        Some("glm-5")
-    );
-}
-
-#[test]
-fn resolve_cli_model_falls_back_to_exact_openrouter_style_id() {
+fn resolve_cli_model_matches_exact_colon_model_ids() {
     let catalog = ModelCatalog::from_all_models(base_models());
 
-    let result = resolve_cli_model(&catalog, None, Some("openai/gpt-4o:extended"));
+    let result = resolve_cli_model(&catalog, None, Some("gpt-5.4:extended"));
 
     assert_eq!(result.error, None);
     assert_eq!(
         result.model.as_ref().map(|model| model.provider.as_str()),
-        Some("openrouter")
+        Some("openai-codex")
     );
     assert_eq!(
         result.model.as_ref().map(|model| model.id.as_str()),
-        Some("openai/gpt-4o:extended")
+        Some("gpt-5.4:extended")
     );
 }
 
@@ -242,18 +207,18 @@ fn resolve_cli_model_builds_custom_model_ids_for_explicit_provider() {
 
     let result = resolve_cli_model(
         &catalog,
-        Some("openrouter"),
-        Some("openrouter/openai/ghost-model"),
+        Some("openai-codex"),
+        Some("openai-codex/ghost-model"),
     );
 
     assert_eq!(result.error, None);
     assert_eq!(
         result.model.as_ref().map(|model| model.provider.as_str()),
-        Some("openrouter")
+        Some("openai-codex")
     );
     assert_eq!(
         result.model.as_ref().map(|model| model.id.as_str()),
-        Some("openai/ghost-model")
+        Some("ghost-model")
     );
     assert!(
         result
@@ -330,26 +295,18 @@ fn find_initial_model_uses_saved_default_even_without_available_auth() {
 
 #[test]
 fn find_initial_model_prefers_ordered_default_available_model() {
-    let ai_gateway_model = mock_model(
-        "vercel-ai-gateway",
-        "anthropic/claude-opus-4-6",
-        "Claude Opus 4.6",
-        true,
-    );
-    let catalog = ModelCatalog::new(
-        vec![ai_gateway_model.clone()],
-        vec![ai_gateway_model.clone()],
-    );
+    let codex_model = mock_model("openai-codex", "gpt-5.4", "GPT-5.4", true);
+    let catalog = ModelCatalog::new(vec![codex_model.clone()], vec![codex_model.clone()]);
 
     let result = find_initial_model(&catalog, InitialModelOptions::default());
 
     assert_eq!(
         result.model.as_ref().map(|model| model.provider.as_str()),
-        Some("vercel-ai-gateway")
+        Some("openai-codex")
     );
     assert_eq!(
         result.model.as_ref().map(|model| model.id.as_str()),
-        Some("anthropic/claude-opus-4-6")
+        Some("gpt-5.4")
     );
     assert_eq!(result.thinking_level, DEFAULT_THINKING_LEVEL);
 }
@@ -391,15 +348,14 @@ fn restore_model_from_session_falls_back_to_current_model() {
 
 #[test]
 fn exports_current_default_model_ids() {
+    assert_eq!(
+        default_model_id_for_provider("anthropic"),
+        Some("claude-opus-4-6")
+    );
     assert_eq!(default_model_id_for_provider("openai"), Some("gpt-5.4"));
     assert_eq!(
         default_model_id_for_provider("openai-codex"),
         Some("gpt-5.4")
     );
-    assert_eq!(
-        default_model_id_for_provider("vercel-ai-gateway"),
-        Some("anthropic/claude-opus-4-6")
-    );
-    assert_eq!(default_model_id_for_provider("zai"), Some("glm-5"));
-    assert_eq!(DEFAULT_MODELS.len(), 22);
+    assert_eq!(DEFAULT_MODELS.len(), 3);
 }
