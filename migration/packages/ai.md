@@ -920,3 +920,202 @@ Still deferred in `pi-ai`:
 - explicit narrowed regression files for response-id, image-tool-result, and tool-call-without-result across all four in-scope providers
 - Unicode/surrogate sanitization parity for request shaping
 - Codex retry/WebSocket transport parity beyond the current SSE slice
+
+## Milestone 15 update: narrowed image-tool-result regression slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/ai/test/image-tool-result.test.ts`
+- `packages/ai/test/openai-responses-tool-result-images.test.ts`
+- `packages/ai/test/openai-completions-tool-result-images.test.ts`
+- `packages/ai/src/providers/anthropic.ts`
+- `packages/ai/src/providers/openai-responses-shared.ts`
+- `packages/ai/src/providers/openai-completions.ts`
+- `packages/ai/src/providers/openai-codex-responses.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/src/anthropic_messages.rs`
+- `rust/crates/pi-ai/src/openai_responses.rs`
+- `rust/crates/pi-ai/src/openai_completions.rs`
+- `rust/crates/pi-ai/src/openai_codex_responses.rs`
+- `rust/crates/pi-ai/tests/openai_responses_payload.rs`
+- `rust/crates/pi-ai/tests/openai_completions_messages.rs`
+- `rust/crates/pi-ai/tests/openai_codex_responses_http.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- explicit narrowed `image-tool-result` regression coverage now exists for all four in-scope provider paths:
+  - `anthropic-messages`
+  - `openai-responses`
+  - `openai-completions`
+  - `openai-codex-responses`
+- Anthropic tool-result image shaping is now explicitly frozen in Rust for the narrowed migration scope:
+  - text+image tool results stay grouped inside a single Anthropic `tool_result` content block
+  - image-only tool results retain the Anthropic placeholder text fallback `"(see attached image)"` plus the image block
+- OpenAI Responses and OpenAI Codex image-tool-result shaping is now explicitly frozen in Rust:
+  - tool-result text+image stays nested inside `function_call_output.output`
+  - no follow-up synthetic user message is emitted after that `function_call_output`
+- OpenAI Completions image-tool-result shaping is now explicitly frozen in Rust:
+  - textual tool output stays in the `tool` message
+  - image content is emitted in a follow-up user multipart message with the image-attachment helper text
+
+Compatibility note for this slice:
+- the new regression file focuses on request-shaping parity rather than full live end-to-end vision execution. This matches the highest-value deterministic TS behavior for migration validation and avoids introducing provider-network nondeterminism into the Rust regression set.
+
+### Rust design summary
+
+New Rust regression file added:
+- `rust/crates/pi-ai/tests/image_tool_result.rs`
+
+No runtime implementation changes were required for this slice; the current Rust provider code already matched the narrowed TypeScript behavior once explicit tests were added.
+
+### Validation summary
+
+New Rust coverage added for:
+- Anthropic text+image tool-result grouping
+- Anthropic image-only tool-result placeholder behavior
+- OpenAI Responses `function_call_output` image routing
+- OpenAI Completions follow-up user-image routing after tool results
+- OpenAI Codex `function_call_output` image routing
+
+Validation run results:
+- `cd rust && cargo test -p pi-ai --test image_tool_result` passed
+- `cd rust && cargo fmt --all && cargo test -p pi-ai` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- explicit narrowed regression files for response-id and tool-call-without-result across all four in-scope providers
+- Unicode/surrogate sanitization parity for request shaping
+- Codex retry/WebSocket transport parity beyond the current SSE slice
+
+## Milestone 16 update: narrowed tool-call-without-result regression slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/ai/test/tool-call-without-result.test.ts`
+- `packages/ai/src/providers/transform-messages.ts`
+- `packages/ai/src/providers/anthropic.ts`
+- `packages/ai/src/providers/openai-responses-shared.ts`
+- `packages/ai/src/providers/openai-completions.ts`
+- `packages/ai/src/providers/openai-codex-responses.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/tests/anthropic_messages_params.rs`
+- `rust/crates/pi-ai/tests/openai_responses_payload.rs`
+- `rust/crates/pi-ai/tests/openai_completions_messages.rs`
+- `rust/crates/pi-ai/src/openai_codex_responses.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- explicit narrowed `tool-call-without-result` regression coverage now exists for all four in-scope provider paths:
+  - `anthropic-messages`
+  - `openai-responses`
+  - `openai-completions`
+  - `openai-codex-responses`
+- Rust now explicitly freezes the synthetic orphaned-tool-call recovery path that the TypeScript `transformMessages()` logic relies on:
+  - when a user follow-up interrupts a pending tool call with no tool result
+  - a synthetic `No result provided` tool result is inserted before the follow-up user message
+- provider-specific replay shaping is now explicitly covered for that synthetic insertion:
+  - Anthropic emits a synthetic `tool_result` user message before the follow-up user turn
+  - OpenAI Responses emits a synthetic `function_call_output`
+  - OpenAI Completions emits a synthetic `tool` message
+  - OpenAI Codex follows the OpenAI Responses-style synthetic `function_call_output` path
+
+Compatibility note for this slice:
+- this milestone ports the narrowed deterministic request-shaping behavior rather than the full live end-to-end completion flow from the TypeScript test. The important compatibility guarantee here is that orphaned tool calls do not poison replay and that the follow-up user turn remains reachable after provider-specific synthetic repair.
+
+### Rust design summary
+
+New Rust regression file added:
+- `rust/crates/pi-ai/tests/tool_call_without_result.rs`
+
+No runtime implementation changes were required for this slice; the current Rust replay/conversion code already matched the narrowed TypeScript behavior once explicit cross-provider regression tests were added.
+
+### Validation summary
+
+New Rust coverage added for:
+- Anthropic synthetic orphaned-tool-result insertion
+- OpenAI Responses synthetic orphaned-tool-result insertion
+- OpenAI Completions synthetic orphaned-tool-result insertion
+- OpenAI Codex synthetic orphaned-tool-result insertion
+
+Validation run results:
+- `cd rust && cargo test -p pi-ai --test tool_call_without_result` passed
+- pending broader package/workspace validation after this slice
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- explicit narrowed regression file for response-id across the four in-scope providers
+- Unicode/surrogate sanitization parity for request shaping
+- Codex retry/WebSocket transport parity beyond the current SSE slice
+
+## Milestone 17 update: narrowed response-id regression slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/ai/test/responseid.test.ts`
+- related previously migrated provider stream/request tests kept in scope for parity checks:
+  - `packages/ai/src/providers/anthropic.ts`
+  - `packages/ai/src/providers/openai-responses.ts`
+  - `packages/ai/src/providers/openai-responses-shared.ts`
+  - `packages/ai/src/providers/openai-completions.ts`
+  - `packages/ai/src/providers/openai-codex-responses.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/tests/anthropic_messages_stream.rs`
+- `rust/crates/pi-ai/tests/openai_responses_stream.rs`
+- `rust/crates/pi-ai/tests/openai_completions_stream.rs`
+- `rust/crates/pi-ai/tests/openai_codex_responses_stream.rs`
+- `rust/crates/pi-ai/src/openai_codex_responses.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- explicit narrowed `responseId` regression coverage now exists for all four in-scope provider paths:
+  - `anthropic-messages`
+  - `openai-responses`
+  - `openai-completions`
+  - `openai-codex-responses`
+- Rust now explicitly freezes the provider-specific response-id capture points used by the TypeScript E2E suite:
+  - Anthropic captures `message.id` from `message_start`
+  - OpenAI Responses captures `response.id` from `response.created` / terminal response objects
+  - OpenAI Completions captures the streaming chunk `id`
+  - OpenAI Codex captures `response.id` through the Codex-to-Responses SSE normalization path
+
+Compatibility note for this slice:
+- this milestone narrows the TS `responseid.test.ts` E2E expectation into deterministic stream-level regression tests. The compatibility guarantee is that each migrated provider path carries a stable non-empty response id into the terminal assistant message.
+
+### Rust design summary
+
+New Rust regression file added:
+- `rust/crates/pi-ai/tests/response_id.rs`
+
+No runtime implementation changes were required for this slice; the current Rust stream state already preserved response ids correctly for the narrowed provider scope.
+
+### Validation summary
+
+New Rust coverage added for:
+- Anthropic terminal response-id propagation
+- OpenAI Responses terminal response-id propagation
+- OpenAI Completions terminal response-id propagation
+- OpenAI Codex terminal response-id propagation
+
+Validation run results:
+- `cd rust && cargo test -p pi-ai --test response_id` passed
+- `cd rust && cargo fmt --all && cargo test -p pi-ai && cargo test -q --workspace` passed
+- pending `npm run check` after this slice
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- Unicode/surrogate sanitization parity for request shaping
+- Codex retry/WebSocket transport parity beyond the current SSE slice
