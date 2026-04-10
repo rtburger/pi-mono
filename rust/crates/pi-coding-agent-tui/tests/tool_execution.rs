@@ -1,6 +1,6 @@
 use pi_coding_agent_tui::{
     KeybindingsManager, PlainKeyHintStyler, StartupShellComponent, ToolExecutionComponent,
-    ToolExecutionOptions, ToolExecutionResult,
+    ToolExecutionOptions, ToolExecutionRendererDefinition, ToolExecutionResult,
 };
 use pi_events::UserContent;
 use pi_tui::{Component, KeyId, Terminal, Tui, TuiError, visible_width};
@@ -179,6 +179,297 @@ fn tool_execution_component_updates_args_and_renders_image_fallback_text() {
             .iter()
             .any(|line| line.contains("[Image: [image/png]]"))
     );
+}
+
+#[test]
+fn custom_call_and_result_renderers_stack_for_custom_tools() {
+    let keybindings = default_keybindings();
+    let renderers = ToolExecutionRendererDefinition::new()
+        .with_render_call(|_args, _context| Box::new(pi_tui::Text::new("custom call", 0, 0)))
+        .with_render_result(|_result, _options, _context| {
+            Box::new(pi_tui::Text::new("custom result", 0, 0))
+        });
+    let mut component = ToolExecutionComponent::new_with_definition(
+        "custom_tool",
+        "tool-custom-1",
+        json!({}),
+        ToolExecutionOptions::default(),
+        &keybindings,
+        Some(renderers),
+        (),
+    );
+
+    let initial = strip_ansi(&component.render(120).join("\n"));
+    assert!(initial.contains("custom call"));
+
+    component.update_result(
+        ToolExecutionResult {
+            content: vec![UserContent::Text {
+                text: "done".into(),
+            }],
+            details: json!({}),
+            is_error: false,
+        },
+        false,
+    );
+
+    let rendered = strip_ansi(&component.render(120).join("\n"));
+    assert!(rendered.contains("custom call"));
+    assert!(rendered.contains("custom result"));
+}
+
+#[test]
+fn built_in_renderers_still_apply_for_built_in_overrides_without_custom_slots() {
+    let keybindings = default_keybindings();
+    let mut component = ToolExecutionComponent::new_with_definition(
+        "edit",
+        "tool-edit-override-1",
+        json!({ "path": "README.md", "oldText": "before", "newText": "after" }),
+        ToolExecutionOptions::default(),
+        &keybindings,
+        Some(ToolExecutionRendererDefinition::<()>::default()),
+        (),
+    );
+    component.update_result(
+        ToolExecutionResult {
+            content: Vec::new(),
+            details: json!({ "diff": "+1 after", "firstChangedLine": 1 }),
+            is_error: false,
+        },
+        false,
+    );
+
+    let rendered = strip_ansi(&component.render(120).join("\n"));
+    assert!(rendered.contains("edit README.md"));
+    assert!(!rendered.contains(":1"));
+}
+
+#[test]
+fn built_in_result_renderer_is_inherited_when_only_custom_call_renderer_is_provided() {
+    let keybindings = default_keybindings();
+    let renderers = ToolExecutionRendererDefinition::new()
+        .with_render_call(|_args, _context| Box::new(pi_tui::Text::new("override call", 0, 0)));
+    let mut component = ToolExecutionComponent::new_with_definition(
+        "read",
+        "tool-read-override-1",
+        json!({ "path": "README.md" }),
+        ToolExecutionOptions::default(),
+        &keybindings,
+        Some(renderers),
+        (),
+    );
+    component.update_result(
+        ToolExecutionResult {
+            content: vec![UserContent::Text {
+                text: "hello".into(),
+            }],
+            details: json!({}),
+            is_error: false,
+        },
+        false,
+    );
+
+    let rendered = strip_ansi(&component.render(120).join("\n"));
+    assert!(rendered.contains("override call"));
+    assert!(rendered.contains("hello"));
+}
+
+#[test]
+fn built_in_call_renderer_is_inherited_when_only_custom_result_renderer_is_provided() {
+    let keybindings = default_keybindings();
+    let renderers =
+        ToolExecutionRendererDefinition::new().with_render_result(|_result, _options, _context| {
+            Box::new(pi_tui::Text::new("override result", 0, 0))
+        });
+    let mut component = ToolExecutionComponent::new_with_definition(
+        "read",
+        "tool-read-override-2",
+        json!({ "path": "README.md" }),
+        ToolExecutionOptions::default(),
+        &keybindings,
+        Some(renderers),
+        (),
+    );
+    component.update_result(
+        ToolExecutionResult {
+            content: vec![UserContent::Text {
+                text: "hello".into(),
+            }],
+            details: json!({}),
+            is_error: false,
+        },
+        false,
+    );
+
+    let rendered = strip_ansi(&component.render(120).join("\n"));
+    assert!(rendered.contains("read README.md"));
+    assert!(rendered.contains("override result"));
+}
+
+#[test]
+fn custom_renderers_override_built_in_renderers_when_both_slots_are_present() {
+    let keybindings = default_keybindings();
+    let renderers = ToolExecutionRendererDefinition::new()
+        .with_render_call(|_args, _context| Box::new(pi_tui::Text::new("override call", 0, 0)))
+        .with_render_result(|_result, _options, _context| {
+            Box::new(pi_tui::Text::new("override result", 0, 0))
+        });
+    let mut component = ToolExecutionComponent::new_with_definition(
+        "read",
+        "tool-read-override-3",
+        json!({ "path": "README.md" }),
+        ToolExecutionOptions::default(),
+        &keybindings,
+        Some(renderers),
+        (),
+    );
+    component.update_result(
+        ToolExecutionResult {
+            content: vec![UserContent::Text {
+                text: "hello".into(),
+            }],
+            details: json!({}),
+            is_error: false,
+        },
+        false,
+    );
+
+    let rendered = strip_ansi(&component.render(120).join("\n"));
+    assert!(rendered.contains("override call"));
+    assert!(rendered.contains("override result"));
+    assert!(!rendered.contains("read README.md"));
+}
+
+#[derive(Default)]
+struct RendererState {
+    token: Option<String>,
+}
+
+#[test]
+fn custom_call_and_result_renderers_share_state() {
+    let keybindings = default_keybindings();
+    let renderers = ToolExecutionRendererDefinition::<RendererState>::new()
+        .with_render_call(|_args, context| {
+            context
+                .state
+                .token
+                .get_or_insert_with(|| "shared-token".to_owned());
+            Box::new(pi_tui::Text::new(
+                format!(
+                    "custom call {}",
+                    context
+                        .state
+                        .token
+                        .as_deref()
+                        .expect("token set by call renderer")
+                ),
+                0,
+                0,
+            ))
+        })
+        .with_render_result(|_result, _options, context| {
+            Box::new(pi_tui::Text::new(
+                format!(
+                    "custom result {}",
+                    context
+                        .state
+                        .token
+                        .as_deref()
+                        .expect("token should be shared across renderers")
+                ),
+                0,
+                0,
+            ))
+        });
+    let mut component = ToolExecutionComponent::new_with_definition(
+        "custom_tool",
+        "tool-custom-2",
+        json!({}),
+        ToolExecutionOptions::default(),
+        &keybindings,
+        Some(renderers),
+        RendererState::default(),
+    );
+    component.update_result(
+        ToolExecutionResult {
+            content: vec![UserContent::Text {
+                text: "done".into(),
+            }],
+            details: json!({}),
+            is_error: false,
+        },
+        false,
+    );
+
+    let rendered = strip_ansi(&component.render(120).join("\n"));
+    assert!(rendered.contains("custom call shared-token"));
+    assert!(rendered.contains("custom result shared-token"));
+}
+
+#[test]
+fn result_renderer_context_exposes_current_args() {
+    let keybindings = default_keybindings();
+    let renderers = ToolExecutionRendererDefinition::new()
+        .with_render_call(|_args, _context| Box::new(pi_tui::Text::new("call", 0, 0)))
+        .with_render_result(|_result, _options, context| {
+            let argument = context
+                .args
+                .get("foo")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("missing");
+            Box::new(pi_tui::Text::new(format!("arg:{argument}"), 0, 0))
+        });
+    let mut component = ToolExecutionComponent::new_with_definition(
+        "custom_tool",
+        "tool-custom-3",
+        json!({ "foo": "bar" }),
+        ToolExecutionOptions::default(),
+        &keybindings,
+        Some(renderers),
+        (),
+    );
+    component.update_result(
+        ToolExecutionResult {
+            content: vec![UserContent::Text {
+                text: "done".into(),
+            }],
+            details: json!({}),
+            is_error: false,
+        },
+        false,
+    );
+
+    let rendered = strip_ansi(&component.render(120).join("\n"));
+    assert!(rendered.contains("arg:bar"));
+}
+
+#[test]
+fn custom_tools_without_renderers_use_component_fallbacks_without_argument_dump() {
+    let keybindings = default_keybindings();
+    let mut component = ToolExecutionComponent::new_with_definition(
+        "custom_tool",
+        "tool-custom-4",
+        json!({ "foo": "bar" }),
+        ToolExecutionOptions::default(),
+        &keybindings,
+        Some(ToolExecutionRendererDefinition::<()>::default()),
+        (),
+    );
+    component.update_result(
+        ToolExecutionResult {
+            content: vec![UserContent::Text {
+                text: "done".into(),
+            }],
+            details: json!({}),
+            is_error: false,
+        },
+        false,
+    );
+
+    let rendered = strip_ansi(&component.render(120).join("\n"));
+    assert!(rendered.contains("custom_tool"));
+    assert!(rendered.contains("done"));
+    assert!(!rendered.contains("\"foo\""));
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use pi_coding_agent_tui::{KeyId, KeybindingsManager, PlainKeyHintStyler, StartupShellComponent};
-use pi_tui::{Terminal, Text, Tui, TuiError, visible_width};
+use pi_tui::{Component, Terminal, Text, Tui, TuiError, visible_width};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -273,6 +273,108 @@ fn startup_shell_renders_transcript_before_pending_messages_and_prompt() {
     assert!(second_transcript < steering);
     assert!(steering < follow_up);
     assert!(follow_up < prompt);
+}
+
+#[test]
+fn startup_shell_clips_transcript_to_remaining_viewport_height() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    for index in 1..=6 {
+        shell.add_transcript_item(Box::new(Text::new(format!("line {index}"), 0, 0)));
+    }
+    shell.set_viewport_size(24, 4);
+
+    let lines = shell.render(24);
+
+    assert_eq!(lines.len(), 4);
+    assert!(lines[0].contains("line 4"));
+    assert!(lines[1].contains("line 5"));
+    assert!(lines[2].contains("line 6"));
+    assert!(lines[3].starts_with("> "));
+}
+
+#[test]
+fn startup_shell_can_scroll_transcript_without_hiding_prompt() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    for index in 1..=6 {
+        shell.add_transcript_item(Box::new(Text::new(format!("line {index}"), 0, 0)));
+    }
+    shell.set_viewport_size(24, 4);
+    shell.scroll_transcript_up(2);
+
+    let scrolled_up = shell.render(24);
+    assert_eq!(shell.transcript_scroll_offset(), 2);
+    assert!(scrolled_up[0].contains("line 2"));
+    assert!(scrolled_up[1].contains("line 3"));
+    assert!(scrolled_up[2].contains("line 4"));
+    assert!(scrolled_up[3].starts_with("> "));
+
+    shell.scroll_transcript_down(1);
+    let scrolled_down = shell.render(24);
+    assert_eq!(shell.transcript_scroll_offset(), 1);
+    assert!(scrolled_down[0].contains("line 3"));
+    assert!(scrolled_down[1].contains("line 4"));
+    assert!(scrolled_down[2].contains("line 5"));
+    assert!(scrolled_down[3].starts_with("> "));
+
+    shell.scroll_transcript_to_bottom();
+    let bottom = shell.render(24);
+    assert_eq!(shell.transcript_scroll_offset(), 0);
+    assert!(bottom[0].contains("line 4"));
+    assert!(bottom[1].contains("line 5"));
+    assert!(bottom[2].contains("line 6"));
+    assert!(bottom[3].starts_with("> "));
+}
+
+#[test]
+fn startup_shell_preserves_scrolled_transcript_view_when_new_items_arrive() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    for index in 1..=6 {
+        shell.add_transcript_item(Box::new(Text::new(format!("line {index}"), 0, 0)));
+    }
+    shell.set_viewport_size(24, 4);
+    let _ = shell.render(24);
+    shell.scroll_transcript_up(2);
+    let before = shell.render(24);
+    assert!(before[0].contains("line 2"));
+    assert!(before[1].contains("line 3"));
+    assert!(before[2].contains("line 4"));
+
+    shell.add_transcript_item(Box::new(Text::new("line 7", 0, 0)));
+    let after = shell.render(24);
+
+    assert_eq!(shell.transcript_scroll_offset(), 3);
+    assert!(after[0].contains("line 2"));
+    assert!(after[1].contains("line 3"));
+    assert!(after[2].contains("line 4"));
+    assert!(!after.iter().any(|line| line.contains("line 7")));
+    assert!(after[3].starts_with("> "));
 }
 
 #[test]

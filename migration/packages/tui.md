@@ -1429,3 +1429,75 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
 - use the new `TruncatedText` together with the existing startup-shell pieces to begin the first transcript/pending-message composition slice
 - keep multiline editor and broader selector/widget parity deferred until that transcript shell exists
+
+## Milestone 17 update: component viewport-size propagation slice
+
+### Files analyzed
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/tui.rs`
+- `rust/crates/pi-tui/tests/tui.rs`
+- downstream consumer grounding reviewed before implementation:
+  - `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+  - `rust/crates/pi-coding-agent-tui/src/transcript.rs`
+  - `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+
+Relevant TypeScript grounding already in scope for the surrounding renderer behavior:
+- `packages/tui/src/tui.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`
+
+### Behavior summary
+
+New TS-adjacent behavior now covered in Rust:
+- Rust `pi-tui` components can now receive the current terminal viewport size before rendering through a new optional component hook
+- `Tui::render_for_size(...)` and the normal render path now propagate `(width, height)` to root children before rendering, instead of leaving components width-only
+- viewport-size propagation also now reaches overlay components before their render pass
+- this new hook gives downstream Rust coding-agent components enough viewport context to implement transcript clipping/scroll behavior without widening the render signature or redesigning the full component tree API
+
+Current intentional limitation for this slice:
+- the new viewport-size hook is advisory only; it does not change the existing width-only `render(width)` contract
+- no differential-render or immediate async callback behavior changed in this milestone; the hook only provides additional size context to interested components
+
+### Rust design summary
+
+Expanded `pi-tui::Component` with:
+- `set_viewport_size(&self, width: usize, height: usize)` default no-op hook
+
+Expanded `pi-tui::Container` with:
+- propagation of the viewport-size hook to child components
+
+Expanded `pi-tui::Tui` with:
+- root viewport-size propagation before main-frame rendering
+- overlay viewport-size propagation before overlay rendering
+
+Design choices for this slice:
+- keep the existing component render API stable instead of broadening it to `render(width, height)` mid-migration
+- use a default no-op trait hook so already-ported widgets remain source-compatible unless they need viewport awareness
+- keep the hook local to `tui.rs` and trait-based, which lets downstream crates opt in incrementally
+
+### Validation summary
+
+New Rust coverage added for:
+- root-child viewport-size propagation before `render_for_size(...)`
+- existing overlay/focus/input renderer tests continue to pass with the new hook in place
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test tui` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- differential rendering parity remains partial relative to TS `packages/tui/src/tui.ts`
+- richer widgets are still missing (`Box`, multiline editor, autocomplete, markdown/select/settings/image widgets)
+- no Rust transcript/chat view scroll interaction on top of the new viewport hook yet
+- no full coding-agent interactive runtime integration yet
+
+### Recommended next step
+
+Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
+- consume the new viewport-size hook in the coding-agent startup shell/transcript path to add transcript viewport clipping and scrolling
+- keep multiline editor and broader widget parity deferred until that transcript viewport behavior exists

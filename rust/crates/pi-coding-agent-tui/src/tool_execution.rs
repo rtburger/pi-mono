@@ -2,6 +2,82 @@ use crate::{KeybindingsManager, key_text};
 use pi_events::{ToolResultMessage, UserContent};
 use pi_tui::{Component, Container, Spacer, Text};
 use serde_json::Value;
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolRenderResultOptions {
+    pub expanded: bool,
+    pub is_partial: bool,
+}
+
+pub struct ToolRenderContext<'a, TState> {
+    pub args: &'a Value,
+    pub tool_call_id: &'a str,
+    pub state: &'a mut TState,
+    pub execution_started: bool,
+    pub args_complete: bool,
+    pub is_partial: bool,
+    pub expanded: bool,
+    pub show_images: bool,
+    pub is_error: bool,
+}
+
+pub type ToolRenderCallFn<TState> =
+    dyn for<'a> Fn(&'a Value, ToolRenderContext<'a, TState>) -> Box<dyn Component> + Send + Sync;
+pub type ToolRenderResultFn<TState> = dyn for<'a> Fn(
+        &'a ToolExecutionResult,
+        ToolRenderResultOptions,
+        ToolRenderContext<'a, TState>,
+    ) -> Box<dyn Component>
+    + Send
+    + Sync;
+
+#[derive(Clone)]
+pub struct ToolExecutionRendererDefinition<TState = ()> {
+    render_call: Option<Arc<ToolRenderCallFn<TState>>>,
+    render_result: Option<Arc<ToolRenderResultFn<TState>>>,
+}
+
+impl<TState> Default for ToolExecutionRendererDefinition<TState> {
+    fn default() -> Self {
+        Self {
+            render_call: None,
+            render_result: None,
+        }
+    }
+}
+
+impl<TState> ToolExecutionRendererDefinition<TState> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_render_call<F>(mut self, render_call: F) -> Self
+    where
+        F: for<'a> Fn(&'a Value, ToolRenderContext<'a, TState>) -> Box<dyn Component>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.render_call = Some(Arc::new(render_call));
+        self
+    }
+
+    pub fn with_render_result<F>(mut self, render_result: F) -> Self
+    where
+        F: for<'a> Fn(
+                &'a ToolExecutionResult,
+                ToolRenderResultOptions,
+                ToolRenderContext<'a, TState>,
+            ) -> Box<dyn Component>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.render_result = Some(Arc::new(render_result));
+        self
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolExecutionOptions {
@@ -41,7 +117,7 @@ impl From<ToolResultMessage> for ToolExecutionResult {
     }
 }
 
-pub struct ToolExecutionComponent {
+pub struct ToolExecutionComponent<TState = ()> {
     tool_name: String,
     tool_call_id: String,
     args: Value,
@@ -52,16 +128,40 @@ pub struct ToolExecutionComponent {
     args_complete: bool,
     is_partial: bool,
     result: Option<ToolExecutionResult>,
+    renderer_definition: Option<ToolExecutionRendererDefinition<TState>>,
+    renderer_state: TState,
     container: Container,
 }
 
-impl ToolExecutionComponent {
+impl ToolExecutionComponent<()> {
     pub fn new(
         tool_name: impl Into<String>,
         tool_call_id: impl Into<String>,
         args: Value,
         options: ToolExecutionOptions,
         keybindings: &KeybindingsManager,
+    ) -> Self {
+        Self::new_with_definition(
+            tool_name,
+            tool_call_id,
+            args,
+            options,
+            keybindings,
+            None,
+            (),
+        )
+    }
+}
+
+impl<TState> ToolExecutionComponent<TState> {
+    pub fn new_with_definition(
+        tool_name: impl Into<String>,
+        tool_call_id: impl Into<String>,
+        args: Value,
+        options: ToolExecutionOptions,
+        keybindings: &KeybindingsManager,
+        renderer_definition: Option<ToolExecutionRendererDefinition<TState>>,
+        renderer_state: TState,
     ) -> Self {
         let mut component = Self {
             tool_name: tool_name.into(),
@@ -74,6 +174,8 @@ impl ToolExecutionComponent {
             args_complete: false,
             is_partial: true,
             result: None,
+            renderer_definition,
+            renderer_state,
             container: Container::new(),
         };
         component.rebuild();
@@ -122,15 +224,146 @@ impl ToolExecutionComponent {
     fn rebuild(&mut self) {
         self.container.clear();
         self.container.add_child(Box::new(Spacer::new(1)));
-        self.container
-            .add_child(Box::new(Text::new(self.format_tool_execution(), 1, 1)));
+
+        if self.uses_renderer_composition() {
+            let mut content = Container::new();
+            let mut has_content = false;
+
+            if let Some(call_component) = self.build_call_component() {
+                content.add_child(call_component);
+                has_content = true;
+            }
+            if let Some(result_component) = self.build_result_component() {
+                content.add_child(result_component);
+                has_content = true;
+            }
+
+            if has_content {
+                self.container.add_child(Box::new(content));
+            }
+        } else {
+            self.container
+                .add_child(Box::new(Text::new(self.format_tool_execution(), 1, 1)));
+        }
+    }
+
+    fn uses_renderer_composition(&self) -> bool {
+        self.has_built_in_renderers() || self.renderer_definition.is_some()
+    }
+
+    fn has_built_in_renderers(&self) -> bool {
+        matches!(self.tool_name.as_str(), "read" | "write" | "edit")
+    }
+
+    fn build_call_component(&mut self) -> Option<Box<dyn Component>> {
+        let custom_renderer = self
+            .renderer_definition
+            .as_ref()
+            .and_then(|definition| definition.render_call.clone());
+        if let Some(render_call) = custom_renderer {
+            let args = self.args.clone();
+            return Some(render_call(&args, self.render_context_with_args(&args)));
+        }
+
+        if let Some(component) = self.build_built_in_call_component() {
+            return Some(component);
+        }
+
+        if self.renderer_definition.is_some() {
+            return Some(self.create_call_fallback());
+        }
+
+        None
+    }
+
+    fn build_result_component(&mut self) -> Option<Box<dyn Component>> {
+        let result = self.result.clone()?;
+
+        let custom_renderer = self
+            .renderer_definition
+            .as_ref()
+            .and_then(|definition| definition.render_result.clone());
+        if let Some(render_result) = custom_renderer {
+            let args = self.args.clone();
+            return Some(render_result(
+                &result,
+                ToolRenderResultOptions {
+                    expanded: self.expanded,
+                    is_partial: self.is_partial,
+                },
+                self.render_context_with_args(&args),
+            ));
+        }
+
+        if let Some(component) = self.build_built_in_result_component(&result) {
+            return Some(component);
+        }
+
+        if self.renderer_definition.is_some() {
+            return self.create_result_fallback();
+        }
+
+        None
+    }
+
+    fn render_context_with_args<'a>(
+        &'a mut self,
+        args: &'a Value,
+    ) -> ToolRenderContext<'a, TState> {
+        let is_error = self
+            .result
+            .as_ref()
+            .map(|result| result.is_error)
+            .unwrap_or(false);
+        ToolRenderContext {
+            args,
+            tool_call_id: &self.tool_call_id,
+            state: &mut self.renderer_state,
+            execution_started: self.execution_started,
+            args_complete: self.args_complete,
+            is_partial: self.is_partial,
+            expanded: self.expanded,
+            show_images: self.show_images,
+            is_error,
+        }
+    }
+
+    fn build_built_in_call_component(&self) -> Option<Box<dyn Component>> {
+        let text = match self.tool_name.as_str() {
+            "read" => format_read_call(&self.args),
+            "write" => format_write_call(&self.args, self.expanded, &self.expand_key_text),
+            "edit" => format_edit_call(&self.args),
+            _ => return None,
+        };
+        Some(Box::new(Text::new(text, 0, 0)))
+    }
+
+    fn build_built_in_result_component(
+        &self,
+        result: &ToolExecutionResult,
+    ) -> Option<Box<dyn Component>> {
+        let text = match self.tool_name.as_str() {
+            "read" => format_read_result(self.text_output()),
+            "write" => format_write_result(result.is_error, self.text_output()),
+            "edit" => format_edit_result(result, self.text_output()),
+            _ => return None,
+        }?;
+        Some(Box::new(Text::new(text, 0, 0)))
+    }
+
+    fn create_call_fallback(&self) -> Box<dyn Component> {
+        Box::new(Text::new(self.tool_name.clone(), 0, 0))
+    }
+
+    fn create_result_fallback(&self) -> Option<Box<dyn Component>> {
+        let output = self.text_output();
+        if output.is_empty() {
+            return None;
+        }
+        Some(Box::new(Text::new(output, 0, 0)))
     }
 
     fn format_tool_execution(&self) -> String {
-        if let Some(built_in) = self.format_built_in_tool_execution() {
-            return built_in;
-        }
-
         let mut text = self.tool_name.clone();
         let formatted_args = format_json_value(&self.args);
         if !formatted_args.is_empty() {
@@ -145,28 +378,6 @@ impl ToolExecutionComponent {
         }
 
         text
-    }
-
-    fn format_built_in_tool_execution(&self) -> Option<String> {
-        match self.tool_name.as_str() {
-            "read" => Some(format_read_tool_execution(&self.args, self.text_output())),
-            "write" => Some(format_write_tool_execution(
-                &self.args,
-                self.result
-                    .as_ref()
-                    .map(|result| result.is_error)
-                    .unwrap_or(false),
-                self.text_output(),
-                self.expanded,
-                &self.expand_key_text,
-            )),
-            "edit" => Some(format_edit_tool_execution(
-                &self.args,
-                self.result.as_ref(),
-                self.text_output(),
-            )),
-            _ => None,
-        }
     }
 
     fn text_output(&self) -> String {
@@ -197,7 +408,7 @@ impl ToolExecutionComponent {
     }
 }
 
-impl Component for ToolExecutionComponent {
+impl<TState> Component for ToolExecutionComponent<TState> {
     fn render(&self, width: usize) -> Vec<String> {
         self.container.render(width)
     }
@@ -212,30 +423,26 @@ fn format_json_value(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
 
-fn format_read_tool_execution(args: &Value, output: String) -> String {
+fn format_read_call(args: &Value) -> String {
     let mut text = format!("read {}", path_arg(args).unwrap_or("..."));
     if let Some(range) = read_range_suffix(args) {
         text.push_str(&range);
     }
-
-    let output = trim_trailing_empty_lines(&output);
-    if !output.is_empty() {
-        text.push_str("\n\n");
-        text.push_str(&output);
-    }
-
     text
+}
+
+fn format_read_result(output: String) -> Option<String> {
+    let output = trim_trailing_empty_lines(&output);
+    if output.is_empty() {
+        None
+    } else {
+        Some(format!("\n{output}"))
+    }
 }
 
 const WRITE_COLLAPSED_PREVIEW_MAX_LINES: usize = 10;
 
-fn format_write_tool_execution(
-    args: &Value,
-    is_error: bool,
-    output: String,
-    expanded: bool,
-    expand_key_text: &str,
-) -> String {
+fn format_write_call(args: &Value, expanded: bool, expand_key_text: &str) -> String {
     let mut text = format!("write {}", path_arg(args).unwrap_or("..."));
 
     if let Some(content) = string_arg(args, &["content"]) {
@@ -259,40 +466,41 @@ fn format_write_tool_execution(
         }
     }
 
-    if is_error {
-        let output = trim_trailing_empty_lines(&output);
-        if !output.is_empty() {
-            text.push_str("\n\n");
-            text.push_str(&output);
-        }
-    }
-
     text
 }
 
-fn format_edit_tool_execution(
-    args: &Value,
-    result: Option<&ToolExecutionResult>,
-    output: String,
-) -> String {
-    let mut text = format!("edit {}", path_arg(args).unwrap_or("..."));
-
-    if let Some(result) = result {
-        if result.is_error {
-            let output = trim_trailing_empty_lines(&output);
-            if !output.is_empty() {
-                text.push_str("\n\n");
-                text.push_str(&output);
-            }
-        } else if let Some(diff) = result.details.get("diff").and_then(Value::as_str) {
-            if !diff.is_empty() {
-                text.push_str("\n\n");
-                text.push_str(&render_diff(diff));
-            }
-        }
+fn format_write_result(is_error: bool, output: String) -> Option<String> {
+    if !is_error {
+        return None;
     }
 
-    text
+    let output = trim_trailing_empty_lines(&output);
+    if output.is_empty() {
+        None
+    } else {
+        Some(format!("\n{output}"))
+    }
+}
+
+fn format_edit_call(args: &Value) -> String {
+    format!("edit {}", path_arg(args).unwrap_or("..."))
+}
+
+fn format_edit_result(result: &ToolExecutionResult, output: String) -> Option<String> {
+    if result.is_error {
+        let output = trim_trailing_empty_lines(&output);
+        if output.is_empty() {
+            return None;
+        }
+        return Some(format!("\n{output}"));
+    }
+
+    let diff = result.details.get("diff").and_then(Value::as_str)?;
+    if diff.is_empty() {
+        None
+    } else {
+        Some(format!("\n{}", render_diff(diff)))
+    }
 }
 
 fn path_arg<'a>(args: &'a Value) -> Option<&'a str> {

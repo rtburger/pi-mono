@@ -32,6 +32,8 @@ pub trait Component {
     }
 
     fn set_focused(&mut self, _focused: bool) {}
+
+    fn set_viewport_size(&self, _width: usize, _height: usize) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -307,6 +309,12 @@ impl Component for Container {
     fn invalidate(&mut self) {
         for child in &mut self.children {
             child.component.invalidate();
+        }
+    }
+
+    fn set_viewport_size(&self, width: usize, height: usize) {
+        for child in &self.children {
+            child.component.set_viewport_size(width, height);
         }
     }
 }
@@ -657,6 +665,7 @@ impl<T: Terminal> Tui<T> {
     }
 
     fn render_frame_for_size(&self, width: usize, height: usize) -> RenderedFrame {
+        self.root.set_viewport_size(width, height);
         let mut lines = self.root.render(width);
         if !self.overlays.is_empty() {
             lines = self.composite_overlays(lines, width, height);
@@ -938,6 +947,10 @@ impl<T: Terminal> Tui<T> {
         for entry in visible_entries {
             let provisional =
                 self.resolve_overlay_layout(&entry.options, 0, term_width, term_height);
+            entry.component.set_viewport_size(
+                provisional.width,
+                provisional.max_height.unwrap_or(term_height),
+            );
             let mut overlay_lines = entry.component.render(provisional.width);
             if let Some(max_height) = provisional.max_height {
                 overlay_lines.truncate(max_height);

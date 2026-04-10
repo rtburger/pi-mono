@@ -2832,3 +2832,191 @@ Still deferred for the coding-agent interactive transcript surface:
 Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
 - either deepen `ToolExecutionComponent` with built-in/custom renderer override parity or move to transcript viewport/scroll behavior if interaction fidelity is now the higher priority
 - keep session/runtime wiring deferred until the remaining transcript/widget behavior is present in Rust
+
+## Milestone 41 update: `ToolExecutionComponent` custom-renderer override parity slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/tool-execution.ts`
+- `packages/coding-agent/test/tool-execution-component.test.ts`
+- focused built-in renderer references reviewed for override inheritance grounding:
+  - `packages/coding-agent/src/core/tools/read.ts`
+  - `packages/coding-agent/src/core/tools/write.ts`
+  - `packages/coding-agent/src/core/tools/edit.ts`
+- related renderer/context type slice reviewed:
+  - `packages/coding-agent/src/core/extensions/types.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/tool_execution.rs`
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/tests/tool_execution.rs`
+- `rust/crates/pi-tui/src/tui.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `ToolExecutionComponent` now supports the first Rust custom-renderer override surface corresponding to the TypeScript `renderCall` / `renderResult` slots
+- Rust now preserves the current TypeScript override-selection rules for the migrated slice:
+  - custom call/result renderers stack for non-built-in tools
+  - built-in `read` / `write` / `edit` renderers still apply when a built-in override is present but the corresponding custom slot is missing
+  - custom call/result renderers override the built-in slot when explicitly provided for a built-in tool name
+  - custom tool definitions with no renderer slots use the TS component-level fallback shape instead of dropping back to the generic JSON-args renderer
+- Rust now preserves shared renderer state across the call and result slots for the same tool row
+- result-renderer context now exposes the current args payload, matching the TS behavior exercised by the parity tests
+
+Current intentional limitation for this slice:
+- the new Rust renderer surface is intentionally the renderer-slot subset only; it does not yet port the full TypeScript `ToolDefinition` shape into `pi-coding-agent-tui`
+- Rust custom renderer context still does not expose the full TS context surface (`theme`, `invalidate`, `lastComponent`, `cwd`); this slice ports the currently tested/used state and visibility flags first
+- renderer callbacks currently rebuild fresh Rust components on each update; the TS `lastComponent` reuse path remains deferred
+- inline image rendering parity remains deferred; this slice is about renderer dispatch and override behavior, not the underlying image widget gap
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::tool_execution` with:
+- `ToolRenderResultOptions`
+- `ToolRenderContext<'a, TState>`
+- `ToolExecutionRendererDefinition<TState>`
+- generic `ToolExecutionComponent<TState>` plus `new_with_definition(...)`
+- internal call/result renderer dispatch that now layers:
+  - custom call/result slots
+  - built-in `read` / `write` / `edit` slots
+  - component-level fallback renderers for definition-backed custom tools
+  - generic JSON-args fallback only when no renderer definition exists at all
+
+Crate-surface change:
+- `pi-coding-agent-tui` now exports the renderer-definition/context types alongside `ToolExecutionComponent`
+
+Design choices for this slice:
+- keep the renderer override logic local to `tool_execution.rs` instead of introducing a broader Rust renderer registry before runtime/session wiring exists
+- make the component generic over renderer state so shared state stays strongly typed in Rust tests and future call sites
+- stop short of porting the TS theme and `lastComponent` reuse contracts until there is a real Rust interactive runtime that needs them
+
+### Validation summary
+
+New Rust coverage added for:
+- custom call/result renderer stacking for custom tools
+- built-in `read` / `edit` fallback inheritance when only one custom slot is provided or when a built-in override has no renderer slots
+- overriding built-in renderers with custom call/result slots
+- shared typed renderer state across call and result renderers
+- result-renderer access to the current args payload
+- custom-definition fallback without reintroducing the generic pretty-printed argument dump
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test tool_execution` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive transcript surface:
+- Rust custom tool renderers still do not have the full TS renderer context surface (`theme`, `invalidate`, `lastComponent`, `cwd`)
+- no Rust inline image rendering parity yet inside transcript widgets
+- no Rust markdown/theme/background parity yet for the broader transcript widget set
+- no Rust footer integration yet
+- no scroll behavior or transcript viewport management yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive/components`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- move to transcript viewport/scroll behavior next, now that the highest-value `ToolExecutionComponent` renderer-gap covered by the current TS tests is in place
+- keep session/runtime wiring deferred until scrolling and the remaining transcript/widget behavior are present in Rust
+
+## Milestone 42 update: startup-shell transcript viewport + scroll slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (chat/pending/prompt layout order and transcript insertion grounding)
+- existing transcript/shell/message widget slices already in scope remained the behavior baseline
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/src/transcript.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+- supporting `pi-tui` viewport hook files reviewed for this slice:
+  - `rust/crates/pi-tui/src/tui.rs`
+  - `rust/crates/pi-tui/tests/tui.rs`
+
+### Behavior summary
+
+New TS-adjacent interactive-shell behavior now covered in Rust:
+- the Rust startup shell now has a first real transcript viewport-management slice instead of always rendering the full transcript and relying only on outer terminal clipping
+- transcript rendering now respects the remaining visible height after:
+  - built-in header content
+  - pending-message strip
+  - prompt input
+- the transcript viewport now stays clipped above the pending-message strip and prompt, which gives the Rust shell an explicit chat-area budget rather than depending solely on global bottom-of-screen clipping
+- the Rust shell now supports explicit transcript scrolling through the component API:
+  - `scroll_transcript_up(...)`
+  - `scroll_transcript_down(...)`
+  - `set_transcript_scroll_offset(...)`
+  - `scroll_transcript_to_bottom()`
+  - `transcript_scroll_offset()`
+- when the transcript is scrolled away from the bottom and new transcript items are appended, Rust now preserves the visible older viewport instead of jumping back to the newest content immediately
+
+Current intentional limitation for this slice:
+- this milestone adds transcript viewport state and scroll APIs, not final keybound interactive scroll controls yet
+- no footer/status-row reservation exists yet, so the current viewport budgeting only accounts for header, transcript, pending messages, and prompt
+- no session/runtime wiring exists yet to drive scrolling from a real interactive command path
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::transcript` with:
+- persistent transcript scroll offset state
+- viewport-height tracking
+- last-width tracking for append-while-scrolled preservation
+- new methods:
+  - `scroll_offset()`
+  - `set_scroll_offset(...)`
+  - `scroll_up(...)`
+  - `scroll_down(...)`
+  - `scroll_to_bottom()`
+  - `set_viewport_height(...)`
+
+Expanded `pi-coding-agent-tui::startup_shell` with:
+- stored viewport size from the surrounding `pi-tui` render path
+- transcript viewport budgeting during render
+- public transcript scroll helpers forwarding into the transcript component
+
+Design choices for this slice:
+- keep the transcript viewport logic local to `startup_shell.rs` / `transcript.rs` instead of redesigning the whole `pi-tui` render contract around height-aware rendering
+- use line-based scroll offsets, matching the current Rust text-first transcript model
+- preserve older visible content when appending new transcript items while scrolled up by using the last rendered width to estimate the newly added line count
+
+### Validation summary
+
+New Rust coverage added for:
+- clipping transcript lines to the remaining viewport height above the prompt
+- scrolling the transcript up and back down without hiding the prompt
+- preserving the scrolled transcript viewport when a new transcript item is appended while scrolled away from the bottom
+- existing startup-shell transcript/pending-message/prompt ordering tests continue to pass
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test tui` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test startup_shell` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive shell/transcript surface:
+- no keybound transcript scroll controls yet
+- no Rust footer integration yet, so transcript viewport budgeting still ignores footer height
+- no Rust multiline editor / custom-editor parity yet
+- no Rust inline image rendering parity yet inside transcript widgets
+- no Rust markdown/theme/background parity yet for the broader transcript widget set
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- port the first footer/status integration slice next so transcript viewport budgeting can account for the full interactive shell layout
+- keep keybound scroll controls and session/runtime wiring deferred until that footer/layout surface exists

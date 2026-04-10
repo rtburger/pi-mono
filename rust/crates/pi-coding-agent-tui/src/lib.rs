@@ -29,7 +29,10 @@ pub use startup_header::{
     build_condensed_changelog_notice, build_startup_header_text,
 };
 pub use startup_shell::StartupShellComponent;
-pub use tool_execution::{ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult};
+pub use tool_execution::{
+    ToolExecutionComponent, ToolExecutionOptions, ToolExecutionRendererDefinition,
+    ToolExecutionResult, ToolRenderContext, ToolRenderResultOptions,
+};
 pub use transcript::TranscriptComponent;
 pub use user_message::UserMessageComponent;
 

@@ -17,6 +17,16 @@ struct StaticComponent {
     requested_width: Option<Arc<Cell<Option<usize>>>>,
 }
 
+struct ViewportAwareComponent {
+    viewport: Arc<Mutex<Option<(usize, usize)>>>,
+}
+
+impl ViewportAwareComponent {
+    fn new(viewport: Arc<Mutex<Option<(usize, usize)>>>) -> Self {
+        Self { viewport }
+    }
+}
+
 impl StaticComponent {
     fn new(lines: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
@@ -45,6 +55,18 @@ impl Component for StaticComponent {
     }
 
     fn invalidate(&mut self) {}
+}
+
+impl Component for ViewportAwareComponent {
+    fn render(&self, _width: usize) -> Vec<String> {
+        vec!["viewport".to_owned()]
+    }
+
+    fn invalidate(&mut self) {}
+
+    fn set_viewport_size(&self, width: usize, height: usize) {
+        *self.viewport.lock().expect("viewport mutex poisoned") = Some((width, height));
+    }
 }
 
 #[derive(Default)]
@@ -289,6 +311,21 @@ impl Terminal for MockTerminal {
     fn set_title(&mut self, _title: &str) -> Result<(), TuiError> {
         Ok(())
     }
+}
+
+#[test]
+fn render_for_size_propagates_viewport_size_to_root_children() {
+    let terminal = MockTerminal::new(30, 7);
+    let mut tui = Tui::new(terminal);
+    let viewport = Arc::new(Mutex::new(None));
+    tui.add_child(Box::new(ViewportAwareComponent::new(Arc::clone(&viewport))));
+
+    let _ = tui.render_for_size(30, 7);
+
+    assert_eq!(
+        *viewport.lock().expect("viewport mutex poisoned"),
+        Some((30, 7))
+    );
 }
 
 #[test]

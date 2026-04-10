@@ -3,13 +3,14 @@ use crate::{
     StartupHeaderStyler, TranscriptComponent,
 };
 use pi_tui::{Component, ComponentId, Input};
-use std::ops::Deref;
+use std::{cell::Cell, ops::Deref};
 
 pub struct StartupShellComponent {
     header: BuiltInHeaderComponent,
     transcript: TranscriptComponent,
     pending_messages: PendingMessagesComponent,
     input: Input,
+    viewport_size: Cell<Option<(usize, usize)>>,
 }
 
 impl StartupShellComponent {
@@ -35,6 +36,7 @@ impl StartupShellComponent {
             transcript: TranscriptComponent::new(),
             pending_messages: PendingMessagesComponent::new(keybindings),
             input: Input::with_keybindings(keybindings.deref().clone()),
+            viewport_size: Cell::new(None),
         }
     }
 
@@ -88,6 +90,26 @@ impl StartupShellComponent {
         self.transcript.item_count()
     }
 
+    pub fn transcript_scroll_offset(&self) -> usize {
+        self.transcript.scroll_offset()
+    }
+
+    pub fn set_transcript_scroll_offset(&mut self, offset: usize) {
+        self.transcript.set_scroll_offset(offset);
+    }
+
+    pub fn scroll_transcript_up(&mut self, lines: usize) {
+        self.transcript.scroll_up(lines);
+    }
+
+    pub fn scroll_transcript_down(&mut self, lines: usize) {
+        self.transcript.scroll_down(lines);
+    }
+
+    pub fn scroll_transcript_to_bottom(&mut self) {
+        self.transcript.scroll_to_bottom();
+    }
+
     pub fn set_pending_messages<I, J, S, T>(
         &mut self,
         styler: &impl KeyHintStyler,
@@ -118,10 +140,20 @@ impl StartupShellComponent {
 
 impl Component for StartupShellComponent {
     fn render(&self, width: usize) -> Vec<String> {
-        let mut lines = self.header.render(width);
-        lines.extend(self.transcript.render(width));
-        lines.extend(self.pending_messages.render(width));
-        lines.extend(self.input.render(width));
+        let header_lines = self.header.render(width);
+        let pending_lines = self.pending_messages.render(width);
+        let input_lines = self.input.render(width);
+        let transcript_height = self.viewport_size.get().map(|(_, total_height)| {
+            total_height
+                .saturating_sub(header_lines.len() + pending_lines.len() + input_lines.len())
+        });
+        self.transcript.set_viewport_height(transcript_height);
+        let transcript_lines = self.transcript.render(width);
+
+        let mut lines = header_lines;
+        lines.extend(transcript_lines);
+        lines.extend(pending_lines);
+        lines.extend(input_lines);
         lines
     }
 
@@ -138,5 +170,13 @@ impl Component for StartupShellComponent {
 
     fn set_focused(&mut self, focused: bool) {
         self.input.set_focused(focused);
+    }
+
+    fn set_viewport_size(&self, width: usize, height: usize) {
+        self.viewport_size.set(Some((width, height)));
+        self.header.set_viewport_size(width, height);
+        self.transcript.set_viewport_size(width, height);
+        self.pending_messages.set_viewport_size(width, height);
+        self.input.set_viewport_size(width, height);
     }
 }
