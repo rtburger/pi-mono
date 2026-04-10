@@ -4,6 +4,7 @@ mod clipboard_image;
 mod compaction_summary;
 mod custom_message;
 mod footer;
+mod interactive_binding;
 mod keybinding_hints;
 mod keybindings;
 mod pending_messages;
@@ -24,6 +25,7 @@ pub use clipboard_image::{
 pub use compaction_summary::CompactionSummaryMessageComponent;
 pub use custom_message::CustomMessageComponent;
 pub use footer::{FooterComponent, FooterState};
+pub use interactive_binding::InteractiveCoreBinding;
 pub use keybinding_hints::{KeyHintStyler, PlainKeyHintStyler, key_hint, key_text, raw_key_hint};
 pub use keybindings::{
     DEFAULT_APP_KEYBINDINGS, KeybindingsManager, MigrateKeybindingsConfigResult,

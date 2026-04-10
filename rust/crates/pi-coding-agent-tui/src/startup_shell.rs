@@ -1,20 +1,27 @@
 use crate::{
-    BuiltInHeaderComponent, ClipboardImageSource, FooterComponent, FooterState, KeyHintStyler,
-    KeybindingsManager, PendingMessagesComponent, StartupHeaderStyler, TranscriptComponent,
+    AssistantMessageComponent, BuiltInHeaderComponent, ClipboardImageSource,
+    DEFAULT_HIDDEN_THINKING_LABEL, FooterComponent, FooterState, KeyHintStyler, KeybindingsManager,
+    PendingMessagesComponent, StartupHeaderStyler, ToolExecutionComponent, ToolExecutionOptions,
+    ToolExecutionResult, TranscriptComponent, UserMessageComponent,
     paste_clipboard_image_into_shell,
 };
 use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
+use pi_events::{AssistantMessage, UserContent};
 use pi_tui::{Component, ComponentId, Input, RenderHandle, matches_key, truncate_to_width};
+use serde_json::Value;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
+    collections::{HashMap, VecDeque},
     ops::Deref,
     path::PathBuf,
+    rc::Rc,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 type ActionCallback = Box<dyn FnMut() + Send + 'static>;
 type ShortcutCallback = Box<dyn FnMut(String) -> bool + Send + 'static>;
+type SubmitCallback = Box<dyn FnMut(String) + Send + 'static>;
 
 const CLEAR_EXIT_WINDOW: Duration = Duration::from_millis(500);
 
@@ -28,6 +35,191 @@ pub struct StatusHandle {
 struct ClipboardImagePasteConfig {
     source: Arc<dyn ClipboardImageSource + Send + Sync>,
     temp_dir: PathBuf,
+}
+
+struct SharedComponent<T> {
+    inner: Rc<RefCell<T>>,
+}
+
+impl<T> Clone for SharedComponent<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Rc::clone(&self.inner),
+        }
+    }
+}
+
+impl<T> SharedComponent<T> {
+    fn new(component: T) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(component)),
+        }
+    }
+
+    fn with_mut<R>(&self, visit: impl FnOnce(&mut T) -> R) -> R {
+        visit(&mut self.inner.borrow_mut())
+    }
+}
+
+impl<T: Component> Component for SharedComponent<T> {
+    fn render(&self, width: usize) -> Vec<String> {
+        self.inner.borrow().render(width)
+    }
+
+    fn invalidate(&mut self) {
+        self.inner.borrow_mut().invalidate();
+    }
+
+    fn handle_input(&mut self, data: &str) {
+        self.inner.borrow_mut().handle_input(data);
+    }
+
+    fn wants_key_release(&self) -> bool {
+        self.inner.borrow().wants_key_release()
+    }
+
+    fn set_focused(&mut self, focused: bool) {
+        self.inner.borrow_mut().set_focused(focused);
+    }
+
+    fn set_viewport_size(&self, width: usize, height: usize) {
+        self.inner.borrow().set_viewport_size(width, height);
+    }
+}
+
+enum ShellUpdate {
+    AppendUserMessage {
+        text: String,
+    },
+    AppendToolResult {
+        tool_call_id: String,
+        tool_name: String,
+        result: ToolExecutionResult,
+    },
+    StartAssistantMessage {
+        message: AssistantMessage,
+    },
+    UpdateAssistantMessage {
+        message: AssistantMessage,
+    },
+    FinishAssistantMessage {
+        message: AssistantMessage,
+    },
+    StartToolExecution {
+        tool_call_id: String,
+        tool_name: String,
+        args: Value,
+    },
+    UpdateToolExecution {
+        tool_call_id: String,
+        result: ToolExecutionResult,
+        is_partial: bool,
+    },
+}
+
+#[derive(Clone)]
+pub(crate) struct ShellUpdateHandle {
+    pending_updates: Arc<Mutex<VecDeque<ShellUpdate>>>,
+    render_handle: Option<RenderHandle>,
+}
+
+impl ShellUpdateHandle {
+    fn new(
+        pending_updates: Arc<Mutex<VecDeque<ShellUpdate>>>,
+        render_handle: Option<RenderHandle>,
+    ) -> Self {
+        Self {
+            pending_updates,
+            render_handle,
+        }
+    }
+
+    fn push(&self, update: ShellUpdate) {
+        self.pending_updates
+            .lock()
+            .expect("pending shell updates mutex poisoned")
+            .push_back(update);
+        if let Some(render_handle) = &self.render_handle {
+            render_handle.request_render();
+        }
+    }
+
+    pub fn append_user_message(&self, text: impl Into<String>) {
+        self.push(ShellUpdate::AppendUserMessage { text: text.into() });
+    }
+
+    pub fn append_tool_result(
+        &self,
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        result: ToolExecutionResult,
+    ) {
+        self.push(ShellUpdate::AppendToolResult {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            result,
+        });
+    }
+
+    pub fn start_assistant_message(&self, message: AssistantMessage) {
+        self.push(ShellUpdate::StartAssistantMessage { message });
+    }
+
+    pub fn update_assistant_message(&self, message: AssistantMessage) {
+        self.push(ShellUpdate::UpdateAssistantMessage { message });
+    }
+
+    pub fn finish_assistant_message(&self, message: AssistantMessage) {
+        self.push(ShellUpdate::FinishAssistantMessage { message });
+    }
+
+    pub fn start_tool_execution(
+        &self,
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        args: Value,
+    ) {
+        self.push(ShellUpdate::StartToolExecution {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            args,
+        });
+    }
+
+    pub fn update_tool_execution(
+        &self,
+        tool_call_id: impl Into<String>,
+        result: ToolExecutionResult,
+        is_partial: bool,
+    ) {
+        self.push(ShellUpdate::UpdateToolExecution {
+            tool_call_id: tool_call_id.into(),
+            result,
+            is_partial,
+        });
+    }
+}
+
+pub struct StartupShellComponent {
+    header: BuiltInHeaderComponent,
+    transcript: RefCell<TranscriptComponent>,
+    pending_messages: PendingMessagesComponent,
+    input: Input,
+    footer: FooterComponent,
+    keybindings: KeybindingsManager,
+    status_message: Arc<Mutex<Option<String>>>,
+    on_submit: Option<SubmitCallback>,
+    on_escape: Option<ActionCallback>,
+    on_exit: Option<ActionCallback>,
+    on_paste_image: Option<ActionCallback>,
+    on_extension_shortcut: Option<ShortcutCallback>,
+    action_handlers: Vec<(String, ActionCallback)>,
+    viewport_size: Cell<Option<(usize, usize)>>,
+    last_clear_action: Cell<Option<Instant>>,
+    clipboard_image_paste: Option<ClipboardImagePasteConfig>,
+    pending_updates: Arc<Mutex<VecDeque<ShellUpdate>>>,
+    current_assistant: RefCell<Option<SharedComponent<AssistantMessageComponent>>>,
+    tool_components: RefCell<HashMap<String, SharedComponent<ToolExecutionComponent>>>,
 }
 
 impl StatusHandle {
@@ -62,24 +254,6 @@ impl StatusHandle {
     }
 }
 
-pub struct StartupShellComponent {
-    header: BuiltInHeaderComponent,
-    transcript: TranscriptComponent,
-    pending_messages: PendingMessagesComponent,
-    input: Input,
-    footer: FooterComponent,
-    keybindings: KeybindingsManager,
-    status_message: Arc<Mutex<Option<String>>>,
-    on_escape: Option<ActionCallback>,
-    on_exit: Option<ActionCallback>,
-    on_paste_image: Option<ActionCallback>,
-    on_extension_shortcut: Option<ShortcutCallback>,
-    action_handlers: Vec<(String, ActionCallback)>,
-    viewport_size: Cell<Option<(usize, usize)>>,
-    last_clear_action: Cell<Option<Instant>>,
-    clipboard_image_paste: Option<ClipboardImagePasteConfig>,
-}
-
 impl StartupShellComponent {
     pub fn new(
         app_name: &str,
@@ -100,12 +274,13 @@ impl StartupShellComponent {
                 changelog_markdown,
                 show_condensed_changelog,
             ),
-            transcript: TranscriptComponent::new(),
+            transcript: RefCell::new(TranscriptComponent::new()),
             pending_messages: PendingMessagesComponent::new(keybindings),
             input: Input::with_keybindings(keybindings.deref().clone()),
             footer: FooterComponent::default(),
             keybindings: keybindings.clone(),
             status_message: Arc::new(Mutex::new(None)),
+            on_submit: None,
             on_escape: None,
             on_exit: None,
             on_paste_image: None,
@@ -114,6 +289,9 @@ impl StartupShellComponent {
             viewport_size: Cell::new(None),
             last_clear_action: Cell::new(None),
             clipboard_image_paste: None,
+            pending_updates: Arc::new(Mutex::new(VecDeque::new())),
+            current_assistant: RefCell::new(None),
+            tool_components: RefCell::new(HashMap::new()),
         }
     }
 
@@ -143,7 +321,9 @@ impl StartupShellComponent {
         let page_lines = self
             .transcript_viewport_height_for_width(width)
             .unwrap_or(0);
-        self.transcript.set_viewport_height(Some(page_lines));
+        self.transcript
+            .borrow()
+            .set_viewport_height(Some(page_lines));
         page_lines
     }
 
@@ -198,18 +378,145 @@ impl StartupShellComponent {
         if self.input_value().trim().is_empty() {
             return;
         }
-        self.input.handle_input("\r");
+        self.submit_current_input();
+    }
+
+    fn submit_current_input(&mut self) {
+        let value = self.input_value().to_owned();
+        let mut on_submit = self.on_submit.take();
+        if let Some(callback) = &mut on_submit {
+            self.clear_input();
+            self.last_clear_action.set(None);
+            callback(value);
+        }
+        self.on_submit = on_submit;
+    }
+
+    fn drain_pending_updates(&self) {
+        loop {
+            let update = self
+                .pending_updates
+                .lock()
+                .expect("pending shell updates mutex poisoned")
+                .pop_front();
+            let Some(update) = update else {
+                break;
+            };
+            self.apply_shell_update(update);
+        }
+    }
+
+    fn apply_shell_update(&self, update: ShellUpdate) {
+        match update {
+            ShellUpdate::AppendUserMessage { text } => {
+                self.transcript
+                    .borrow_mut()
+                    .add_item(Box::new(UserMessageComponent::new(text)));
+            }
+            ShellUpdate::AppendToolResult {
+                tool_call_id,
+                tool_name,
+                result,
+            } => {
+                let component = self.ensure_tool_component(&tool_call_id, &tool_name, Value::Null);
+                component.with_mut(|component| {
+                    component.mark_execution_started();
+                    component.set_args_complete();
+                    component.update_result(result, false);
+                });
+            }
+            ShellUpdate::StartAssistantMessage { message } => {
+                let component = self.ensure_assistant_component(message.clone());
+                component.with_mut(|component| component.update_content(message));
+            }
+            ShellUpdate::UpdateAssistantMessage { message } => {
+                let component = self.ensure_assistant_component(message.clone());
+                component.with_mut(|component| component.update_content(message));
+            }
+            ShellUpdate::FinishAssistantMessage { message } => {
+                let component = self.ensure_assistant_component(message.clone());
+                component.with_mut(|component| component.update_content(message));
+                self.current_assistant.borrow_mut().take();
+            }
+            ShellUpdate::StartToolExecution {
+                tool_call_id,
+                tool_name,
+                args,
+            } => {
+                let component = self.ensure_tool_component(&tool_call_id, &tool_name, args.clone());
+                component.with_mut(|component| {
+                    component.update_args(args);
+                    component.mark_execution_started();
+                    component.set_args_complete();
+                });
+            }
+            ShellUpdate::UpdateToolExecution {
+                tool_call_id,
+                result,
+                is_partial,
+            } => {
+                if let Some(component) = self.tool_components.borrow().get(&tool_call_id).cloned() {
+                    component.with_mut(|component| component.update_result(result, is_partial));
+                }
+            }
+        }
+    }
+
+    fn ensure_assistant_component(
+        &self,
+        message: AssistantMessage,
+    ) -> SharedComponent<AssistantMessageComponent> {
+        if let Some(component) = self.current_assistant.borrow().clone() {
+            return component;
+        }
+
+        let component = SharedComponent::new(AssistantMessageComponent::new(
+            Some(message),
+            false,
+            DEFAULT_HIDDEN_THINKING_LABEL,
+        ));
+        self.transcript
+            .borrow_mut()
+            .add_item(Box::new(component.clone()));
+        *self.current_assistant.borrow_mut() = Some(component.clone());
+        component
+    }
+
+    fn ensure_tool_component(
+        &self,
+        tool_call_id: &str,
+        tool_name: &str,
+        args: Value,
+    ) -> SharedComponent<ToolExecutionComponent> {
+        if let Some(component) = self.tool_components.borrow().get(tool_call_id).cloned() {
+            return component;
+        }
+
+        let component = SharedComponent::new(ToolExecutionComponent::new(
+            tool_name.to_owned(),
+            tool_call_id.to_owned(),
+            args,
+            ToolExecutionOptions::default(),
+            &self.keybindings,
+        ));
+        self.transcript
+            .borrow_mut()
+            .add_item(Box::new(component.clone()));
+        self.tool_components
+            .borrow_mut()
+            .insert(tool_call_id.to_owned(), component.clone());
+        component
     }
 
     pub fn set_on_submit<F>(&mut self, on_submit: F)
     where
         F: FnMut(String) + Send + 'static,
     {
-        self.input.set_on_submit(on_submit);
+        self.on_submit = Some(Box::new(on_submit));
     }
 
     pub fn clear_on_submit(&mut self) {
-        self.input.clear_on_submit();
+        self.on_submit = None;
     }
 
     pub fn set_on_escape<F>(&mut self, on_escape: F)
@@ -312,39 +619,45 @@ impl StartupShellComponent {
     }
 
     pub fn add_transcript_item(&mut self, component: Box<dyn Component>) -> ComponentId {
-        self.transcript.add_item(component)
+        self.transcript.borrow_mut().add_item(component)
     }
 
     pub fn remove_transcript_item(&mut self, id: ComponentId) -> bool {
-        self.transcript.remove_item(id)
+        self.transcript.borrow_mut().remove_item(id)
     }
 
     pub fn clear_transcript(&mut self) {
-        self.transcript.clear_items();
+        self.pending_updates
+            .lock()
+            .expect("pending shell updates mutex poisoned")
+            .clear();
+        self.current_assistant.borrow_mut().take();
+        self.tool_components.borrow_mut().clear();
+        self.transcript.borrow_mut().clear_items();
     }
 
     pub fn transcript_item_count(&self) -> usize {
-        self.transcript.item_count()
+        self.transcript.borrow().item_count()
     }
 
     pub fn transcript_scroll_offset(&self) -> usize {
-        self.transcript.scroll_offset()
+        self.transcript.borrow().scroll_offset()
     }
 
     pub fn set_transcript_scroll_offset(&mut self, offset: usize) {
-        self.transcript.set_scroll_offset(offset);
+        self.transcript.borrow_mut().set_scroll_offset(offset);
     }
 
     pub fn scroll_transcript_up(&mut self, lines: usize) {
-        self.transcript.scroll_up(lines);
+        self.transcript.borrow_mut().scroll_up(lines);
     }
 
     pub fn scroll_transcript_down(&mut self, lines: usize) {
-        self.transcript.scroll_down(lines);
+        self.transcript.borrow_mut().scroll_down(lines);
     }
 
     pub fn scroll_transcript_to_bottom(&mut self) {
-        self.transcript.scroll_to_bottom();
+        self.transcript.borrow_mut().scroll_to_bottom();
     }
 
     pub fn set_pending_messages<I, J, S, T>(
@@ -392,6 +705,13 @@ impl StartupShellComponent {
         StatusHandle::new(Arc::clone(&self.status_message), Some(render_handle))
     }
 
+    pub(crate) fn update_handle_with_render_handle(
+        &self,
+        render_handle: RenderHandle,
+    ) -> ShellUpdateHandle {
+        ShellUpdateHandle::new(Arc::clone(&self.pending_updates), Some(render_handle))
+    }
+
     pub fn set_footer_state(&mut self, state: FooterState) {
         self.footer.set_state(state);
     }
@@ -428,14 +748,17 @@ impl StartupShellComponent {
 
 impl Component for StartupShellComponent {
     fn render(&self, width: usize) -> Vec<String> {
+        self.drain_pending_updates();
         let header_lines = self.header.render(width);
         let pending_lines = self.pending_messages.render(width);
         let input_lines = self.input.render(width);
         let footer_lines = self.footer.render(width);
         let status_lines = self.render_status(width);
         let transcript_height = self.transcript_viewport_height_for_width(width);
-        self.transcript.set_viewport_height(transcript_height);
-        let transcript_lines = self.transcript.render(width);
+        self.transcript
+            .borrow()
+            .set_viewport_height(transcript_height);
+        let transcript_lines = self.transcript.borrow().render(width);
 
         let mut lines = header_lines;
         lines.extend(transcript_lines);
@@ -447,8 +770,9 @@ impl Component for StartupShellComponent {
     }
 
     fn invalidate(&mut self) {
+        self.drain_pending_updates();
         self.header.invalidate();
-        self.transcript.invalidate();
+        self.transcript.borrow_mut().invalidate();
         self.pending_messages.invalidate();
         self.input.invalidate();
         self.footer.invalidate();
@@ -473,7 +797,7 @@ impl Component for StartupShellComponent {
         if self.matches_binding(data, "tui.editor.pageUp") {
             let page_lines = self.page_scroll_lines();
             if page_lines > 0 {
-                self.transcript.scroll_up(page_lines);
+                self.transcript.borrow_mut().scroll_up(page_lines);
             }
             return;
         }
@@ -481,7 +805,7 @@ impl Component for StartupShellComponent {
         if self.matches_binding(data, "tui.editor.pageDown") {
             let page_lines = self.page_scroll_lines();
             if page_lines > 0 {
-                self.transcript.scroll_down(page_lines);
+                self.transcript.borrow_mut().scroll_down(page_lines);
             }
             return;
         }
@@ -522,6 +846,11 @@ impl Component for StartupShellComponent {
             return;
         }
 
+        if self.matches_binding(data, "tui.input.submit") || data == "\n" {
+            self.submit_current_input();
+            return;
+        }
+
         let matched_action = self
             .action_handlers
             .iter()
@@ -530,6 +859,7 @@ impl Component for StartupShellComponent {
                 *action != "app.clear"
                     && *action != "app.interrupt"
                     && *action != "app.exit"
+                    && *action != "app.message.followUp"
                     && self.matches_binding(data, action)
             })
             .map(str::to_owned);
@@ -548,9 +878,37 @@ impl Component for StartupShellComponent {
     fn set_viewport_size(&self, width: usize, height: usize) {
         self.viewport_size.set(Some((width, height)));
         self.header.set_viewport_size(width, height);
-        self.transcript.set_viewport_size(width, height);
+        self.transcript.borrow().set_viewport_size(width, height);
         self.pending_messages.set_viewport_size(width, height);
         self.input.set_viewport_size(width, height);
         self.footer.set_viewport_size(width, height);
     }
+}
+
+fn format_user_message_text(content: &[UserContent]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            UserContent::Text { text } => Some(text.replace('\r', "")),
+            UserContent::Image { mime_type, .. } => Some(format!("[Image: [{mime_type}]]")),
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(crate) fn tool_result_from_user_content(
+    content: Vec<UserContent>,
+    details: Value,
+    is_error: bool,
+) -> ToolExecutionResult {
+    ToolExecutionResult {
+        content,
+        details,
+        is_error,
+    }
+}
+
+pub(crate) fn user_message_text(content: &[UserContent]) -> String {
+    format_user_message_text(content)
 }

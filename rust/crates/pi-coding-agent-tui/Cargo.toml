@@ -6,11 +6,15 @@ license.workspace = true
 
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
+pi-agent = { path = "../pi-agent" }
 pi-coding-agent-core = { path = "../pi-coding-agent-core" }
 pi-events = { path = "../pi-events" }
 pi-tui = { path = "../pi-tui" }
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
+pi-ai = { path = "../pi-ai" }
 tempfile = "3"
+tokio.workspace = true

@@ -4006,3 +4006,200 @@ Still deferred for the coding-agent non-interactive/runtime surface:
 Stay in `packages/coding-agent/src/core`, `rust/crates/pi-coding-agent-core`, `packages/agent`, and `rust/crates/pi-agent`:
 - either port the next non-interactive runtime control that still depends on the TS `sdk.ts`/`Agent` surface, most likely end-to-end `thinkingBudgets` exposure, or finish the remaining `pi-agent` wrapper-property gaps that block that control from flowing downstream honestly
 - keep the broader interactive startup-shell work separate from this non-interactive runtime path so the remaining end-to-end model/request semantics stay verifiable
+
+## Milestone 54 update: settings-backed non-interactive `thinkingBudgets` exposure slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/core/sdk.ts`
+- `packages/coding-agent/src/core/settings-manager.ts`
+- `packages/agent/src/agent.ts`
+- `packages/agent/src/types.ts`
+- `packages/ai/src/providers/simple-options.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-config/src/lib.rs`
+- `rust/crates/pi-config/tests/settings.rs`
+- `rust/crates/pi-coding-agent-cli/src/runner.rs`
+- `rust/crates/pi-coding-agent-core/src/runtime.rs`
+- `rust/crates/pi-coding-agent-core/tests/runtime.rs`
+- `rust/crates/pi-coding-agent-cli/tests/thinking_budgets.rs`
+- `migration/packages/coding-agent.md`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- the Rust non-interactive path now reads `thinkingBudgets` from `settings.json` alongside the already-migrated image settings
+- global/project merge behavior now matches the TypeScript nested-settings shape for the migrated subset:
+  - missing budgets default to `None`
+  - project-level budget entries override only the specified levels and preserve other global levels
+- the Rust coding-agent runtime now has an explicit `set_thinking_budgets(...)` path on `CodingAgentCore`
+- the registry-backed runtime streamer now forwards those budgets into `pi_ai::stream_simple(...)`, so the custom coding-agent streamer no longer drops the already-migrated simple-path budget behavior
+- end-to-end non-interactive startup now honors stored custom budgets for the current in-scope providers; the new regression freezes the highest-value observable case from TS `sdk.ts` + `simple-options.ts`:
+  - Anthropic reasoning requests use the custom high budget instead of the default high budget when deriving `max_tokens`
+
+Compatibility note for this slice:
+- this milestone ports settings-backed budget exposure for the current non-interactive runtime path only
+- Rust still does not have the full TypeScript settings-manager/session-manager/runtime loop around live settings changes in interactive mode
+- the underlying `pi-agent` custom-streamer trait shape is still narrower than TS `streamFn(...streamSimple)` parity; this slice closes the downstream coding-agent gap without widening that upstream trait boundary yet
+
+### Rust design summary
+
+Expanded `pi-config` with a broader runtime-settings loader:
+- `ThinkingBudgetsSettings`
+- `RuntimeSettings`
+- `LoadedRuntimeSettings`
+- `load_runtime_settings(...)`
+
+Expanded `pi-coding-agent-core::runtime` with:
+- shared runtime thinking-budget storage on `CodingAgentCore`
+- `CodingAgentCore::thinking_budgets()`
+- `CodingAgentCore::set_thinking_budgets(...)`
+- `RegistryBackedStreamer` now reading the current budgets and passing them into the existing simple-path request mapping
+
+Expanded `pi-coding-agent-cli::runner` with:
+- runtime settings loading via `load_runtime_settings(...)`
+- settings-to-`pi_ai::ThinkingBudgets` mapping
+- startup application of `thinkingBudgets` before the non-interactive run begins
+
+Design choices for this slice:
+- keep the budget exposure local to the coding-agent runtime/shell boundary instead of widening the `pi-agent` streamer trait in the same milestone
+- reuse the existing startup-settings pattern already in place for image settings and apply budgets through the same non-interactive runner flow
+- keep the config loader shallow and explicit rather than porting the full TypeScript `SettingsManager` surface early
+
+### Validation summary
+
+New Rust coverage added for:
+- default runtime-settings loading with empty `thinkingBudgets`
+- project-over-global partial override behavior for `thinkingBudgets`
+- registry-backed runtime forwarding of custom thinking budgets into Anthropic simple-path `max_tokens` shaping
+- end-to-end runner loading of `thinkingBudgets` from `settings.json` into a non-interactive request
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-config --test settings` passed
+- `cd rust && cargo test -p pi-coding-agent-core --test runtime` passed
+- `cd rust && cargo test -p pi-coding-agent-cli --test thinking_budgets` passed
+- `cd rust && cargo test -p pi-config && cargo test -p pi-coding-agent-core && cargo test -p pi-coding-agent-cli` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent non-interactive/runtime surface:
+- the Rust runtime still does not expose the full TypeScript settings-manager/runtime control path for changing `thinkingBudgets` during an interactive session
+- the upstream Rust `pi-agent` custom-streamer trait still does not carry full simple-stream option parity directly
+- session-manager/resource-loader-backed runtime parity remains deferred
+- broader interactive/TUI runtime wiring remains deferred
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/core`, `packages/agent`, `rust/crates/pi-coding-agent-core`, and `rust/crates/pi-agent`:
+- either finish the remaining upstream `pi-agent` property/streamer parity that still blocks full `streamSimple` option flow, or port the next non-interactive runtime control from TS `sdk.ts` that depends on that surface
+- keep the broader interactive startup-shell work separate from this non-interactive runtime path so the remaining end-to-end request semantics stay verifiable
+
+## Milestone 55 update: first live `CodingAgentCore` -> startup-shell interactive binding slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`
+- `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+- `packages/coding-agent/src/main.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/src/user_message.rs`
+- `rust/crates/pi-coding-agent-tui/src/assistant_message.rs`
+- `rust/crates/pi-coding-agent-tui/src/tool_execution.rs`
+- `rust/crates/pi-coding-agent-tui/Cargo.toml`
+- `rust/crates/pi-coding-agent-core/src/runtime.rs`
+- `rust/crates/pi-agent/src/state.rs`
+- `rust/crates/pi-agent/src/message.rs`
+- `rust/crates/pi-tui/src/tui.rs`
+- `rust/crates/pi-tui/src/input.rs`
+- `rust/crates/pi-coding-agent-tui/tests/startup_shell.rs`
+
+### Behavior summary
+
+New TS-compatible interactive behavior now covered in Rust:
+- Rust now has the first live binding layer from `CodingAgentCore` into the existing startup-shell/TUI surface instead of only isolated shell/widget tests
+- the new binding closes the main previously-missing interactive gap for the migrated subset:
+  - prompt submission from the shell triggers `CodingAgentCore.prompt_text(...)`
+  - agent events are translated into transcript widgets in the mounted shell
+  - render requests are queued through the existing `pi-tui` render-handle bridge so transcript/status updates become visible without manual shell mutation from tests
+- transcript rendering now updates from real agent/runtime events for the current migrated subset:
+  - user messages -> `UserMessageComponent`
+  - assistant messages -> `AssistantMessageComponent`
+  - tool execution events -> `ToolExecutionComponent`
+- the shell now replays existing runtime state when bound late, so previously completed user/assistant/tool-result transcript content is rendered on first bind instead of only future events appearing
+- shell submit handling is now owned at the shell layer instead of being delegated entirely to the embedded prompt widget:
+  - submit clears the prompt before invoking the callback
+  - existing shell tests still hold for configured submit bindings and routing
+- built-in interrupt integration now exists for the bound subset:
+  - shell `app.interrupt` / escape callback aborts the bound `CodingAgentCore`
+- bound interactive status now follows the current migrated runtime shape:
+  - set `Working...` on prompt submit / `agent_start`
+  - clear on `agent_end`
+
+Compatibility note for this slice:
+- this milestone binds the existing Rust startup shell to the existing Rust coding-agent core; it does not yet expose a top-level interactive CLI/app command path because `ProcessTerminal` still lacks the full real stdin event-loop integration needed for an honest end-user interactive mode
+- the transcript replay path is intentionally narrowed to the standard-message subset already present in the current runtime/tests; broader session/runtime-specific interactive state is still deferred
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::startup_shell` with:
+- shell-owned submit handling instead of delegating submit callbacks directly to the embedded `Input`
+- internal queued transcript update machinery driven by a new shell update handle
+- render-time draining of queued transcript/runtime updates
+- internal shared transcript component wrappers for live assistant/tool widget mutation without requiring cross-thread access to the shell itself
+
+New `pi-coding-agent-tui::interactive_binding` module:
+- `InteractiveCoreBinding`
+  - installs shell submit + interrupt callbacks for a `CodingAgentCore`
+  - subscribes to `pi-agent` events from the bound runtime
+  - translates those events into queued shell updates + rerender requests
+  - replays existing runtime state on initial bind
+  - unsubscribes on drop
+
+Crate-surface changes:
+- `pi-coding-agent-tui` now exports `InteractiveCoreBinding`
+- `pi-coding-agent-tui` now depends on `pi-agent`, `pi-ai` (dev), and `tokio` for the async binding path/tests
+
+Design choices for this slice:
+- keep the async/runtime bridge in `pi-coding-agent-tui`, not in `pi-tui`, because the translation is coding-agent-specific transcript behavior rather than generic terminal UI behavior
+- use queued shell updates plus the existing render-handle path instead of trying to mutate non-`Send` shell widgets directly from async agent callbacks
+- stop before wiring the top-level Rust CLI/app interactive path, because the current honest blocker is still lower-level terminal input integration rather than transcript/widget availability
+
+### Validation summary
+
+New Rust coverage added for:
+- live prompt submit -> user/assistant transcript rendering through a bound `CodingAgentCore`
+- live tool execution transcript rendering through the same bound shell/TUI path
+- replaying existing runtime state when the shell binds after prior messages already exist
+- existing startup-shell interaction tests continue to pass with the new shell-owned submit path
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test startup_shell` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test interactive_binding` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive/runtime path:
+- no honest top-level interactive CLI/app command path yet because `pi-tui::ProcessTerminal` still lacks full real stdin event-loop integration
+- no multiline editor / custom-editor parity yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no richer interactive transcript navigation/status UI beyond the already-migrated startup-shell controls
+- no broader theme/markdown/image parity yet for the full interactive presentation stack
+
+### Recommended next step
+
+Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
+- port the next honest blocker for a real end-user interactive path: `pi-tui::ProcessTerminal` real stdin/input callback integration
+- once that exists, wire the new interactive binding into the Rust CLI/app entry path instead of keeping interactive mode rejected at the top level
