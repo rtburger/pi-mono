@@ -3,7 +3,7 @@ use pi_coding_agent_tui::{
     ToolExecutionOptions, ToolExecutionResult,
 };
 use pi_events::UserContent;
-use pi_tui::{Component, Terminal, Tui, TuiError, visible_width};
+use pi_tui::{Component, KeyId, Terminal, Tui, TuiError, visible_width};
 use serde_json::json;
 use std::{collections::BTreeMap, time::Duration};
 
@@ -72,13 +72,19 @@ impl Terminal for NoopTerminal {
     }
 }
 
+fn default_keybindings() -> KeybindingsManager {
+    KeybindingsManager::new(BTreeMap::new(), None)
+}
+
 #[test]
 fn tool_execution_component_renders_tool_name_args_and_text_result() {
+    let keybindings = default_keybindings();
     let mut component = ToolExecutionComponent::new(
         "read",
         "tool-1",
         json!({ "path": "README.md" }),
         ToolExecutionOptions::default(),
+        &keybindings,
     );
 
     let initial_lines = component.render(64);
@@ -105,11 +111,13 @@ fn tool_execution_component_renders_tool_name_args_and_text_result() {
 
 #[test]
 fn tool_execution_component_updates_args_and_renders_image_fallback_text() {
+    let keybindings = default_keybindings();
     let mut component = ToolExecutionComponent::new(
         "read",
         "tool-2",
         json!({ "path": "README.md" }),
         ToolExecutionOptions::default(),
+        &keybindings,
     );
 
     component.update_args(json!({ "path": "CHANGELOG.md" }));
@@ -147,11 +155,13 @@ fn tool_execution_component_updates_args_and_renders_image_fallback_text() {
 
 #[test]
 fn built_in_read_renderer_supports_legacy_file_path_and_line_ranges() {
+    let keybindings = default_keybindings();
     let component = ToolExecutionComponent::new(
         "read",
         "tool-legacy-read",
         json!({ "file_path": "README.md", "offset": 5, "limit": 3 }),
         ToolExecutionOptions::default(),
+        &keybindings,
     );
 
     let rendered = component.render(80).join("\n");
@@ -162,11 +172,13 @@ fn built_in_read_renderer_supports_legacy_file_path_and_line_ranges() {
 
 #[test]
 fn built_in_write_renderer_trims_trailing_blank_preview_lines_and_hides_success_text() {
+    let keybindings = default_keybindings();
     let mut component = ToolExecutionComponent::new(
         "write",
         "tool-write-1",
         json!({ "path": "README.md", "content": "one\ntwo\n" }),
         ToolExecutionOptions::default(),
+        &keybindings,
     );
     component.update_result(
         ToolExecutionResult {
@@ -190,11 +202,13 @@ fn built_in_write_renderer_trims_trailing_blank_preview_lines_and_hides_success_
 
 #[test]
 fn built_in_read_renderer_trims_trailing_blank_lines_from_results() {
+    let keybindings = default_keybindings();
     let mut component = ToolExecutionComponent::new(
         "read",
         "tool-read-1",
         json!({ "path": "README.md" }),
         ToolExecutionOptions::default(),
+        &keybindings,
     );
     component.update_result(
         ToolExecutionResult {
@@ -216,6 +230,65 @@ fn built_in_read_renderer_trims_trailing_blank_lines_from_results() {
 }
 
 #[test]
+fn built_in_write_renderer_collapses_long_preview_with_configurable_expand_hint() {
+    let keybindings = KeybindingsManager::new(
+        BTreeMap::from([("app.tools.expand".to_owned(), vec![KeyId::from("alt+o")])]),
+        None,
+    );
+    let mut component = ToolExecutionComponent::new(
+        "write",
+        "tool-write-expand-1",
+        json!({
+            "path": "README.md",
+            "content": "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\n"
+        }),
+        ToolExecutionOptions::default(),
+        &keybindings,
+    );
+    component.update_result(
+        ToolExecutionResult {
+            content: vec![UserContent::Text {
+                text: "Successfully wrote 75 bytes to README.md".into(),
+            }],
+            details: json!({}),
+            is_error: false,
+        },
+        false,
+    );
+
+    let rendered = component.render(120).join("\n");
+
+    assert!(rendered.contains("line 10"));
+    assert!(!rendered.contains("line 11"));
+    assert!(rendered.contains("... (2 more lines, 12 total, alt+o to expand)"));
+}
+
+#[test]
+fn built_in_write_renderer_expands_long_preview_when_expanded() {
+    let keybindings = default_keybindings();
+    let mut component = ToolExecutionComponent::new(
+        "write",
+        "tool-write-expand-2",
+        json!({
+            "path": "README.md",
+            "content": "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\n"
+        }),
+        ToolExecutionOptions::default(),
+        &keybindings,
+    );
+
+    let collapsed = component.render(120).join("\n");
+    assert!(!collapsed.contains("line 11"));
+    assert!(collapsed.contains("ctrl+o to expand"));
+
+    component.set_expanded(true);
+    let expanded = component.render(120).join("\n");
+    assert!(expanded.contains("line 11"));
+    assert!(expanded.contains("line 12"));
+    assert!(!expanded.contains("more lines"));
+}
+
+#[test]
 fn startup_shell_can_render_tool_execution_component_in_transcript() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let mut shell = StartupShellComponent::new(
@@ -233,6 +306,7 @@ fn startup_shell_can_render_tool_execution_component_in_transcript() {
         "tool-3",
         json!({ "path": "README.md", "oldText": "before", "newText": "after" }),
         ToolExecutionOptions::default(),
+        &keybindings,
     );
     component.update_result(
         ToolExecutionResult {

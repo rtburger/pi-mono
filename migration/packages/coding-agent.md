@@ -2586,3 +2586,80 @@ Still deferred for the coding-agent interactive transcript surface:
 Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
 - continue `ToolExecutionComponent` with the next highest-value built-in renderer increment, likely `edit` diff preview parity or `write` preview truncation/expand behavior
 - keep Markdown/theme parity, scrolling, and runtime/session wiring deferred until the remaining core transcript/widget behavior is present in Rust
+
+## Milestone 38 update: built-in `write` preview truncation + expand-hint slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/components/tool-execution.ts`
+- `packages/coding-agent/src/core/tools/write.ts`
+- `packages/coding-agent/src/core/tools/render-utils.ts`
+- `packages/coding-agent/src/core/keybindings.ts`
+- `packages/coding-agent/test/tool-execution-component.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/tool_execution.rs`
+- `rust/crates/pi-coding-agent-tui/tests/tool_execution.rs`
+- `rust/crates/pi-coding-agent-tui/src/keybindings.rs`
+- `rust/crates/pi-coding-agent-tui/src/keybinding_hints.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `ToolExecutionComponent` now ports the first collapsed/expanded preview behavior from the TypeScript built-in `write` renderer
+- the Rust built-in `write` slice now matches the current TS shape for the migrated subset:
+  - trailing empty preview lines are still trimmed before rendering
+  - collapsed preview shows at most the first 10 lines
+  - collapsed preview appends the TS-style summary line `... (<remaining> more lines, <total> total, <key> to expand)`
+  - expanded preview shows the full write content and removes the summary line
+- expand-hint text is now configurable from the coding-agent keybindings manager instead of being hardcoded, so custom `app.tools.expand` bindings change the rendered hint text just like the TS path
+- `ToolExecutionComponent` constructor now takes a `KeybindingsManager`, aligning it with the other Rust transcript widgets that render expand hints from resolved app keybindings
+
+Current intentional limitation for this slice:
+- this milestone only ports the `write` preview truncation/expand behavior; Rust still does not have TS `edit` diff preview parity or the broader custom/built-in renderer callback system inside `ToolExecutionComponent`
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::tool_execution` with:
+- stored `expand_key_text` resolved from `KeybindingsManager`
+- built-in `write` preview line limiting via `WRITE_COLLAPSED_PREVIEW_MAX_LINES`
+- TS-style collapsed summary-line formatting using the resolved `app.tools.expand` key text
+- `set_expanded(...)` now affecting the built-in `write` preview path instead of being a no-op for that renderer slice
+
+Design choices for this slice:
+- keep the current Rust tool widget text-first and self-contained instead of introducing the larger TS renderer registry/state system early
+- resolve the expand-hint text once at construction time, matching the pattern already used by the Rust branch/compaction/skill widgets
+- stay on the deterministic built-in rendering path that can be validated without runtime/session wiring
+
+### Validation summary
+
+New Rust coverage added for:
+- collapsed long `write` previews with a configurable expand-hint keybinding
+- expanded long `write` previews after `set_expanded(true)`
+- existing built-in `read` / `write` trimming and transcript integration tests continue to pass
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test tool_execution` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive transcript surface:
+- no Rust custom renderer callback parity yet for tool execution (`renderCall`, `renderResult`, shared renderer state, built-in override inheritance)
+- no Rust `edit` diff preview parity yet
+- no Rust inline image rendering parity yet inside transcript widgets
+- no Rust markdown/theme/background parity yet for the broader transcript widget set
+- no Rust footer integration yet
+- no scroll behavior or transcript viewport management yet
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no top-level Rust interactive command path yet that instantiates this shell
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive/components`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- continue `ToolExecutionComponent` with the next highest-value built-in renderer increment, now most likely `edit` diff preview parity
+- keep Markdown/theme parity, scrolling, and runtime/session wiring deferred until the remaining core transcript/widget behavior is present in Rust

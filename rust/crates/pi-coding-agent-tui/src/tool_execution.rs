@@ -1,3 +1,4 @@
+use crate::{KeybindingsManager, key_text};
 use pi_events::{ToolResultMessage, UserContent};
 use pi_tui::{Component, Container, Spacer, Text};
 use serde_json::Value;
@@ -45,6 +46,7 @@ pub struct ToolExecutionComponent {
     tool_call_id: String,
     args: Value,
     expanded: bool,
+    expand_key_text: String,
     show_images: bool,
     execution_started: bool,
     args_complete: bool,
@@ -59,12 +61,14 @@ impl ToolExecutionComponent {
         tool_call_id: impl Into<String>,
         args: Value,
         options: ToolExecutionOptions,
+        keybindings: &KeybindingsManager,
     ) -> Self {
         let mut component = Self {
             tool_name: tool_name.into(),
             tool_call_id: tool_call_id.into(),
             args,
             expanded: false,
+            expand_key_text: key_text(keybindings, "app.tools.expand"),
             show_images: options.show_images,
             execution_started: false,
             args_complete: false,
@@ -153,6 +157,8 @@ impl ToolExecutionComponent {
                     .map(|result| result.is_error)
                     .unwrap_or(false),
                 self.text_output(),
+                self.expanded,
+                &self.expand_key_text,
             )),
             "edit" => Some(format_edit_tool_execution(&self.args, self.text_output())),
             _ => None,
@@ -217,14 +223,35 @@ fn format_read_tool_execution(args: &Value, output: String) -> String {
     text
 }
 
-fn format_write_tool_execution(args: &Value, is_error: bool, output: String) -> String {
+const WRITE_COLLAPSED_PREVIEW_MAX_LINES: usize = 10;
+
+fn format_write_tool_execution(
+    args: &Value,
+    is_error: bool,
+    output: String,
+    expanded: bool,
+    expand_key_text: &str,
+) -> String {
     let mut text = format!("write {}", path_arg(args).unwrap_or("..."));
 
     if let Some(content) = string_arg(args, &["content"]) {
         let preview = trim_trailing_empty_lines(&content.replace('\r', ""));
         if !preview.is_empty() {
+            let preview_lines = preview.split('\n').collect::<Vec<_>>();
+            let total_lines = preview_lines.len();
+            let max_lines = if expanded {
+                total_lines
+            } else {
+                total_lines.min(WRITE_COLLAPSED_PREVIEW_MAX_LINES)
+            };
+            let remaining = total_lines.saturating_sub(max_lines);
             text.push_str("\n\n");
-            text.push_str(&preview);
+            text.push_str(&preview_lines[..max_lines].join("\n"));
+            if remaining > 0 {
+                text.push_str(&format!(
+                    "\n... ({remaining} more lines, {total_lines} total, {expand_key_text} to expand)"
+                ));
+            }
         }
     }
 
