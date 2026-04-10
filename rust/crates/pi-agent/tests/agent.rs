@@ -2,9 +2,9 @@ use async_stream::try_stream;
 use futures::stream;
 use pi_agent::{
     Agent, AgentError, AgentEvent, AgentMessage, AgentState, AgentTool, AgentToolError,
-    AgentToolResult, CustomAgentMessage, QueueMode,
+    AgentToolResult, CustomAgentMessage, QueueMode, ThinkingBudgets,
 };
-use pi_ai::{AiError, AssistantEventStream, StreamOptions};
+use pi_ai::{AiError, AiProvider, AssistantEventStream, StreamOptions};
 use pi_events::{
     AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason,
     ToolDefinition, Usage, UserContent,
@@ -12,7 +12,7 @@ use pi_events::{
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 use tokio::{sync::Notify, time::sleep};
@@ -33,6 +33,11 @@ fn model() -> Model {
 
 fn usage() -> Usage {
     Usage::default()
+}
+
+fn provider_registry_guard() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
 fn user_message(text: &str, timestamp: u64) -> Message {
@@ -162,6 +167,41 @@ fn echo_tool() -> AgentTool {
             })
         },
     )
+}
+
+#[derive(Clone)]
+struct RecordingAiProvider {
+    seen_options: Arc<Mutex<Vec<StreamOptions>>>,
+}
+
+impl AiProvider for RecordingAiProvider {
+    fn stream(
+        &self,
+        model: Model,
+        _context: Context,
+        options: StreamOptions,
+    ) -> AssistantEventStream {
+        self.seen_options.lock().unwrap().push(options);
+        let message = AssistantMessage {
+            role: "assistant".into(),
+            content: vec![AssistantContent::Text {
+                text: "done".into(),
+                text_signature: None,
+            }],
+            api: model.api.clone(),
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            response_id: None,
+            usage: usage(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 20,
+        };
+        Box::pin(stream::iter(vec![Ok(AssistantEvent::Done {
+            reason: StopReason::Stop,
+            message,
+        })]))
+    }
 }
 
 #[tokio::test]
@@ -932,6 +972,54 @@ async fn wrapper_forwards_state_thinking_level_as_reasoning_effort() {
         seen_reasoning.lock().unwrap().clone(),
         vec![Some(String::from("high")), None]
     );
+}
+
+#[tokio::test]
+async fn wrapper_forwards_custom_thinking_budgets_through_default_streamer() {
+    let _guard = provider_registry_guard();
+    let faux = pi_ai::register_faux_provider(pi_ai::RegisterFauxProviderOptions::default());
+    let faux_model = faux.get_model(None).expect("faux model");
+    let _ = pi_ai::stream_response(faux_model, Context::default(), StreamOptions::default())
+        .expect("faux provider should prime builtin registration");
+    faux.unregister();
+
+    let seen_options = Arc::new(Mutex::new(Vec::new()));
+    pi_ai::register_provider(
+        "anthropic-messages",
+        Arc::new(RecordingAiProvider {
+            seen_options: seen_options.clone(),
+        }),
+    );
+
+    let mut initial_state = AgentState::new(Model {
+        id: "claude-sonnet-4-20250514".into(),
+        name: "Claude Sonnet 4".into(),
+        api: "anthropic-messages".into(),
+        provider: "anthropic".into(),
+        base_url: "https://api.anthropic.com/v1".into(),
+        reasoning: true,
+        input: vec!["text".into()],
+        context_window: 200_000,
+        max_tokens: 60_000,
+    });
+    initial_state.thinking_level = pi_agent::ThinkingLevel::High;
+
+    let agent = Agent::new(initial_state);
+    agent.set_thinking_budgets(ThinkingBudgets {
+        high: Some(2_048),
+        ..Default::default()
+    });
+
+    agent.prompt_text("hello").await.unwrap();
+
+    let seen = seen_options.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(agent.thinking_budgets().high, Some(2_048));
+    assert_eq!(seen[0].reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(seen[0].max_tokens, Some(34_048));
+
+    pi_ai::unregister_provider("anthropic-messages");
+    pi_ai::register_builtin_providers();
 }
 
 #[tokio::test]

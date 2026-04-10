@@ -5,7 +5,10 @@ use crate::{
 use async_stream::stream;
 use futures::StreamExt;
 use pi_agent::{Agent, AgentState, AgentTool, AssistantStreamer};
-use pi_ai::{AiError, AssistantEventStream, StreamOptions, stream_response};
+use pi_ai::{
+    AiError, AssistantEventStream, SimpleStreamOptions, StreamOptions,
+    ThinkingLevel as AiThinkingLevel, stream_simple,
+};
 use pi_coding_agent_tools::create_coding_tools_with_read_auto_resize_flag;
 use pi_events::{Context, Message, Model};
 use std::{
@@ -199,7 +202,7 @@ impl AssistantStreamer for RegistryBackedStreamer {
                 stream_options.headers = merged_headers;
             }
 
-            match stream_response(model, context, stream_options) {
+            match stream_simple(model, context, map_stream_options_to_simple_options(stream_options)) {
                 Ok(mut inner) => {
                     while let Some(event) = inner.next().await {
                         yield event;
@@ -210,5 +213,39 @@ impl AssistantStreamer for RegistryBackedStreamer {
                 }
             }
         }))
+    }
+}
+
+fn map_stream_options_to_simple_options(options: StreamOptions) -> SimpleStreamOptions {
+    let reasoning = options
+        .reasoning_effort
+        .as_deref()
+        .and_then(parse_ai_thinking_level);
+
+    SimpleStreamOptions {
+        signal: options.signal,
+        session_id: options.session_id,
+        cache_retention: options.cache_retention,
+        api_key: options.api_key,
+        transport: options.transport,
+        headers: options.headers,
+        metadata: options.metadata,
+        on_payload: options.on_payload,
+        temperature: options.temperature,
+        max_tokens: options.max_tokens,
+        reasoning,
+        thinking_budgets: Default::default(),
+        tool_choice: options.tool_choice,
+    }
+}
+
+fn parse_ai_thinking_level(value: &str) -> Option<AiThinkingLevel> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "minimal" => Some(AiThinkingLevel::Minimal),
+        "low" => Some(AiThinkingLevel::Low),
+        "medium" => Some(AiThinkingLevel::Medium),
+        "high" => Some(AiThinkingLevel::High),
+        "xhigh" => Some(AiThinkingLevel::Xhigh),
+        _ => None,
     }
 }

@@ -5,7 +5,7 @@ use crate::{
 use async_stream::{stream, try_stream};
 use futures::{Stream, StreamExt};
 use pi_ai::{
-    AiError, AssistantEventStream, SimpleStreamOptions, StreamOptions,
+    AiError, AssistantEventStream, SimpleStreamOptions, StreamOptions, ThinkingBudgets,
     ThinkingLevel as AiThinkingLevel, stream_simple,
 };
 use pi_events::{
@@ -153,7 +153,15 @@ where
 }
 
 #[derive(Clone, Default)]
-pub struct DefaultAssistantStreamer;
+pub struct DefaultAssistantStreamer {
+    thinking_budgets: ThinkingBudgets,
+}
+
+impl DefaultAssistantStreamer {
+    pub fn new(thinking_budgets: ThinkingBudgets) -> Self {
+        Self { thinking_budgets }
+    }
+}
 
 impl AssistantStreamer for DefaultAssistantStreamer {
     fn stream(
@@ -165,12 +173,15 @@ impl AssistantStreamer for DefaultAssistantStreamer {
         stream_simple(
             model,
             context,
-            map_stream_options_to_simple_options(options),
+            map_stream_options_to_simple_options(options, self.thinking_budgets.clone()),
         )
     }
 }
 
-fn map_stream_options_to_simple_options(options: StreamOptions) -> SimpleStreamOptions {
+fn map_stream_options_to_simple_options(
+    options: StreamOptions,
+    thinking_budgets: ThinkingBudgets,
+) -> SimpleStreamOptions {
     let reasoning = options
         .reasoning_effort
         .as_deref()
@@ -188,7 +199,7 @@ fn map_stream_options_to_simple_options(options: StreamOptions) -> SimpleStreamO
         temperature: options.temperature,
         max_tokens: options.max_tokens,
         reasoning,
-        thinking_budgets: Default::default(),
+        thinking_budgets,
         tool_choice: options.tool_choice,
     }
 }
@@ -209,6 +220,8 @@ pub struct AgentLoopConfig {
     pub model: Model,
     pub stream_options: StreamOptions,
     streamer: Arc<dyn AssistantStreamer>,
+    thinking_budgets: ThinkingBudgets,
+    uses_default_streamer: bool,
     convert_to_llm: Option<ConvertToLlmHook>,
     transform_context: Option<TransformContextHook>,
     before_tool_call: Option<BeforeToolCallHook>,
@@ -219,10 +232,13 @@ pub struct AgentLoopConfig {
 
 impl AgentLoopConfig {
     pub fn new(model: Model) -> Self {
+        let thinking_budgets = ThinkingBudgets::default();
         Self {
             model,
             stream_options: StreamOptions::default(),
-            streamer: Arc::new(DefaultAssistantStreamer),
+            streamer: Arc::new(DefaultAssistantStreamer::new(thinking_budgets.clone())),
+            thinking_budgets,
+            uses_default_streamer: true,
             convert_to_llm: None,
             transform_context: None,
             before_tool_call: None,
@@ -239,6 +255,15 @@ impl AgentLoopConfig {
 
     pub fn with_streamer(mut self, streamer: Arc<dyn AssistantStreamer>) -> Self {
         self.streamer = streamer;
+        self.uses_default_streamer = false;
+        self
+    }
+
+    pub fn with_thinking_budgets(mut self, thinking_budgets: ThinkingBudgets) -> Self {
+        self.thinking_budgets = thinking_budgets.clone();
+        if self.uses_default_streamer {
+            self.streamer = Arc::new(DefaultAssistantStreamer::new(thinking_budgets));
+        }
         self
     }
 

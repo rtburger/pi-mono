@@ -2,7 +2,7 @@ use futures::{StreamExt, stream};
 use pi_agent::{
     AfterToolCallResult, AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentState,
     AgentTool, AgentToolError, AgentToolResult, AssistantStreamer, BeforeToolCallResult,
-    CustomAgentMessage, ThinkingLevel, agent_loop, agent_loop_continue,
+    CustomAgentMessage, ThinkingBudgets, ThinkingLevel, agent_loop, agent_loop_continue,
 };
 use pi_ai::{
     AiError, AiProvider, AssistantEventStream, FauxResponse, RegisterFauxProviderOptions,
@@ -16,7 +16,7 @@ use pi_events::{
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 #[derive(Clone)]
@@ -100,6 +100,11 @@ fn model() -> Model {
 
 fn usage() -> Usage {
     Usage::default()
+}
+
+fn provider_registry_guard() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
 fn user_message(text: &str, timestamp: u64) -> Message {
@@ -1390,6 +1395,7 @@ async fn continue_allows_custom_tail_when_convert_to_llm_maps_it_to_user() {
 
 #[tokio::test]
 async fn default_streamer_maps_reasoning_effort_through_simple_options() {
+    let _guard = provider_registry_guard();
     let faux = register_faux_provider(RegisterFauxProviderOptions::default());
     let faux_model = faux.get_model(None).expect("faux model");
     let _ = stream_response(faux_model, Context::default(), StreamOptions::default())
@@ -1436,7 +1442,61 @@ async fn default_streamer_maps_reasoning_effort_through_simple_options() {
 }
 
 #[tokio::test]
+async fn default_streamer_forwards_custom_thinking_budgets() {
+    let _guard = provider_registry_guard();
+    let faux = register_faux_provider(RegisterFauxProviderOptions::default());
+    let faux_model = faux.get_model(None).expect("faux model");
+    let _ = stream_response(faux_model, Context::default(), StreamOptions::default())
+        .expect("faux provider should prime builtin registration");
+    faux.unregister();
+
+    let seen_options = Arc::new(Mutex::new(Vec::new()));
+    register_provider(
+        "anthropic-messages",
+        Arc::new(RecordingAiProvider {
+            seen_options: seen_options.clone(),
+        }),
+    );
+
+    let anthropic_model = Model {
+        id: "claude-sonnet-4-20250514".into(),
+        name: "Claude Sonnet 4".into(),
+        api: "anthropic-messages".into(),
+        provider: "anthropic".into(),
+        base_url: "https://api.anthropic.com/v1".into(),
+        reasoning: true,
+        input: vec!["text".into()],
+        context_window: 200_000,
+        max_tokens: 60_000,
+    };
+
+    let stream = agent_loop(
+        vec![user_message("What is 2+2?", 10).into()],
+        AgentContext::new("You are helpful."),
+        AgentLoopConfig::new(anthropic_model)
+            .with_stream_options(StreamOptions {
+                reasoning_effort: Some("high".into()),
+                ..Default::default()
+            })
+            .with_thinking_budgets(ThinkingBudgets {
+                high: Some(2_048),
+                ..Default::default()
+            }),
+    );
+
+    let _events = collect_events(stream).await.unwrap();
+    let seen = seen_options.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(seen[0].max_tokens, Some(34_048));
+
+    unregister_provider("anthropic-messages");
+    register_builtin_providers();
+}
+
+#[tokio::test]
 async fn default_streamer_runs_against_pi_ai_faux_provider() {
+    let _guard = provider_registry_guard();
     let registration = register_faux_provider(RegisterFauxProviderOptions::default());
     registration.set_responses(vec![FauxResponse::text("4")]);
     let model = registration.get_model(None).unwrap();

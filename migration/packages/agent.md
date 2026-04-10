@@ -482,3 +482,78 @@ Still deferred in `pi-agent`:
 - explicit wrapper/runtime support for additional TS stream-simple knobs such as `thinkingBudgets` and other top-level agent options
 - fuller intermediate partial-JSON reconstruction parity in the proxy/tool path
 - downstream coding-agent parity still needs its own runtime streamer update so selected thinking levels affect the non-interactive app end-to-end
+
+## Milestone 12 update: default-streamer `thinkingBudgets` forwarding slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/agent/src/agent.ts`
+- `packages/agent/src/types.ts`
+- `packages/agent/test/agent.test.ts`
+- `packages/agent/test/agent-loop.test.ts`
+- `packages/ai/src/providers/simple-options.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-agent/src/agent.rs`
+- `rust/crates/pi-agent/src/loop.rs`
+- `rust/crates/pi-agent/src/lib.rs`
+- `rust/crates/pi-agent/tests/agent.rs`
+- `rust/crates/pi-agent/tests/agent_loop.rs`
+- `rust/crates/pi-ai/src/lib.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- the Rust default assistant-streamer path now forwards custom `thinkingBudgets` into `pi_ai::stream_simple(...)`
+- low-level Rust `AgentLoopConfig` now has explicit `with_thinking_budgets(...)` support for the default-streamer path
+- the Rust `Agent` wrapper now exposes first-class default-streamer budget control with:
+  - `Agent::set_thinking_budgets(...)`
+  - `Agent::thinking_budgets()`
+- `pi-agent` now re-exports `ThinkingBudgets`, matching the TypeScript package split more closely for callers that configure agent reasoning budgets alongside agent state
+- Anthropic non-adaptive simple-path requests now honor caller-provided high-level budgets through `pi-agent`, not just the `pi-ai` defaults
+
+Compatibility note for this slice:
+- this milestone still intentionally targets the default-streamer path only
+- custom Rust `AssistantStreamer` implementations still receive `StreamOptions`, not full simple-option structs, so `thinkingBudgets` currently affects only the built-in default streamer
+- the remaining TS top-level knobs (`transport`, `maxRetryDelayMs`, broader wrapper property parity) are still deferred
+
+### Rust design summary
+
+Implementation changes:
+- `rust/crates/pi-agent/src/loop.rs`
+  - `DefaultAssistantStreamer` now carries `ThinkingBudgets`
+  - `AgentLoopConfig` now tracks whether it is still using the default streamer and can apply `with_thinking_budgets(...)` without clobbering custom streamers
+- `rust/crates/pi-agent/src/agent.rs`
+  - `Agent` now stores default-streamer thinking budgets separately from `StreamOptions`
+  - run preparation now threads those budgets into `AgentLoopConfig` when the wrapper is still using the built-in default streamer
+- `rust/crates/pi-agent/src/lib.rs`
+  - now re-exports `ThinkingBudgets`
+
+Behavior-freeze coverage added in Rust:
+- `rust/crates/pi-agent/tests/agent_loop.rs`
+  - default-streamer proof that custom high thinking budgets change the Anthropic simple-path `max_tokens`
+- `rust/crates/pi-agent/tests/agent.rs`
+  - wrapper-level proof that `Agent::set_thinking_budgets(...)` reaches the default-streamer request path end-to-end
+
+### Validation summary
+
+New Rust coverage added for:
+- low-level default-streamer custom thinking-budget forwarding
+- wrapper-level default-streamer custom thinking-budget forwarding
+- registry-mutation serialization in the affected default-streamer tests so provider-registration tests stay deterministic under parallel test execution
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-agent --test agent --test agent_loop` passed
+- `cd rust && cargo test -p pi-agent` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-agent`:
+- fuller wrapper/property-surface parity with the TypeScript `Agent` class
+- additional TS top-level simple-stream knobs beyond the current default-streamer `thinkingBudgets` slice
+- fuller intermediate partial-JSON reconstruction parity in the proxy/tool path
+- downstream coding-agent parity still needs its own runtime streamer update so selected thinking levels and budgets affect the non-interactive app end-to-end

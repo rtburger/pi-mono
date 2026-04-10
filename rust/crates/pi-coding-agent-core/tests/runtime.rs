@@ -2,8 +2,8 @@ use async_stream::stream;
 use pi_agent::ThinkingLevel;
 use pi_ai::{
     AiProvider, AssistantEventStream, FauxModelDefinition, FauxResponse,
-    RegisterFauxProviderOptions, StreamOptions, register_faux_provider, register_provider,
-    unregister_provider,
+    RegisterFauxProviderOptions, StreamOptions, register_builtin_providers, register_faux_provider,
+    register_provider, stream_response, unregister_provider,
 };
 use pi_coding_agent_core::{
     AuthApiKeyFuture, AuthSource, CodingAgentCoreError, CodingAgentCoreOptions, MemoryAuthStorage,
@@ -18,7 +18,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -52,6 +52,11 @@ fn unique_name(prefix: &str) -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("{prefix}-{unique}")
+}
+
+fn provider_registry_guard() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
 #[derive(Clone)]
@@ -129,6 +134,40 @@ impl AiProvider for RecordingContextProvider {
             let mut message = partial.clone();
             message.content.push(AssistantContent::Text {
                 text: "recorded".into(),
+                text_signature: None,
+            });
+            message.stop_reason = StopReason::Stop;
+            message.timestamp = 1;
+
+            yield Ok(AssistantEvent::Start { partial });
+            yield Ok(AssistantEvent::Done {
+                reason: StopReason::Stop,
+                message,
+            });
+        })
+    }
+}
+
+#[derive(Clone)]
+struct RecordingOptionsProvider {
+    seen_options: Arc<Mutex<Vec<StreamOptions>>>,
+}
+
+impl AiProvider for RecordingOptionsProvider {
+    fn stream(
+        &self,
+        model: Model,
+        _context: Context,
+        options: StreamOptions,
+    ) -> AssistantEventStream {
+        let seen_options = self.seen_options.clone();
+        Box::pin(stream! {
+            seen_options.lock().unwrap().push(options);
+
+            let partial = AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone());
+            let mut message = partial.clone();
+            message.content.push(AssistantContent::Text {
+                text: "recorded options".into(),
                 text_signature: None,
             });
             message.stop_reason = StopReason::Stop;
@@ -588,6 +627,64 @@ async fn runtime_can_toggle_block_images_between_requests() {
     );
 
     unregister_provider(&api);
+}
+
+#[tokio::test]
+async fn runtime_registry_backed_streamer_uses_simple_stream_reasoning_mapping() {
+    let _guard = provider_registry_guard();
+    let faux = register_faux_provider(RegisterFauxProviderOptions::default());
+    let faux_model = faux.get_model(None).expect("faux model");
+    let _ = stream_response(faux_model, Context::default(), StreamOptions::default())
+        .expect("faux provider should prime builtin registration");
+    faux.unregister();
+
+    let seen_options = Arc::new(Mutex::new(Vec::new()));
+    register_provider(
+        "anthropic-messages",
+        Arc::new(RecordingOptionsProvider {
+            seen_options: seen_options.clone(),
+        }),
+    );
+
+    let created = create_coding_agent_core(CodingAgentCoreOptions {
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            String::from("anthropic"),
+            "test-token",
+        )])),
+        built_in_models: vec![Model {
+            id: "claude-sonnet-4-20250514".into(),
+            name: "Claude Sonnet 4".into(),
+            api: "anthropic-messages".into(),
+            provider: "anthropic".into(),
+            base_url: "https://api.anthropic.com/v1".into(),
+            reasoning: true,
+            input: vec!["text".into()],
+            context_window: 200_000,
+            max_tokens: 60_000,
+        }],
+        models_json_path: None,
+        cwd: None,
+        tools: None,
+        system_prompt: String::new(),
+        bootstrap: SessionBootstrapOptions {
+            default_thinking_level: Some(ThinkingLevel::High),
+            ..Default::default()
+        },
+        stream_options: StreamOptions::default(),
+    })
+    .unwrap();
+
+    assert_eq!(created.core.state().thinking_level, ThinkingLevel::High);
+    created.core.prompt_text("Hi").await.unwrap();
+
+    let seen_options = seen_options.lock().unwrap().clone();
+    assert_eq!(seen_options.len(), 1);
+    assert_eq!(seen_options[0].api_key.as_deref(), Some("test-token"));
+    assert_eq!(seen_options[0].reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(seen_options[0].max_tokens, Some(48_384));
+
+    unregister_provider("anthropic-messages");
+    register_builtin_providers();
 }
 
 #[tokio::test]

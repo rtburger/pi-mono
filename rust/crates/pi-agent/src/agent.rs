@@ -5,7 +5,7 @@ use crate::{
     DefaultAssistantStreamer, TransformContextHook, agent_loop, agent_loop_continue,
 };
 use futures::StreamExt;
-use pi_ai::{AiError, StreamOptions};
+use pi_ai::{AiError, StreamOptions, ThinkingBudgets};
 use pi_events::{AssistantContent, Message, Model, StopReason, Usage, UserContent};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -75,7 +75,9 @@ struct PreparedRun {
     context: AgentContext,
     model: Model,
     streamer: Arc<dyn AssistantStreamer>,
+    uses_default_streamer: bool,
     stream_options: StreamOptions,
+    thinking_budgets: ThinkingBudgets,
     convert_to_llm: Option<ConvertToLlmHook>,
     transform_context: Option<TransformContextHook>,
     before_tool_call: Option<BeforeToolCallHook>,
@@ -91,6 +93,8 @@ struct AgentInner {
     state: AgentState,
     stream_options: StreamOptions,
     streamer: Arc<dyn AssistantStreamer>,
+    uses_default_streamer: bool,
+    thinking_budgets: ThinkingBudgets,
     listeners: BTreeMap<usize, Listener>,
     convert_to_llm: Option<ConvertToLlmHook>,
     transform_context: Option<TransformContextHook>,
@@ -109,10 +113,11 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(initial_state: AgentState) -> Self {
-        Self::with_parts(
+        Self::with_parts_internal(
             initial_state,
-            Arc::new(DefaultAssistantStreamer),
+            Arc::new(DefaultAssistantStreamer::default()),
             StreamOptions::default(),
+            true,
         )
     }
 
@@ -121,11 +126,22 @@ impl Agent {
         streamer: Arc<dyn AssistantStreamer>,
         stream_options: StreamOptions,
     ) -> Self {
+        Self::with_parts_internal(initial_state, streamer, stream_options, false)
+    }
+
+    fn with_parts_internal(
+        initial_state: AgentState,
+        streamer: Arc<dyn AssistantStreamer>,
+        stream_options: StreamOptions,
+        uses_default_streamer: bool,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(AgentInner {
                 state: initial_state,
                 stream_options,
                 streamer,
+                uses_default_streamer,
+                thinking_budgets: ThinkingBudgets::default(),
                 listeners: BTreeMap::new(),
                 convert_to_llm: None,
                 transform_context: None,
@@ -216,6 +232,14 @@ impl Agent {
 
     pub fn clear_after_tool_call(&self) {
         self.inner.lock().unwrap().after_tool_call = None;
+    }
+
+    pub fn set_thinking_budgets(&self, thinking_budgets: ThinkingBudgets) {
+        self.inner.lock().unwrap().thinking_budgets = thinking_budgets;
+    }
+
+    pub fn thinking_budgets(&self) -> ThinkingBudgets {
+        self.inner.lock().unwrap().thinking_budgets.clone()
     }
 
     pub fn set_steering_mode(&self, mode: QueueMode) {
@@ -392,7 +416,9 @@ impl Agent {
                 context: inner.state.context_snapshot(),
                 model: inner.state.model.clone(),
                 streamer: inner.streamer.clone(),
+                uses_default_streamer: inner.uses_default_streamer,
                 stream_options,
+                thinking_budgets: inner.thinking_budgets.clone(),
                 convert_to_llm: inner.convert_to_llm.clone(),
                 transform_context: inner.transform_context.clone(),
                 before_tool_call: inner.before_tool_call.clone(),
@@ -403,7 +429,9 @@ impl Agent {
         let mut config = self.create_loop_config(
             prepared.model,
             prepared.streamer,
+            prepared.uses_default_streamer,
             prepared.stream_options,
+            prepared.thinking_budgets,
             prepared.skip_initial_steering_poll,
         );
         if let Some(convert_to_llm) = prepared.convert_to_llm {
@@ -449,16 +477,23 @@ impl Agent {
         &self,
         model: Model,
         streamer: Arc<dyn AssistantStreamer>,
+        uses_default_streamer: bool,
         stream_options: StreamOptions,
+        thinking_budgets: ThinkingBudgets,
         skip_initial_steering_poll: bool,
     ) -> AgentLoopConfig {
         let skip_initial_steering_poll = Arc::new(Mutex::new(skip_initial_steering_poll));
         let steering_inner = self.inner.clone();
         let follow_up_inner = self.inner.clone();
 
-        AgentLoopConfig::new(model)
-            .with_streamer(streamer)
-            .with_stream_options(stream_options)
+        let mut config = AgentLoopConfig::new(model).with_stream_options(stream_options);
+        if uses_default_streamer {
+            config = config.with_thinking_budgets(thinking_budgets);
+        } else {
+            config = config.with_streamer(streamer);
+        }
+
+        config
             .with_get_steering_messages({
                 let skip_initial_steering_poll = skip_initial_steering_poll.clone();
                 move || {

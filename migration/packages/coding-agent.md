@@ -3923,3 +3923,86 @@ Still deferred for the coding-agent interactive shell path:
 Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
 - continue with the next shell-level interactive-control slice that has visible user impact but still fits the current startup-shell architecture, most likely a transcript scroll-status/indicator path or another shell-local status/control behavior
 - keep multiline editor parity and broader session/runtime wiring deferred until a few more shell-level control paths are frozen in Rust
+
+## Milestone 53 update: registry-backed runtime `stream_simple()` parity slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/core/sdk.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-core/src/runtime.rs`
+- `rust/crates/pi-coding-agent-core/tests/runtime.rs`
+- `rust/crates/pi-ai/src/lib.rs`
+- `migration/packages/coding-agent.md`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- the Rust non-interactive coding-agent runtime now matches the current TypeScript `sdk.ts` streamer shape more closely by dispatching through `pi_ai::stream_simple(...)` after request-auth resolution instead of calling `stream_response(...)` directly
+- request-time auth/header resolution ordering is unchanged:
+  - resolve auth through `ModelRegistry`
+  - merge runtime auth into request options
+  - then dispatch the provider request
+- because the Rust runtime now uses the simple path, non-interactive coding-agent requests inherit the already-migrated `pi-ai` simple-option behavior for the current in-scope providers, including:
+  - reasoning-level mapping from `AgentState.thinking_level`
+  - provider-specific simple-path max-token shaping such as Anthropic non-adaptive thinking adjustment
+  - shared simple-option passthrough for transport, headers, metadata, payload hooks, and tool choice
+- this closes the prior downstream parity gap where `pi-agent` default-streamer behavior had been migrated to `stream_simple(...)`, but the coding-agent runtime custom streamer still bypassed that path
+
+Compatibility note for this slice:
+- this milestone ports the TypeScript `streamFn: ... streamSimple(...)` behavior from `sdk.ts`, but it still does not expose full TS settings-manager/runtime control over `thinkingBudgets` in the Rust non-interactive app
+- the current Rust `AssistantStreamer` trait still carries `StreamOptions`, so custom thinking budgets remain a later cross-crate integration step
+
+### Rust design summary
+
+Expanded `pi-coding-agent-core::runtime` with:
+- registry-backed runtime dispatch now calling `pi_ai::stream_simple(...)`
+- local `StreamOptions -> SimpleStreamOptions` mapping helper for the current shared option slice:
+  - `signal`
+  - `session_id`
+  - `cache_retention`
+  - `api_key`
+  - `transport`
+  - `headers`
+  - `metadata`
+  - `on_payload`
+  - `temperature`
+  - `max_tokens`
+  - `reasoning`
+  - `tool_choice`
+- local reasoning-string parser matching the already-migrated `pi-agent` simple-path bridge semantics
+
+Behavior-freeze coverage added in Rust:
+- `rust/crates/pi-coding-agent-core/tests/runtime.rs`
+  - new runtime regression proving that an Anthropic reasoning model now receives simple-path `reasoning_effort` plus the adjusted `max_tokens`
+  - the new test also primes built-in provider registration before overriding `anthropic-messages`, preventing lazy built-in registration from clobbering the custom test provider during package/workspace runs
+
+### Validation summary
+
+New Rust coverage added for:
+- registry-backed runtime dispatch through `stream_simple(...)` rather than raw `stream_response(...)`
+- Anthropic simple-path reasoning/max-token shaping in the non-interactive coding-agent runtime
+- deterministic package/workspace behavior for the new anthropic runtime test under parallel execution
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-core --test runtime` passed
+- `cd rust && cargo test -p pi-coding-agent-core` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent non-interactive/runtime surface:
+- Rust non-interactive coding-agent still does not expose full TS settings-manager/runtime control over `thinkingBudgets`
+- the Rust runtime custom streamer still uses the narrower `AssistantStreamer` / `StreamOptions` trait shape, so full simple-option parity remains constrained by upstream crate boundaries
+- session-manager/resource-loader-backed runtime parity remains deferred
+- broader interactive/TUI runtime wiring remains deferred
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/core`, `rust/crates/pi-coding-agent-core`, `packages/agent`, and `rust/crates/pi-agent`:
+- either port the next non-interactive runtime control that still depends on the TS `sdk.ts`/`Agent` surface, most likely end-to-end `thinkingBudgets` exposure, or finish the remaining `pi-agent` wrapper-property gaps that block that control from flowing downstream honestly
+- keep the broader interactive startup-shell work separate from this non-interactive runtime path so the remaining end-to-end model/request semantics stay verifiable
