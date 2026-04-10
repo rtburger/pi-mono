@@ -1580,3 +1580,83 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
 - either add the next honest real-terminal parity gap (`resize` / remaining OS integration) or continue upward into the multiline/custom-editor slice now that the interactive app can consume live stdin through the Rust terminal path
 - keep broader markdown/image/theme parity deferred until the higher-value interaction/runtime gaps are closed first
+
+## Milestone 19 update: live resize callback parity in the real process-backed terminal path
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/terminal.ts`
+- `packages/tui/test/tui-render.test.ts` (resize section)
+- `packages/tui/test/virtual-terminal.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/terminal.rs`
+- `rust/crates/pi-tui/tests/tui.rs`
+- previously migrated interactive-path grounding kept in scope:
+  - `rust/crates/pi-coding-agent-cli/src/runner.rs`
+  - `rust/apps/pi/src/main.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-tui::ProcessTerminal` no longer relies only on injected/mock resize callbacks; the real process-backed terminal path now has a live resize notification loop too
+- the Rust process terminal now preserves the current observable resize behavior needed by the migrated TUI stack:
+  - terminal size changes are detected after `start()`
+  - the registered resize callback is invoked when the visible terminal dimensions actually change
+  - unchanged repeated size observations do not emit redundant resize callbacks
+  - resize notifications stop after `stop()`
+- this closes the previously documented real-terminal gap where the Rust interactive path could read live stdin but still had no honest resize source outside tests
+
+Compatibility note for this slice:
+- TypeScript uses `process.stdout.on("resize", ...)`; Rust now preserves the same observable callback behavior through a small polling loop over terminal size instead of a platform-specific event hook
+- the current Rust implementation is therefore callback-compatible but not a byte-for-byte port of the Node runtime mechanism
+
+### Rust design summary
+
+Expanded `rust/crates/pi-tui/src/terminal.rs` with:
+- `RESIZE_POLL_INTERVAL`
+- shared `last_known_size` state on `ProcessTerminal`
+- `start_resize_poll_loop()` for backends that opt into resize polling
+- backend helpers for:
+  - reading size once under a single backend lock
+  - checking whether a backend supports resize polling
+- `TerminalBackend::supports_resize_polling()` with the default behavior tied to real process-backed terminals
+
+Test-only design additions:
+- a `ResizableMockBackend` that can mutate its size under test while reusing the real `ProcessTerminal` resize loop
+- polling tests that freeze callback-on-change and stop-after-stop behavior
+
+Design choices for this slice:
+- keep resize detection inside `pi-tui::ProcessTerminal` instead of widening the higher-level `Tui` event model again
+- use a small polling loop rather than introducing a platform-specific signal watcher dependency in the same milestone
+- keep stdin/raw-mode behavior unchanged; this slice only closes the live resize callback gap
+
+### Validation summary
+
+New Rust coverage added for:
+- resize callbacks firing when a resize-polling backend changes dimensions
+- unchanged dimensions not firing duplicate resize callbacks
+- resize polling stopping after `ProcessTerminal::stop()`
+- existing `pi-tui` TUI tests continuing to validate queued resize rerenders once callbacks reach `Tui`
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --lib terminal` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- Windows VT-input setup parity beyond the current migrated slice
+- differential rendering parity remains partial relative to TS `packages/tui/src/tui.ts`
+- richer widgets are still missing (`Box`, multiline editor, autocomplete, markdown/select/settings/image widgets)
+- broader image/widget/theme parity remains deferred
+
+### Recommended next step
+
+Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
+- move up to the next honest interactive blocker above the now-live resize path, most likely the multiline/custom-editor slice
+- keep broader markdown/image/theme parity deferred until the higher-value interaction/runtime gaps are closed first

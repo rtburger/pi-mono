@@ -27,6 +27,7 @@ const DEFAULT_COLUMNS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_STDIN_TIMEOUT: Duration = Duration::from_millis(10);
 const MODIFY_OTHER_KEYS_FALLBACK_DELAY: Duration = Duration::from_millis(150);
+const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub trait Terminal {
     fn start(
@@ -123,6 +124,7 @@ pub struct ProcessTerminal {
     suppress_input: Arc<AtomicBool>,
     stop_requested: Arc<AtomicBool>,
     last_input_at_ms: Arc<AtomicU64>,
+    last_known_size: Arc<Mutex<Option<(u16, u16)>>>,
     stdin_buffer: StdinBuffer,
     #[cfg_attr(not(test), allow(dead_code))]
     stdin_events: Receiver<StdinBufferEvent>,
@@ -157,6 +159,7 @@ impl ProcessTerminal {
             suppress_input: Arc::new(AtomicBool::new(false)),
             stop_requested: Arc::new(AtomicBool::new(false)),
             last_input_at_ms: Arc::new(AtomicU64::new(now_millis())),
+            last_known_size: Arc::new(Mutex::new(None)),
             stdin_buffer,
             stdin_events,
             uses_process_io,
@@ -319,6 +322,43 @@ impl ProcessTerminal {
             }
         });
     }
+
+    fn start_resize_poll_loop(&self) {
+        if !backend_supports_resize_polling(&self.backend) {
+            return;
+        }
+
+        let backend = Arc::clone(&self.backend);
+        let resize_handler = Arc::clone(&self.resize_handler);
+        let stop_requested = Arc::clone(&self.stop_requested);
+        let last_known_size = Arc::clone(&self.last_known_size);
+
+        thread::spawn(move || {
+            while !stop_requested.load(Ordering::Relaxed) {
+                thread::sleep(RESIZE_POLL_INTERVAL);
+                if stop_requested.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let size = read_backend_size(&backend);
+                let changed = {
+                    let mut last_known_size = last_known_size
+                        .lock()
+                        .expect("last known size mutex poisoned");
+                    if last_known_size.as_ref() == Some(&size) {
+                        false
+                    } else {
+                        *last_known_size = Some(size);
+                        true
+                    }
+                };
+
+                if changed {
+                    notify_resize_handler(&resize_handler);
+                }
+            }
+        });
+    }
 }
 
 impl Terminal for ProcessTerminal {
@@ -337,6 +377,10 @@ impl Terminal for ProcessTerminal {
             .expect("resize handler mutex poisoned") = Some(on_resize);
         self.suppress_input.store(false, Ordering::Relaxed);
         self.stop_requested.store(false, Ordering::Relaxed);
+        *self
+            .last_known_size
+            .lock()
+            .expect("last known size mutex poisoned") = Some(read_backend_size(&self.backend));
 
         if self.uses_process_io {
             enable_raw_mode()?;
@@ -348,6 +392,7 @@ impl Terminal for ProcessTerminal {
 
         self.start_process_input_loop();
         self.start_modify_other_keys_fallback_timer();
+        self.start_resize_poll_loop();
 
         Ok(())
     }
@@ -358,6 +403,10 @@ impl Terminal for ProcessTerminal {
         write_backend(&self.backend, BRACKETED_PASTE_DISABLE)?;
         self.disable_input_protocols()?;
         self.stdin_buffer.destroy();
+        *self
+            .last_known_size
+            .lock()
+            .expect("last known size mutex poisoned") = None;
         *self
             .input_handler
             .lock()
@@ -467,6 +516,9 @@ trait TerminalBackend: Send {
     fn uses_process_io(&self) -> bool {
         false
     }
+    fn supports_resize_polling(&self) -> bool {
+        self.uses_process_io()
+    }
 }
 
 struct StdoutBackend;
@@ -516,6 +568,18 @@ fn write_backend(backend: &Arc<Mutex<Box<dyn TerminalBackend>>>, data: &str) -> 
         .write(data)
 }
 
+fn read_backend_size(backend: &Arc<Mutex<Box<dyn TerminalBackend>>>) -> (u16, u16) {
+    let backend = backend.lock().expect("terminal backend mutex poisoned");
+    (backend.columns(), backend.rows())
+}
+
+fn backend_supports_resize_polling(backend: &Arc<Mutex<Box<dyn TerminalBackend>>>) -> bool {
+    backend
+        .lock()
+        .expect("terminal backend mutex poisoned")
+        .supports_resize_polling()
+}
+
 fn forward_input(handler: &SharedInputHandler, data: String) {
     if let Some(handler) = &mut *handler.lock().expect("input handler mutex poisoned") {
         handler(data);
@@ -562,6 +626,12 @@ mod tests {
         rows: u16,
     }
 
+    #[derive(Clone)]
+    struct ResizableMockBackend {
+        writes: Arc<Mutex<Vec<String>>>,
+        size: Arc<Mutex<(u16, u16)>>,
+    }
+
     impl MockBackend {
         fn new(columns: u16, rows: u16) -> Self {
             Self {
@@ -573,6 +643,19 @@ mod tests {
 
         fn writes(&self) -> Vec<String> {
             self.writes.lock().expect("writes mutex poisoned").clone()
+        }
+    }
+
+    impl ResizableMockBackend {
+        fn new(columns: u16, rows: u16) -> Self {
+            Self {
+                writes: Arc::new(Mutex::new(Vec::new())),
+                size: Arc::new(Mutex::new((columns, rows))),
+            }
+        }
+
+        fn set_size(&self, columns: u16, rows: u16) {
+            *self.size.lock().expect("size mutex poisoned") = (columns, rows);
         }
     }
 
@@ -591,6 +674,28 @@ mod tests {
 
         fn rows(&self) -> u16 {
             self.rows
+        }
+    }
+
+    impl TerminalBackend for ResizableMockBackend {
+        fn write(&mut self, data: &str) -> io::Result<()> {
+            self.writes
+                .lock()
+                .expect("writes mutex poisoned")
+                .push(data.to_string());
+            Ok(())
+        }
+
+        fn columns(&self) -> u16 {
+            self.size.lock().expect("size mutex poisoned").0
+        }
+
+        fn rows(&self) -> u16 {
+            self.size.lock().expect("size mutex poisoned").1
+        }
+
+        fn supports_resize_polling(&self) -> bool {
+            true
         }
     }
 
@@ -814,6 +919,54 @@ mod tests {
             .map(String::from)
             .collect::<Vec<_>>()
         );
+        assert_eq!(*resize_count.lock().expect("resize mutex poisoned"), 1);
+    }
+
+    fn wait_for_resize_count(resize_count: &Arc<Mutex<u32>>, expected: u32) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
+            if *resize_count.lock().expect("resize mutex poisoned") >= expected {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!(
+            "timed out waiting for resize count {expected}, got {}",
+            *resize_count.lock().expect("resize mutex poisoned")
+        );
+    }
+
+    #[test]
+    fn resize_polling_notifies_when_backend_size_changes_and_stops_after_stop() {
+        let backend = ResizableMockBackend::new(80, 24);
+        let resize_count = Arc::new(Mutex::new(0u32));
+        let resize_count_for_handler = Arc::clone(&resize_count);
+        let mut terminal = ProcessTerminal::with_backend(Box::new(backend.clone()));
+
+        terminal
+            .start(
+                Box::new(|_| {}),
+                Box::new(move || {
+                    *resize_count_for_handler
+                        .lock()
+                        .expect("resize mutex poisoned") += 1;
+                }),
+            )
+            .expect("start should succeed");
+
+        backend.set_size(100, 30);
+        wait_for_resize_count(&resize_count, 1);
+        assert_eq!(terminal.columns(), 100);
+        assert_eq!(terminal.rows(), 30);
+
+        backend.set_size(100, 30);
+        thread::sleep(RESIZE_POLL_INTERVAL * 2);
+        assert_eq!(*resize_count.lock().expect("resize mutex poisoned"), 1);
+
+        terminal.stop().expect("stop should succeed");
+        backend.set_size(120, 40);
+        thread::sleep(RESIZE_POLL_INTERVAL * 2);
         assert_eq!(*resize_count.lock().expect("resize mutex poisoned"), 1);
     }
 
