@@ -3,6 +3,7 @@ use crate::{
     keys::{decode_kitty_printable, matches_key},
     kill_ring::KillRing,
     tui::{CURSOR_MARKER, Component},
+    undo_stack::UndoStack,
     utils::{is_punctuation_char, is_whitespace_char, truncate_to_width, visible_width},
 };
 use std::{cell::Cell, collections::BTreeMap};
@@ -39,6 +40,14 @@ type ChangeCallback = dyn FnMut(String) + Send + 'static;
 enum EditorAction {
     Kill,
     Yank,
+    TypeWord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditorSnapshot {
+    lines: Vec<String>,
+    cursor_line: usize,
+    cursor_col: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +82,7 @@ pub struct Editor {
     history_index: Option<usize>,
     preferred_visual_col: Option<usize>,
     kill_ring: KillRing,
+    undo_stack: UndoStack<EditorSnapshot>,
     last_action: Option<EditorAction>,
 }
 
@@ -117,6 +127,7 @@ impl Editor {
             history_index: None,
             preferred_visual_col: None,
             kill_ring: KillRing::default(),
+            undo_stack: UndoStack::default(),
             last_action: None,
         }
     }
@@ -133,7 +144,13 @@ impl Editor {
         self.history_index = None;
         self.preferred_visual_col = None;
         self.last_action = None;
-        self.set_text_internal(text.as_ref());
+
+        let normalized = normalize_text(text.as_ref());
+        if self.get_text() != normalized {
+            self.push_undo_snapshot();
+        }
+
+        self.set_text_internal(&normalized);
     }
 
     pub fn get_lines(&self) -> Vec<String> {
@@ -148,10 +165,16 @@ impl Editor {
     }
 
     pub fn insert_text_at_cursor(&mut self, text: impl AsRef<str>) {
+        let text = text.as_ref();
+        if text.is_empty() {
+            return;
+        }
+
         self.history_index = None;
         self.preferred_visual_col = None;
         self.last_action = None;
-        self.insert_text_at_cursor_internal(text.as_ref());
+        self.push_undo_snapshot();
+        self.insert_text_at_cursor_internal(text);
     }
 
     pub fn set_on_submit<F>(&mut self, callback: F)
@@ -232,6 +255,11 @@ impl Editor {
                     self.process_input(&remaining);
                 }
             }
+            return;
+        }
+
+        if self.matches_binding(&current, "tui.editor.undo") {
+            self.undo();
             return;
         }
 
@@ -353,16 +381,12 @@ impl Editor {
         }
 
         if let Some(printable) = decode_kitty_printable(&current) {
-            self.history_index = None;
-            self.last_action = None;
-            self.insert_text_at_cursor_internal(&printable);
+            self.insert_character(&printable);
             return;
         }
 
         if !contains_control_characters(&current) {
-            self.history_index = None;
-            self.last_action = None;
-            self.insert_text_at_cursor_internal(&current);
+            self.insert_character(&current);
         }
     }
 
@@ -443,6 +467,19 @@ impl Editor {
         self.emit_change();
     }
 
+    fn insert_character(&mut self, character: &str) {
+        self.history_index = None;
+
+        if character.chars().next().is_some_and(is_whitespace_char)
+            || !matches!(self.last_action, Some(EditorAction::TypeWord))
+        {
+            self.push_undo_snapshot();
+        }
+
+        self.last_action = Some(EditorAction::TypeWord);
+        self.insert_text_at_cursor_internal(character);
+    }
+
     fn handle_paste(&mut self, pasted_text: &str) {
         let filtered = normalize_text(pasted_text)
             .chars()
@@ -450,10 +487,13 @@ impl Editor {
             .collect::<String>();
         self.history_index = None;
         self.last_action = None;
+        self.push_undo_snapshot();
         self.insert_text_at_cursor_internal(&filtered);
     }
 
     fn add_new_line(&mut self) {
+        self.push_undo_snapshot();
+
         let current_line = self.current_line().to_owned();
         let before = current_line[..self.cursor_col].to_owned();
         let after = current_line[self.cursor_col..].to_owned();
@@ -476,6 +516,7 @@ impl Editor {
         self.preferred_visual_col = None;
         self.last_action = None;
         self.scroll_offset.set(0);
+        self.undo_stack.clear();
         self.emit_change();
         if let Some(on_submit) = &mut self.on_submit {
             on_submit(result);
@@ -487,11 +528,13 @@ impl Editor {
         self.last_action = None;
 
         if self.cursor_col > 0 {
+            self.push_undo_snapshot();
             let line = self.current_line().to_owned();
             let previous_start = previous_grapheme_start(&line, self.cursor_col).unwrap_or(0);
             self.lines[self.cursor_line].replace_range(previous_start..self.cursor_col, "");
             self.cursor_col = previous_start;
         } else if self.cursor_line > 0 {
+            self.push_undo_snapshot();
             let current = self.lines.remove(self.cursor_line);
             self.cursor_line -= 1;
             let previous_len = self.lines[self.cursor_line].len();
@@ -511,10 +554,12 @@ impl Editor {
 
         let current_len = self.current_line().len();
         if self.cursor_col < current_len {
+            self.push_undo_snapshot();
             let line = self.current_line().to_owned();
             let next_end = next_grapheme_end(&line, self.cursor_col).unwrap_or(self.cursor_col);
             self.lines[self.cursor_line].replace_range(self.cursor_col..next_end, "");
         } else if self.cursor_line + 1 < self.lines.len() {
+            self.push_undo_snapshot();
             let next = self.lines.remove(self.cursor_line + 1);
             self.lines[self.cursor_line].push_str(&next);
         } else {
@@ -664,6 +709,7 @@ impl Editor {
 
         if self.cursor_col == 0 {
             if self.cursor_line > 0 {
+                self.push_undo_snapshot();
                 let accumulate = matches!(self.last_action, Some(EditorAction::Kill));
                 self.kill_ring.push("\n", true, accumulate);
                 let current = self.lines.remove(self.cursor_line);
@@ -681,6 +727,7 @@ impl Editor {
         let current_line = self.current_line().to_owned();
         let old_cursor = self.cursor_col;
         let accumulate = matches!(self.last_action, Some(EditorAction::Kill));
+        self.push_undo_snapshot();
         self.move_word_backward();
         if self.cursor_col == old_cursor {
             return;
@@ -702,6 +749,7 @@ impl Editor {
         let current_len = self.current_line().len();
         if start_col >= current_len {
             if start_line + 1 < self.lines.len() {
+                self.push_undo_snapshot();
                 let accumulate = matches!(self.last_action, Some(EditorAction::Kill));
                 self.kill_ring.push("\n", false, accumulate);
                 let next = self.lines.remove(self.cursor_line + 1);
@@ -715,6 +763,7 @@ impl Editor {
 
         let current_line = self.current_line().to_owned();
         let accumulate = matches!(self.last_action, Some(EditorAction::Kill));
+        self.push_undo_snapshot();
         self.move_word_forward();
         let end = self.cursor_col;
         self.cursor_line = start_line;
@@ -734,6 +783,7 @@ impl Editor {
         self.history_index = None;
 
         if self.cursor_col > 0 {
+            self.push_undo_snapshot();
             let deleted_text = self.current_line()[..self.cursor_col].to_owned();
             let accumulate = matches!(self.last_action, Some(EditorAction::Kill));
             self.kill_ring.push(deleted_text, true, accumulate);
@@ -745,6 +795,7 @@ impl Editor {
             return;
         }
         if self.cursor_line > 0 {
+            self.push_undo_snapshot();
             let accumulate = matches!(self.last_action, Some(EditorAction::Kill));
             self.kill_ring.push("\n", true, accumulate);
             let current = self.lines.remove(self.cursor_line);
@@ -762,6 +813,7 @@ impl Editor {
         self.history_index = None;
 
         if self.cursor_col < self.current_line().len() {
+            self.push_undo_snapshot();
             let deleted_text = self.current_line()[self.cursor_col..].to_owned();
             let accumulate = matches!(self.last_action, Some(EditorAction::Kill));
             self.kill_ring.push(deleted_text, false, accumulate);
@@ -772,6 +824,7 @@ impl Editor {
             return;
         }
         if self.cursor_line + 1 < self.lines.len() {
+            self.push_undo_snapshot();
             let accumulate = matches!(self.last_action, Some(EditorAction::Kill));
             self.kill_ring.push("\n", false, accumulate);
             let next = self.lines.remove(self.cursor_line + 1);
@@ -799,6 +852,10 @@ impl Editor {
 
         if next_index == self.history_index {
             return;
+        }
+
+        if self.history_index.is_none() && next_index.is_some() {
+            self.push_undo_snapshot();
         }
 
         self.history_index = next_index;
@@ -846,6 +903,7 @@ impl Editor {
             return;
         };
 
+        self.push_undo_snapshot();
         self.insert_yanked_text(&text);
         self.last_action = Some(EditorAction::Yank);
     }
@@ -855,6 +913,7 @@ impl Editor {
             return;
         }
 
+        self.push_undo_snapshot();
         self.delete_yanked_text();
         self.kill_ring.rotate();
         if let Some(text) = self.kill_ring.peek().map(str::to_owned) {
@@ -1042,6 +1101,28 @@ impl Editor {
             .map(|(_, height)| height)
             .unwrap_or(DEFAULT_VIEWPORT_HEIGHT);
         height.saturating_mul(3).checked_div(10).unwrap_or(0).max(5)
+    }
+
+    fn push_undo_snapshot(&mut self) {
+        self.undo_stack.push(&EditorSnapshot {
+            lines: self.lines.clone(),
+            cursor_line: self.cursor_line,
+            cursor_col: self.cursor_col,
+        });
+    }
+
+    fn undo(&mut self) {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            return;
+        };
+
+        self.lines = snapshot.lines;
+        self.cursor_line = snapshot.cursor_line;
+        self.cursor_col = snapshot.cursor_col;
+        self.history_index = None;
+        self.last_action = None;
+        self.preferred_visual_col = None;
+        self.emit_change();
     }
 
     fn emit_change(&mut self) {

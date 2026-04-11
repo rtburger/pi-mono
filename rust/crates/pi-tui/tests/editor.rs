@@ -3,6 +3,23 @@ use pi_tui::{
 };
 use std::sync::{Arc, Mutex};
 
+fn undo(editor: &mut Editor) {
+    editor.handle_input("\x1b[45;5u");
+}
+
+fn move_right(editor: &mut Editor, count: usize) {
+    for _ in 0..count {
+        editor.handle_input("\x1b[C");
+    }
+}
+
+fn type_text(editor: &mut Editor, text: &str) {
+    for character in text.chars() {
+        let mut buffer = [0; 4];
+        editor.handle_input(character.encode_utf8(&mut buffer));
+    }
+}
+
 #[test]
 fn backslash_enter_inserts_newline_instead_of_submitting() {
     let submitted = Arc::new(Mutex::new(None::<String>));
@@ -215,4 +232,193 @@ fn alt_d_accumulates_forward_word_kills_for_yank() {
 
     editor.handle_input("\x19");
     assert_eq!(editor.get_text(), "hello world test");
+}
+
+#[test]
+fn undo_is_a_no_op_when_the_stack_is_empty() {
+    let mut editor = Editor::new();
+
+    undo(&mut editor);
+
+    assert_eq!(editor.get_text(), "");
+}
+
+#[test]
+fn undo_coalesces_word_typing_but_keeps_spaces_as_separate_units() {
+    let mut editor = Editor::new();
+    type_text(&mut editor, "hello world");
+
+    assert_eq!(editor.get_text(), "hello world");
+
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "hello");
+
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "");
+}
+
+#[test]
+fn undo_restores_newlines_backspace_and_forward_delete() {
+    let mut editor = Editor::new();
+    type_text(&mut editor, "hello");
+    editor.handle_input("\n");
+    type_text(&mut editor, "world");
+
+    assert_eq!(editor.get_text(), "hello\nworld");
+
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "hello\n");
+
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "hello");
+
+    editor.handle_input("\x7f");
+    assert_eq!(editor.get_text(), "hell");
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "hello");
+
+    editor.handle_input("\x01");
+    editor.handle_input("\x1b[C");
+    editor.handle_input("\x1b[3~");
+    assert_eq!(editor.get_text(), "hllo");
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "hello");
+}
+
+#[test]
+fn undo_restores_kill_and_yank_operations() {
+    let mut editor = Editor::new();
+    editor.set_text("hello world");
+
+    editor.handle_input("\x17");
+    assert_eq!(editor.get_text(), "hello ");
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "hello world");
+
+    editor.handle_input("\x01");
+    move_right(&mut editor, 6);
+    editor.handle_input("\x0b");
+    assert_eq!(editor.get_text(), "hello ");
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "hello world");
+
+    editor.handle_input("\x15");
+    assert_eq!(editor.get_text(), "world");
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "hello world");
+
+    editor.handle_input("\x05");
+    editor.handle_input("\x17");
+    editor.handle_input("\x19");
+    assert_eq!(editor.get_text(), "hello world");
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "hello ");
+}
+
+#[test]
+fn undo_restores_multiline_paste_and_programmatic_insertions_atomically() {
+    let mut editor = Editor::new();
+    editor.set_text("hello world");
+    editor.handle_input("\x01");
+    move_right(&mut editor, 5);
+
+    editor.handle_input("\x1b[200~line1\nline2\x1b[201~");
+    assert_eq!(editor.get_text(), "helloline1\nline2 world");
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "hello world");
+
+    editor.insert_text_at_cursor("A\nB");
+    assert_eq!(editor.get_text(), "helloA\nB world");
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "hello world");
+}
+
+#[test]
+fn undo_restores_programmatic_set_text_changes() {
+    let mut editor = Editor::new();
+    type_text(&mut editor, "hello world");
+
+    editor.set_text("");
+    assert_eq!(editor.get_text(), "");
+
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "hello world");
+}
+
+#[test]
+fn submit_clears_the_undo_stack() {
+    let submitted = Arc::new(Mutex::new(None::<String>));
+    let submitted_for_callback = Arc::clone(&submitted);
+
+    let mut editor = Editor::new();
+    editor.set_on_submit(move |value| {
+        *submitted_for_callback
+            .lock()
+            .expect("submitted mutex poisoned") = Some(value);
+    });
+
+    type_text(&mut editor, "hello");
+    editor.handle_input("\r");
+
+    assert_eq!(
+        submitted
+            .lock()
+            .expect("submitted mutex poisoned")
+            .as_deref(),
+        Some("hello")
+    );
+    assert_eq!(editor.get_text(), "");
+
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "");
+}
+
+#[test]
+fn undo_exits_history_browsing_and_restores_the_previous_buffer() {
+    let mut editor = Editor::new();
+    editor.add_to_history("hello");
+    type_text(&mut editor, "world");
+
+    editor.handle_input("\x17");
+    assert_eq!(editor.get_text(), "");
+
+    editor.handle_input("\x1b[A");
+    assert_eq!(editor.get_text(), "hello");
+
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "");
+
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "world");
+}
+
+#[test]
+fn cursor_movement_starts_a_new_undo_unit() {
+    let mut editor = Editor::new();
+    type_text(&mut editor, "hello world");
+
+    for _ in 0..5 {
+        editor.handle_input("\x1b[D");
+    }
+
+    type_text(&mut editor, "lol");
+    assert_eq!(editor.get_text(), "hello lolworld");
+
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "hello world");
+}
+
+#[test]
+fn no_op_delete_operations_do_not_push_undo_snapshots() {
+    let mut editor = Editor::new();
+    type_text(&mut editor, "hello");
+
+    editor.handle_input("\x17");
+    assert_eq!(editor.get_text(), "");
+
+    editor.handle_input("\x17");
+    editor.handle_input("\x17");
+
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "hello");
 }

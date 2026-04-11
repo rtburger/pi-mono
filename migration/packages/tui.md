@@ -1940,3 +1940,98 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
 - continue with the next highest-value multiline-editor parity gap now that the extension-editor consumer also has kill/yank behavior, most likely undo-stack parity
 - keep broader widget parity and the full theme/markdown/image stack deferred until the next real downstream consumer requires them
+
+## Milestone 23 update: multiline-editor undo-stack parity slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/undo-stack.ts`
+- targeted undo/editor behavior sections from `packages/tui/src/components/editor.ts`
+- targeted undo regression coverage from `packages/tui/test/editor.test.ts`
+- downstream consumer grounding kept in scope:
+  - `packages/tui/src/editor-component.ts`
+  - `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+  - `packages/coding-agent/src/modes/interactive/components/extension-editor.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/src/editor.rs`
+- `rust/crates/pi-tui/tests/editor.rs`
+- `rust/crates/pi-coding-agent-tui/tests/extension_editor.rs`
+- `migration/packages/tui.md`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-tui::Editor` now ports the first real undo-stack slice from the TypeScript multiline editor
+- the Rust editor now preserves the current high-value TypeScript undo behavior needed by the already-migrated extension-editor consumer:
+  - `ctrl+-` no-op behavior on an empty undo stack
+  - fish-style typing coalescing where consecutive non-whitespace typing shares one undo unit
+  - whitespace/newline boundaries starting new undo units
+  - undo for backspace, forward delete, word deletion, and line-start/line-end kill operations
+  - atomic undo for bracketed paste and `insert_text_at_cursor(...)`
+  - programmatic `set_text(...)` changes becoming undoable when content actually changes
+  - undo for yank operations on top of the existing kill-ring slice
+  - first-entry history browsing snapshots so undo exits history mode back to the pre-browse buffer
+  - submit clearing the undo stack, matching the TypeScript reset behavior
+- cursor/navigation actions now intentionally break typing coalescing in the Rust editor, matching the current TypeScript `lastAction` semantics closely enough for the new regressions
+
+Current intentional limitation for this slice:
+- this milestone ports undo-stack behavior only for the already-migrated Rust editor surface
+- the Rust editor still does not have TypeScript autocomplete, paste-marker handling, jump mode, or the fuller sticky-column edge behavior
+
+### Rust design summary
+
+New internal Rust module:
+- `rust/crates/pi-tui/src/undo_stack.rs`
+
+Expanded `pi-tui::Editor` with:
+- internal `EditorSnapshot`
+- internal `UndoStack<EditorSnapshot>`
+- `EditorAction::TypeWord` for TS-style typing coalescing
+- undo snapshot capture before:
+  - structural edits
+  - kill/yank edits
+  - paste/programmatic insertion
+  - first entry into history browsing
+- explicit undo-stack clearing on submit
+
+Design choices for this slice:
+- keep the undo stack local to `pi-tui::Editor`, matching the TypeScript ownership boundary instead of widening `pi-coding-agent-tui`
+- keep snapshots focused on normalized text/cursor state rather than over-modeling the full widget runtime, which stays aligned with the current TypeScript `UndoStack<EditorState>` usage
+- stop before paste-marker/autocomplete/jump-mode work so the milestone stays focused on the highest-value remaining multiline parity gap proven by the downstream extension-editor consumer
+
+### Validation summary
+
+New Rust coverage added for:
+- empty-stack undo no-op behavior
+- typing coalescing and whitespace/newline undo boundaries
+- undo for backspace and forward delete
+- undo for kill/yank flows
+- atomic undo for bracketed paste and `insert_text_at_cursor(...)`
+- undo for programmatic `set_text(...)`
+- history-browsing undo restoration
+- undo-stack clearing on submit
+- downstream proof that the existing Rust `ExtensionEditorComponent` tests still pass on top of the expanded multiline editor
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test editor` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test extension_editor` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- full TypeScript main-editor parity remains incomplete (`autocomplete`, paste markers, jump mode, richer sticky-column behavior)
+- no broader widget parity yet (`Box`, markdown, select/settings/image widgets)
+- differential rendering parity remains partial relative to TS `packages/tui/src/tui.ts`
+
+### Recommended next step
+
+Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
+- continue with the next editor gap that matters in real use, most likely large-paste marker/atomic behavior or jump-mode parity
+- keep broader widget parity and the full theme/markdown/image stack deferred until the next real downstream consumer requires them

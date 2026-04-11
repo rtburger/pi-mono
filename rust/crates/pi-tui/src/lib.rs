@@ -11,6 +11,7 @@ pub mod terminal_image;
 pub mod text;
 pub mod truncated_text;
 pub mod tui;
+mod undo_stack;
 pub mod utils;
 
 pub use editor::{Editor, EditorCursor, EditorOptions, TextChunk, word_wrap_line};
