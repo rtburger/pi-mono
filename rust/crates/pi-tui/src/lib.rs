@@ -3,6 +3,7 @@ pub mod fuzzy;
 pub mod input;
 pub mod keybindings;
 pub mod keys;
+mod kill_ring;
 pub mod spacer;
 pub mod stdin_buffer;
 pub mod terminal;

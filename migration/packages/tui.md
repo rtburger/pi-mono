@@ -1843,3 +1843,100 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
 - use the newly grounded extension-editor consumer to choose the next highest-value multiline-editor parity gap instead of broadening the editor spec in the abstract
 - keep full main-editor parity deferred until another real downstream consumer proves it is necessary
+
+## Milestone 22 update: multiline-editor kill-ring / yank / yank-pop slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/kill-ring.ts`
+- targeted kill-ring/editor behavior sections from `packages/tui/src/components/editor.ts`
+- targeted kill-ring regression coverage from `packages/tui/test/editor.test.ts`
+- downstream consumer grounding kept in scope:
+  - `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+  - `packages/coding-agent/src/modes/interactive/components/extension-editor.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/src/editor.rs`
+- `rust/crates/pi-tui/tests/editor.rs`
+- `migration/packages/tui.md`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-tui::Editor` now ports the first Emacs-style kill-ring slice from the TypeScript multiline editor
+- the Rust editor now preserves the current high-value TypeScript kill/yank behavior needed by the first downstream multiline consumer:
+  - `ctrl+w` / `alt+backspace` push backward word deletions into a kill ring
+  - `alt+d` pushes forward word deletions into the same kill ring
+  - `ctrl+u` pushes delete-to-line-start text or merged newlines into the kill ring
+  - `ctrl+k` pushes delete-to-line-end text or merged newlines into the kill ring
+  - `ctrl+y` yanks the most recent kill-ring entry at the cursor
+  - `alt+y` now performs yank-pop cycling immediately after a yank when multiple entries exist
+- consecutive kill operations now accumulate into a single kill-ring entry in the same prepend/append direction as TypeScript:
+  - backward kills prepend
+  - forward kills append
+  - newline merges are preserved inside the accumulated killed text
+- non-kill editing/navigation actions now break the yank-pop / accumulation chain in the migrated Rust slice, matching the TypeScript ownership of `lastAction` closely enough for the newly added regressions
+- this closes one of the main multiline-editor gaps still visible after the extension-editor consumer landed, without widening the Rust editor to full autocomplete/undo parity yet
+
+Current intentional limitation for this slice:
+- this milestone ports kill-ring behavior only; undo-stack parity is still deferred
+- the Rust editor still does not have TypeScript autocomplete, paste-marker handling, jump mode, or the fuller sticky-column edge behavior
+
+### Rust design summary
+
+New internal Rust module:
+- `rust/crates/pi-tui/src/kill_ring.rs`
+
+Expanded `pi-tui::Editor` with:
+- internal `KillRing`
+- internal `EditorAction::{Kill, Yank}` tracking
+- new internal helpers for:
+  - yank insertion
+  - yank-pop replacement of the previously yanked text
+- kill-ring-aware handling in:
+  - `delete_word_backward()`
+  - `delete_word_forward()`
+  - `delete_to_line_start()`
+  - `delete_to_line_end()`
+- new keybinding handling for:
+  - `tui.editor.yank`
+  - `tui.editor.yankPop`
+
+Design choices for this slice:
+- keep the kill ring local to `pi-tui::Editor` instead of widening `pi-coding-agent-tui`, because the TypeScript source of truth defines this as generic editor behavior
+- stop before undo-stack work so the milestone stays focused on the first multiline parity gap the extension-editor consumer makes visible
+- keep the Rust implementation byte-oriented and deterministic around the already-migrated normalized text model rather than introducing a broader generalized editor-state framework early
+
+### Validation summary
+
+New Rust coverage added for:
+- backward word kill plus yank restoration (`ctrl+w` + `ctrl+y`)
+- delete-to-line-end kill plus yank restoration (`ctrl+k` + `ctrl+y`)
+- yank-pop cycling across multiple kill-ring entries (`alt+y`)
+- multiline kill accumulation across merged newlines
+- forward word-kill accumulation via `alt+d`
+- downstream proof that the existing Rust `ExtensionEditorComponent` tests still pass on top of the newly expanded multiline editor
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test editor` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test extension_editor` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- undo-stack parity is still missing from the multiline editor
+- full TypeScript main-editor parity remains incomplete (`autocomplete`, paste markers, jump mode, richer sticky-column behavior)
+- no broader widget parity yet (`Box`, markdown, select/settings/image widgets)
+- differential rendering parity remains partial relative to TS `packages/tui/src/tui.ts`
+
+### Recommended next step
+
+Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
+- continue with the next highest-value multiline-editor parity gap now that the extension-editor consumer also has kill/yank behavior, most likely undo-stack parity
+- keep broader widget parity and the full theme/markdown/image stack deferred until the next real downstream consumer requires them

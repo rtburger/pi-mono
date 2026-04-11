@@ -132,3 +132,87 @@ fn render_wraps_wide_text_without_overflow_and_emits_cursor_marker() {
         );
     }
 }
+
+#[test]
+fn ctrl_w_kills_previous_word_and_ctrl_y_yanks_it() {
+    let mut editor = Editor::new();
+    editor.set_text("foo bar baz");
+
+    editor.handle_input("\x17");
+    assert_eq!(editor.get_text(), "foo bar ");
+
+    editor.handle_input("\x01");
+    editor.handle_input("\x19");
+    assert_eq!(editor.get_text(), "bazfoo bar ");
+}
+
+#[test]
+fn ctrl_k_kills_to_end_of_line_and_ctrl_y_restores_it() {
+    let mut editor = Editor::new();
+    editor.set_text("hello world");
+
+    editor.handle_input("\x01");
+    for _ in 0..6 {
+        editor.handle_input("\x1b[C");
+    }
+    editor.handle_input("\x0b");
+    assert_eq!(editor.get_text(), "hello ");
+
+    editor.handle_input("\x19");
+    assert_eq!(editor.get_text(), "hello world");
+}
+
+#[test]
+fn alt_y_cycles_through_kill_ring_after_yank() {
+    let mut editor = Editor::new();
+
+    editor.set_text("first");
+    editor.handle_input("\x17");
+    editor.set_text("second");
+    editor.handle_input("\x17");
+    editor.set_text("third");
+    editor.handle_input("\x17");
+
+    editor.handle_input("\x19");
+    assert_eq!(editor.get_text(), "third");
+
+    editor.handle_input("\x1by");
+    assert_eq!(editor.get_text(), "second");
+
+    editor.handle_input("\x1by");
+    assert_eq!(editor.get_text(), "first");
+
+    editor.handle_input("\x1by");
+    assert_eq!(editor.get_text(), "third");
+}
+
+#[test]
+fn consecutive_ctrl_w_accumulates_multiline_kills_into_one_ring_entry() {
+    let mut editor = Editor::new();
+    editor.set_text("1\n2\n3");
+
+    for _ in 0..5 {
+        editor.handle_input("\x17");
+    }
+
+    assert_eq!(editor.get_text(), "");
+
+    editor.handle_input("\x19");
+    assert_eq!(editor.get_text(), "1\n2\n3");
+}
+
+#[test]
+fn alt_d_accumulates_forward_word_kills_for_yank() {
+    let mut editor = Editor::new();
+    editor.set_text("hello world test");
+
+    editor.handle_input("\x01");
+    editor.handle_input("\x1bd");
+    assert_eq!(editor.get_text(), " world test");
+
+    editor.handle_input("\x1bd");
+    assert_eq!(editor.get_text(), " test");
+
+    editor.handle_input("\x19");
+    assert_eq!(editor.get_text(), "hello world test");
+}
