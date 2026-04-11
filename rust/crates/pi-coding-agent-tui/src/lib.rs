@@ -2,7 +2,9 @@ mod assistant_message;
 mod branch_summary;
 mod clipboard_image;
 mod compaction_summary;
+mod custom_editor;
 mod custom_message;
+mod extension_editor;
 mod footer;
 mod interactive_binding;
 mod keybinding_hints;
@@ -23,7 +25,9 @@ pub use clipboard_image::{
     is_wayland_session, paste_clipboard_image_into_shell,
 };
 pub use compaction_summary::CompactionSummaryMessageComponent;
+pub use custom_editor::CustomEditor;
 pub use custom_message::CustomMessageComponent;
+pub use extension_editor::ExtensionEditorComponent;
 pub use footer::{FooterComponent, FooterState};
 pub use interactive_binding::InteractiveCoreBinding;
 pub use keybinding_hints::{KeyHintStyler, PlainKeyHintStyler, key_hint, key_text, raw_key_hint};
