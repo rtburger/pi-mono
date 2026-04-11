@@ -1567,3 +1567,83 @@ Still deferred in `pi-ai`:
 - broader `streamSimple()` / `completeSimple()` API parity beyond the narrowed in-scope providers and current shared-option slice
 - provider-specific simple-option parity outside the current migration scope
 - downstream `pi-agent` / `pi-coding-agent` exposure of the new Rust `on_payload` hook remains a later crate-integration step, not part of this `pi-ai` milestone
+
+## Milestone 23 update: `PI_CACHE_RETENTION` omission-vs-explicit parity slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/ai/src/types.ts`
+- `packages/ai/src/providers/simple-options.ts`
+- `packages/ai/src/providers/openai-responses.ts`
+- `packages/ai/src/providers/anthropic.ts`
+- `packages/ai/test/cache-retention.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-ai/src/lib.rs`
+- `rust/crates/pi-ai/src/openai_responses.rs`
+- `rust/crates/pi-ai/src/anthropic_messages.rs`
+- `rust/crates/pi-ai/tests/faux_provider.rs`
+- `rust/crates/pi-ai/tests/cache_retention.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- Rust now preserves the TypeScript distinction between:
+  - omitted `cacheRetention`
+  - explicit `cacheRetention: "short"`
+- `StreamOptions` and `SimpleStreamOptions` no longer pre-resolve cache retention to `short` at construction time in Rust
+- this restores provider-level `PI_CACHE_RETENTION` fallback behavior for the migrated providers that implement it in TypeScript:
+  - `anthropic-messages`
+  - `openai-responses`
+- provider runtime behavior now matches the TS cache-retention helper shape more closely:
+  - omitted cache retention + `PI_CACHE_RETENTION=long` now enables long-retention request shaping
+  - explicit short retention now overrides `PI_CACHE_RETENTION=long`
+- faux-provider prompt-cache estimation still keeps its prior TS-compatible default behavior when no cache retention is supplied:
+  - omitted cache retention still behaves like short retention for faux prompt-cache simulation
+
+Compatibility note for this slice:
+- this milestone fixes a real Rust semantic mismatch that came from strong typing rather than provider logic:
+  - Rust previously stored `cache_retention` as a non-optional enum with default `Short`
+  - that erased the difference between “caller omitted the option” and “caller explicitly requested short retention”
+- TypeScript keeps that distinction because `cacheRetention` is optional and provider helpers resolve defaults later
+- the Rust fix therefore moves default resolution back to the provider/faux boundary instead of the top-level option structs
+
+### Rust design summary
+
+Core API changes in `rust/crates/pi-ai/src/lib.rs`:
+- `StreamOptions.cache_retention` is now `Option<CacheRetention>`
+- `SimpleStreamOptions.cache_retention` is now `Option<CacheRetention>`
+- faux prompt-cache estimation now resolves omitted cache retention to `short` locally instead of relying on a pre-filled default enum value
+
+Provider/runtime changes:
+- `rust/crates/pi-ai/src/openai_responses.rs`
+  - added TS-style `resolve_cache_retention(...)` helper using `PI_CACHE_RETENTION`
+  - provider dispatch now forwards `None` vs explicit cache retention faithfully into request building
+- `rust/crates/pi-ai/src/anthropic_messages.rs`
+  - `anthropic_options_from_stream_options(...)` now forwards omitted cache retention as `None`, allowing the already-migrated provider-local env fallback logic to run
+
+Behavior-freeze artifact added:
+- `rust/crates/pi-ai/tests/cache_retention.rs`
+
+### Validation summary
+
+New Rust coverage added for:
+- OpenAI Responses honoring `PI_CACHE_RETENTION=long` when `cache_retention` is omitted
+- OpenAI Responses explicit short retention overriding `PI_CACHE_RETENTION=long`
+- Anthropic honoring `PI_CACHE_RETENTION=long` when `cache_retention` is omitted
+- Anthropic explicit short retention overriding `PI_CACHE_RETENTION=long`
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-ai --test cache_retention` passed
+- `cd rust && cargo test -p pi-ai` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-ai`:
+- broader `streamSimple()` / `completeSimple()` API parity beyond the narrowed in-scope providers and current shared-option slice
+- provider-specific simple-option parity outside the current migration scope
+- downstream `pi-agent` / `pi-coding-agent` exposure of the Rust payload-hook surface remains a later crate-integration step, not part of this `pi-ai` milestone

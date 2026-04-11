@@ -12,6 +12,7 @@ use pi_events::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -146,7 +147,7 @@ pub fn build_openai_responses_request_params(
         allowed_tool_call_providers,
         convert_options,
     );
-    let cache_retention = options.cache_retention.unwrap_or_else(|| "short".into());
+    let cache_retention = resolve_cache_retention(options.cache_retention.as_deref());
 
     let reasoning = if model.reasoning {
         if options.reasoning_effort.is_some() || options.reasoning_summary.is_some() {
@@ -709,6 +710,19 @@ fn short_hash(input: &str) -> String {
 
 fn sanitize_surrogates(text: &str) -> String {
     crate::unicode::sanitize_provider_text(text)
+}
+
+fn resolve_cache_retention(cache_retention: Option<&str>) -> String {
+    match cache_retention {
+        Some(cache_retention) => cache_retention.to_string(),
+        None => {
+            if env::var("PI_CACHE_RETENTION").ok().as_deref() == Some("long") {
+                "long".into()
+            } else {
+                "short".into()
+            }
+        }
+    }
 }
 
 pub fn tool_call_arguments(arguments: &[(&str, Value)]) -> BTreeMap<String, Value> {
@@ -1638,7 +1652,7 @@ impl AiProvider for OpenAiResponsesProvider {
                     reasoning_effort: options.reasoning_effort.clone(),
                     reasoning_summary: options.reasoning_summary.clone(),
                     session_id: options.session_id.clone(),
-                    cache_retention: Some(match options.cache_retention {
+                    cache_retention: options.cache_retention.map(|cache_retention| match cache_retention {
                         crate::CacheRetention::None => "none".into(),
                         crate::CacheRetention::Short => "short".into(),
                         crate::CacheRetention::Long => "long".into(),

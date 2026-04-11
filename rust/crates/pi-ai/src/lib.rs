@@ -106,7 +106,7 @@ pub enum Transport {
 pub struct StreamOptions {
     pub signal: Option<tokio::sync::watch::Receiver<bool>>,
     pub session_id: Option<String>,
-    pub cache_retention: CacheRetention,
+    pub cache_retention: Option<CacheRetention>,
     pub api_key: Option<String>,
     pub transport: Option<Transport>,
     pub headers: BTreeMap<String, String>,
@@ -159,7 +159,7 @@ pub struct ThinkingBudgets {
 pub struct SimpleStreamOptions {
     pub signal: Option<tokio::sync::watch::Receiver<bool>>,
     pub session_id: Option<String>,
-    pub cache_retention: CacheRetention,
+    pub cache_retention: Option<CacheRetention>,
     pub api_key: Option<String>,
     pub transport: Option<Transport>,
     pub headers: BTreeMap<String, String>,
@@ -730,8 +730,9 @@ fn estimate_usage(
     let mut input = prompt_tokens;
     let mut cache_read = 0;
     let mut cache_write = 0;
+    let cache_retention = options.cache_retention.unwrap_or(CacheRetention::Short);
     if let Some(session_id) = &options.session_id {
-        if options.cache_retention != CacheRetention::None {
+        if cache_retention != CacheRetention::None {
             let mut guard = state.lock().unwrap();
             if let Some(previous) = guard.prompt_cache.get(session_id).cloned() {
                 let prefix = common_prefix_len(&previous, &prompt);

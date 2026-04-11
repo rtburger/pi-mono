@@ -163,7 +163,7 @@ async fn simulates_prompt_caching_per_session() {
         user_context("hello"),
         StreamOptions {
             session_id: Some("session-1".into()),
-            cache_retention: CacheRetention::Short,
+            cache_retention: Some(CacheRetention::Short),
             ..Default::default()
         },
     )
@@ -196,7 +196,7 @@ async fn simulates_prompt_caching_per_session() {
         second_context,
         StreamOptions {
             session_id: Some("session-1".into()),
-            cache_retention: CacheRetention::Short,
+            cache_retention: Some(CacheRetention::Short),
             ..Default::default()
         },
     )

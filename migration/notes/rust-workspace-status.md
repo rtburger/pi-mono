@@ -1,6 +1,6 @@
 # Rust workspace status
 
-Date: 2026-04-10
+Date: 2026-04-11
 
 ## Workspace scaffold
 
@@ -21,6 +21,17 @@ The Rust workspace under `rust/` already exists and matches the requested migrat
 - `rust/crates/pi-coding-agent-tui`
 
 This is not a blank scaffold. It is already a working partial rewrite with passing Rust tests.
+
+Revalidated directly against the current Rust workspace sources on 2026-04-11 by checking:
+- `rust/Cargo.toml`
+- `rust/apps/pi/src/main.rs`
+- `rust/crates/pi-ai/src/lib.rs`
+- `rust/crates/pi-agent/src/lib.rs`
+- `rust/crates/pi-coding-agent-core/src/lib.rs`
+- `rust/crates/pi-coding-agent-cli/src/lib.rs`
+- `rust/crates/pi-coding-agent-tools/src/lib.rs`
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
 
 ## Current implementation snapshot
 
@@ -185,6 +196,6 @@ The next practical blocker is no longer workspace creation; it is closing the hi
 
 ## Validation snapshot
 
-Validated on 2026-04-10:
+Validated on 2026-04-11:
 
 - `cd rust && cargo test -q --workspace` passed

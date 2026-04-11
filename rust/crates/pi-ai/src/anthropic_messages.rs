@@ -1106,7 +1106,7 @@ fn anthropic_options_from_stream_options(
         headers: options.headers.clone(),
         max_tokens: options.max_tokens,
         temperature: options.temperature,
-        cache_retention: Some(options.cache_retention),
+        cache_retention: options.cache_retention,
         metadata_user_id: options
             .metadata
             .get("user_id")
