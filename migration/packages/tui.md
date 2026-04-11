@@ -1773,3 +1773,73 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
 - consume the new `Editor` in the smallest downstream coding-agent component that genuinely needs multiline editing, most likely the Rust equivalent of the extension-editor/custom-editor path
 - keep full main-editor parity deferred until that downstream consumer proves which of the remaining TS editor behaviors are actually needed next
+
+## Milestone 21 update: first downstream multiline-editor consumer in coding-agent extension-editor
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/editor-component.ts`
+- `packages/tui/src/components/editor.ts`
+- `packages/tui/test/editor.test.ts`
+- `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+- `packages/coding-agent/src/modes/interactive/components/extension-editor.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/editor.rs`
+- `rust/crates/pi-tui/tests/editor.rs`
+- `rust/crates/pi-coding-agent-tui/src/custom_editor.rs`
+- `rust/crates/pi-coding-agent-tui/src/extension_editor.rs`
+- `rust/crates/pi-coding-agent-tui/tests/custom_editor.rs`
+- `rust/crates/pi-coding-agent-tui/tests/extension_editor.rs`
+- `migration/packages/tui.md`
+- `migration/packages/coding-agent.md`
+
+### Behavior summary
+
+New TS-grounded downstream behavior now covered:
+- the migrated Rust `pi-tui::Editor` now has a real coding-agent consumer through `pi-coding-agent-tui::ExtensionEditorComponent`
+- the downstream consumer now freezes the first high-value TypeScript extension-editor workflow on top of the Rust multiline editor:
+  - prefilled multiline text editing
+  - submit/cancel routing through coding-agent keybindings
+  - default external-editor round-trip through a temp file when `VISUAL` / `EDITOR` is configured
+  - host stop/start/rerender sequencing around the external-editor process
+- this proves the current Rust `Editor` slice is viable for at least one real multiline coding-agent surface, while still leaving the broader TypeScript main-editor feature set deferred
+
+Compatibility note for this slice:
+- no new `pi-tui` widget behavior was required for this milestone; the value of this slice is proving downstream consumption and identifying the remaining editor gaps from a real coding-agent use site instead of a standalone widget test only
+
+### Rust design summary
+
+No `pi-tui` implementation changes were required in this milestone.
+
+The downstream design now relies on:
+- `pi-tui::Editor` as the multiline text engine
+- `pi-coding-agent-tui::CustomEditor` as the coding-agent keybinding wrapper
+- `pi-coding-agent-tui::ExtensionEditorComponent` as the first real multiline-editor consumer
+
+### Validation summary
+
+New downstream Rust coverage added for:
+- extension-editor default external-editor round-trip on top of the Rust multiline editor
+- extension-editor callback precedence and keybinding routing on top of the Rust multiline editor
+- existing `pi-tui` multiline-editor tests continue to freeze the lower-level widget behavior directly
+
+Validation run results:
+- `cd rust && cargo test -p pi-coding-agent-tui --test extension_editor` passed
+- `cd rust && cargo test -p pi-tui --test editor` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- full TypeScript main-editor parity remains incomplete (`autocomplete`, undo/kill-ring, paste markers, jump mode, richer sticky-column behavior)
+- no broader widget parity yet (`Box`, markdown, select/settings/image widgets)
+- differential rendering parity remains partial relative to TS `packages/tui/src/tui.ts`
+
+### Recommended next step
+
+Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
+- use the newly grounded extension-editor consumer to choose the next highest-value multiline-editor parity gap instead of broadening the editor spec in the abstract
+- keep full main-editor parity deferred until another real downstream consumer proves it is necessary

@@ -1,8 +1,40 @@
 use crate::{CustomEditor, KeybindingsManager, PlainKeyHintStyler, key_hint};
 use pi_tui::{Component, matches_key, truncate_to_width};
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    env, fs, io,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 type ActionCallback = Box<dyn FnMut() + Send + 'static>;
+
+pub trait ExternalEditorHost: Send + Sync {
+    fn stop(&self) {}
+    fn start(&self) {}
+    fn request_render(&self) {}
+}
+
+pub trait ExternalEditorCommandRunner: Send + Sync {
+    fn run(&self, command: &str, file_path: &Path) -> io::Result<Option<i32>>;
+}
+
+#[derive(Default)]
+pub struct SystemExternalEditorCommandRunner;
+
+impl ExternalEditorCommandRunner for SystemExternalEditorCommandRunner {
+    fn run(&self, command: &str, file_path: &Path) -> io::Result<Option<i32>> {
+        let mut parts = command.split_whitespace();
+        let Some(program) = parts.next() else {
+            return Ok(None);
+        };
+
+        let status = Command::new(program).args(parts).arg(file_path).status()?;
+        Ok(status.code())
+    }
+}
 
 pub struct ExtensionEditorComponent {
     title: String,
@@ -10,6 +42,9 @@ pub struct ExtensionEditorComponent {
     editor: CustomEditor,
     on_cancel: Option<ActionCallback>,
     on_external_editor: Option<ActionCallback>,
+    external_editor_command: Option<String>,
+    external_editor_runner: Arc<dyn ExternalEditorCommandRunner>,
+    external_editor_host: Option<Arc<dyn ExternalEditorHost>>,
     viewport_size: Cell<Option<(usize, usize)>>,
 }
 
@@ -29,6 +64,9 @@ impl ExtensionEditorComponent {
             editor,
             on_cancel: None,
             on_external_editor: None,
+            external_editor_command: None,
+            external_editor_runner: Arc::new(SystemExternalEditorCommandRunner),
+            external_editor_host: None,
             viewport_size: Cell::new(None),
         }
     }
@@ -74,6 +112,36 @@ impl ExtensionEditorComponent {
         self.on_external_editor = None;
     }
 
+    pub fn set_external_editor_command(&mut self, command: impl Into<String>) {
+        self.external_editor_command = Some(command.into());
+    }
+
+    pub fn clear_external_editor_command(&mut self) {
+        self.external_editor_command = None;
+    }
+
+    pub fn set_external_editor_command_runner<R>(&mut self, runner: R)
+    where
+        R: ExternalEditorCommandRunner + 'static,
+    {
+        self.external_editor_runner = Arc::new(runner);
+    }
+
+    pub fn clear_external_editor_command_runner(&mut self) {
+        self.external_editor_runner = Arc::new(SystemExternalEditorCommandRunner);
+    }
+
+    pub fn set_external_editor_host<H>(&mut self, host: H)
+    where
+        H: ExternalEditorHost + 'static,
+    {
+        self.external_editor_host = Some(Arc::new(host));
+    }
+
+    pub fn clear_external_editor_host(&mut self) {
+        self.external_editor_host = None;
+    }
+
     fn matches_binding(&self, data: &str, keybinding: &str) -> bool {
         self.keybindings
             .get_keys(keybinding)
@@ -111,13 +179,49 @@ impl ExtensionEditorComponent {
     }
 
     fn shows_external_editor_hint(&self) -> bool {
-        self.on_external_editor.is_some()
-            || std::env::var_os("VISUAL").is_some()
-            || std::env::var_os("EDITOR").is_some()
+        self.on_external_editor.is_some() || self.resolved_external_editor_command().is_some()
+    }
+
+    fn resolved_external_editor_command(&self) -> Option<String> {
+        self.external_editor_command.clone().or_else(|| {
+            env::var_os("VISUAL")
+                .or_else(|| env::var_os("EDITOR"))
+                .map(|value| value.to_string_lossy().into_owned())
+        })
     }
 
     fn editor_height(&self, total_height: usize) -> usize {
         total_height.saturating_sub(8).max(1)
+    }
+
+    fn open_external_editor(&mut self) {
+        let Some(command) = self.resolved_external_editor_command() else {
+            return;
+        };
+
+        let temp_path = extension_editor_temp_path();
+        if fs::write(&temp_path, self.editor.get_text()).is_err() {
+            return;
+        }
+
+        if let Some(host) = &self.external_editor_host {
+            host.stop();
+        }
+
+        let run_result = self.external_editor_runner.run(&command, &temp_path);
+        if matches!(run_result, Ok(Some(0)))
+            && let Ok(new_content) = fs::read_to_string(&temp_path)
+        {
+            let trimmed_content = new_content.strip_suffix('\n').unwrap_or(&new_content);
+            self.editor.set_text(trimmed_content);
+        }
+
+        let _ = fs::remove_file(&temp_path);
+
+        if let Some(host) = &self.external_editor_host {
+            host.start();
+            host.request_render();
+        }
     }
 }
 
@@ -162,6 +266,8 @@ impl Component for ExtensionEditorComponent {
         if self.matches_binding(data, "app.editor.external") {
             if let Some(on_external_editor) = &mut self.on_external_editor {
                 on_external_editor();
+            } else {
+                self.open_external_editor();
             }
             return;
         }
@@ -178,4 +284,15 @@ impl Component for ExtensionEditorComponent {
         self.editor
             .set_viewport_size(width, self.editor_height(height));
     }
+}
+
+fn extension_editor_temp_path() -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    env::temp_dir().join(format!(
+        "pi-extension-editor-{}-{timestamp}.md",
+        std::process::id()
+    ))
 }

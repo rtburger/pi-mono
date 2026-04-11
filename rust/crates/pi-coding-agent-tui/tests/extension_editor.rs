@@ -1,7 +1,12 @@
-use pi_coding_agent_tui::{ExtensionEditorComponent, KeyId, KeybindingsManager};
+use pi_coding_agent_tui::{
+    ExtensionEditorComponent, ExternalEditorCommandRunner, ExternalEditorHost, KeyId,
+    KeybindingsManager,
+};
 use pi_tui::Component;
 use std::{
     collections::BTreeMap,
+    fs, io,
+    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -15,6 +20,65 @@ fn config(entries: &[(&str, &[&str])]) -> BTreeMap<String, Vec<KeyId>> {
             )
         })
         .collect()
+}
+
+#[derive(Clone, Default)]
+struct RecordingHost {
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+impl ExternalEditorHost for RecordingHost {
+    fn stop(&self) {
+        self.events
+            .lock()
+            .expect("host events mutex poisoned")
+            .push(String::from("stop"));
+    }
+
+    fn start(&self) {
+        self.events
+            .lock()
+            .expect("host events mutex poisoned")
+            .push(String::from("start"));
+    }
+
+    fn request_render(&self) {
+        self.events
+            .lock()
+            .expect("host events mutex poisoned")
+            .push(String::from("request_render"));
+    }
+}
+
+#[derive(Clone, Default)]
+struct RecordingRunner {
+    calls: Arc<Mutex<Vec<(String, String)>>>,
+    replacement: Option<String>,
+    exit_code: Option<i32>,
+}
+
+impl RecordingRunner {
+    fn with_result(replacement: Option<&str>, exit_code: Option<i32>) -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            replacement: replacement.map(str::to_owned),
+            exit_code,
+        }
+    }
+}
+
+impl ExternalEditorCommandRunner for RecordingRunner {
+    fn run(&self, command: &str, file_path: &Path) -> io::Result<Option<i32>> {
+        let current_text = fs::read_to_string(file_path)?;
+        self.calls
+            .lock()
+            .expect("runner calls mutex poisoned")
+            .push((command.to_owned(), current_text));
+        if let Some(replacement) = &self.replacement {
+            fs::write(file_path, replacement)?;
+        }
+        Ok(self.exit_code)
+    }
 }
 
 #[test]
@@ -106,12 +170,81 @@ fn extension_editor_external_editor_binding_invokes_callback_and_does_not_mutate
 }
 
 #[test]
-fn extension_editor_external_editor_binding_is_consumed_even_without_callback() {
+fn extension_editor_default_external_editor_action_updates_text_and_requests_render() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let mut component = ExtensionEditorComponent::new(&keybindings, "Title", Some("draft"));
 
+    let host = RecordingHost::default();
+    let host_events = Arc::clone(&host.events);
+    let runner = RecordingRunner::with_result(Some("edited from external\n"), Some(0));
+    let runner_calls = Arc::clone(&runner.calls);
+
+    component.set_external_editor_host(host);
+    component.set_external_editor_command_runner(runner);
+    component.set_external_editor_command("mock-editor --wait");
+
     component.handle_input("\x07");
 
+    assert_eq!(component.get_text(), "edited from external");
+    assert_eq!(
+        runner_calls
+            .lock()
+            .expect("runner calls mutex poisoned")
+            .as_slice(),
+        &[(String::from("mock-editor --wait"), String::from("draft"))]
+    );
+    assert_eq!(
+        host_events
+            .lock()
+            .expect("host events mutex poisoned")
+            .as_slice(),
+        [
+            String::from("stop"),
+            String::from("start"),
+            String::from("request_render")
+        ]
+    );
+}
+
+#[test]
+fn extension_editor_external_editor_binding_is_consumed_even_without_callback() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut component = ExtensionEditorComponent::new(&keybindings, "Title", Some("draft"));
+    let runner = RecordingRunner::with_result(None, Some(1));
+    component.set_external_editor_command_runner(runner);
+    component.set_external_editor_command("mock-editor");
+
+    component.handle_input("\x07");
+
+    assert_eq!(component.get_text(), "draft");
+}
+
+#[test]
+fn extension_editor_external_editor_callback_takes_precedence_over_default_action() {
+    let external_calls = Arc::new(Mutex::new(0usize));
+    let external_calls_for_callback = Arc::clone(&external_calls);
+
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut component = ExtensionEditorComponent::new(&keybindings, "Title", Some("draft"));
+    let runner = RecordingRunner::with_result(Some("edited from external\n"), Some(0));
+    let runner_calls = Arc::clone(&runner.calls);
+    component.set_external_editor_command_runner(runner);
+    component.set_external_editor_command("mock-editor --wait");
+    component.set_on_external_editor(move || {
+        *external_calls_for_callback
+            .lock()
+            .expect("external mutex poisoned") += 1;
+    });
+
+    component.handle_input("\x07");
+
+    assert_eq!(*external_calls.lock().expect("external mutex poisoned"), 1);
+    assert!(
+        runner_calls
+            .lock()
+            .expect("runner calls mutex poisoned")
+            .is_empty()
+    );
     assert_eq!(component.get_text(), "draft");
 }
 

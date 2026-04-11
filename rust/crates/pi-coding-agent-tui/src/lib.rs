@@ -27,7 +27,9 @@ pub use clipboard_image::{
 pub use compaction_summary::CompactionSummaryMessageComponent;
 pub use custom_editor::CustomEditor;
 pub use custom_message::CustomMessageComponent;
-pub use extension_editor::ExtensionEditorComponent;
+pub use extension_editor::{
+    ExtensionEditorComponent, ExternalEditorCommandRunner, ExternalEditorHost,
+};
 pub use footer::{FooterComponent, FooterState};
 pub use interactive_binding::InteractiveCoreBinding;
 pub use keybinding_hints::{KeyHintStyler, PlainKeyHintStyler, key_hint, key_text, raw_key_hint};

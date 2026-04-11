@@ -4308,3 +4308,96 @@ Still deferred for the coding-agent interactive/runtime path:
 Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-cli`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
 - move to the next honest interactive gap above the new top-level app path, most likely multiline/custom-editor parity or the next remaining real-terminal integration gap such as live resize handling
 - keep session-manager/resource-loader wiring and the broader theme/markdown/image stack deferred until the higher-value interaction/runtime gaps are closed first
+
+## Milestone 57 update: extension-editor default external-editor flow slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/editor-component.ts`
+- `packages/tui/src/components/editor.ts`
+- `packages/tui/test/editor.test.ts`
+- `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+- `packages/coding-agent/src/modes/interactive/components/extension-editor.ts`
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` (extension-editor construction path)
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/editor.rs`
+- `rust/crates/pi-tui/tests/editor.rs`
+- `rust/crates/pi-coding-agent-tui/src/custom_editor.rs`
+- `rust/crates/pi-coding-agent-tui/src/extension_editor.rs`
+- `rust/crates/pi-coding-agent-tui/src/lib.rs`
+- `rust/crates/pi-coding-agent-tui/tests/custom_editor.rs`
+- `rust/crates/pi-coding-agent-tui/tests/extension_editor.rs`
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `migration/packages/tui.md`
+- `migration/packages/coding-agent.md`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-coding-agent-tui::ExtensionEditorComponent` now ports the default external-editor flow from TypeScript `extension-editor.ts` instead of relying only on an override callback
+- the Rust component now preserves the current TS-visible external-editor behavior for the migrated slice:
+  - resolve the editor command from `VISUAL` / `EDITOR` when no explicit override callback is installed
+  - write the current editor content to a temporary file
+  - invoke the configured external editor command against that file
+  - on success, reload the edited file content back into the embedded multiline editor
+  - trim a single trailing newline before restoring the content, matching the TypeScript `replace(/\n$/, "")` behavior
+  - always restart the host TUI lifecycle and request a rerender after the external editor returns
+- callback precedence is preserved:
+  - `set_on_external_editor(...)` still overrides the built-in external-editor default path
+  - the external-editor keybinding is still consumed even when no callback is installed
+- this gives the already-migrated Rust multiline `pi-tui::Editor` its first downstream coding-agent consumer with a real TS-grounded multiline-only workflow instead of prompt-shell reuse
+
+Compatibility note for this slice:
+- the Rust external-editor runner intentionally keeps the current TypeScript command parsing shape simple by splitting the configured command on whitespace before launching it
+- the live interactive runtime still does not mount this extension editor yet; this milestone freezes the component behavior itself and its external-editor flow before wiring it into a broader session/runtime path
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::extension_editor` with:
+- `ExternalEditorHost`
+- `ExternalEditorCommandRunner`
+- `SystemExternalEditorCommandRunner`
+- explicit component configuration for:
+  - external-editor command override
+  - external-editor command runner override
+  - host lifecycle callbacks (`stop`, `start`, `request_render`)
+- internal built-in `open_external_editor()` flow that now owns the temporary-file round-trip
+
+Crate-surface change:
+- `pi-coding-agent-tui` now exports `ExternalEditorHost` and `ExternalEditorCommandRunner` so downstream callers/tests can inject real or mock editor hosts/runners without widening `pi-tui`
+
+Design choices for this slice:
+- keep the external-editor lifecycle in `pi-coding-agent-tui`, where the TypeScript component already owns it, instead of pushing process-launch behavior into `pi-tui`
+- keep the current Rust `CustomEditor` wrapper in place and consume the migrated multiline `pi-tui::Editor` through that existing coding-agent keybinding layer rather than replacing the whole component shape again
+- use injectable host/runner traits so the TS stop/start/rerender flow can be validated deterministically without running a real editor process in tests
+
+### Validation summary
+
+New Rust coverage added for:
+- default external-editor round-trip through a temp file with host stop/start/request-render sequencing
+- callback precedence over the built-in external-editor default path
+- external-editor keybinding consumption without prompt mutation when no callback is installed
+- existing extension-editor rendering/submit/cancel/keybinding tests continue to pass with the new default behavior in place
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test extension_editor` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive/editor surface:
+- the live Rust interactive runtime still does not open `ExtensionEditorComponent` from a session/runtime action yet
+- broader multiline/custom-editor parity remains deferred (`autocomplete`, undo/kill-ring, paste markers, jump mode, richer sticky-column behavior)
+- no session-manager/resource-loader-backed interactive runtime wiring yet
+- no broader theme/markdown/image parity yet for the full interactive presentation stack
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- either wire the now-complete Rust extension-editor component into a real interactive flow that can summon it, or continue closing the next highest-value multiline/custom-editor parity gaps that the downstream consumer now proves are still missing
+- keep the broader session-manager/resource-loader wiring and full theme/markdown/image stack deferred until those higher-value interaction/runtime gaps are closed first
