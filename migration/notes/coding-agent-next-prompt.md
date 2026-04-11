@@ -11,7 +11,7 @@ Scope constraints:
   - `packages/pods`
   - `packages/web-ui`
 - TS remains the source of truth for behavior.
-- Do not run runtime apps / agent / tui processes.
+- Do not run runtime apps / agent / tui processes manually.
 - Work incrementally and stop after one milestone with exactly this 8-point report:
   1. Files analyzed
   2. Behavior inventory summary
@@ -26,59 +26,63 @@ Repo/worktree rules:
 - Read every file you modify in full before editing.
 - Use `read` for file contents, not cat/sed.
 - After code changes, run required validation.
-- In this environment, `npm run check` is blocked because `biome` is missing; note that explicitly.
 - Do not commit unless asked.
 
-Current state after the latest coding-agent CLI/model milestone:
-- `rust/crates/pi-ai` now provides the Rust-backed built-in model catalog used by `rust/apps/pi`.
-- `rust/crates/pi-coding-agent-core` now has:
-  - CLI model resolution parity slices
-  - scoped-model resolution via `resolve_model_scope()`
-  - `models.json` subset registry
-  - startup bootstrap selection with saved-default-in-scope handling
-  - minimal non-interactive runtime over `pi-agent`
-- `rust/crates/pi-coding-agent-cli` now has:
-  - `--list-models [search]`
-  - `--models` scoped-model selection in the non-interactive path
-  - `--api-key` override support for explicit `--model` and current first-scoped-model selection
-- `rust/crates/pi-tui` now has:
-  - `fuzzy_match()`
-  - `fuzzy_filter()`
-  - tests ported from `packages/tui/test/fuzzy.test.ts`
-- Validation already completed on this milestone:
-  - `cd rust && cargo fmt`
-  - `cd rust && cargo test -p pi-tui`
-  - `cd rust && cargo test -p pi-coding-agent-core`
-  - `cd rust && cargo test -p pi-coding-agent-cli`
-  - `cd rust && cargo test`
-  - `npm run check` fails with `biome: command not found`
+Current state after the latest `pi-tui` multiline editor milestone:
+- `rust/crates/pi-ai` already provides the in-scope Rust provider/runtime slices for:
+  - `anthropic-messages`
+  - `openai-responses`
+  - `openai-completions`
+  - `openai-codex-responses`
+- `rust/crates/pi-agent` already provides:
+  - the core execution loop
+  - tool execution/hooks
+  - queue handling
+  - proxy slices
+- `rust/crates/pi-coding-agent-core` / `cli` / `tui` already provide:
+  - non-interactive runtime + CLI
+  - live interactive startup shell path
+  - startup/runtime keybinding migration helpers
+- `rust/crates/pi-tui` now already has:
+  - terminal/input plumbing
+  - key parsing/keybindings
+  - `Text`, `Spacer`, `TruncatedText`, `Input`
+  - overlays/focus/input routing
+  - real `ProcessTerminal`
+  - resize polling
+  - a first multiline `Editor`
+  - `word_wrap_line(...)`
+- Validation now succeeds with:
+  - `cd rust && cargo fmt --all`
+  - `cd rust && cargo test -q --workspace`
+  - `npm run check`
 
 Important current gaps:
-- no xhigh-capability clamping parity yet in the Rust CLI startup path
-- no settings-manager/resource-loader/session-manager integration yet
-- no JSON session-manager wrapper/header parity yet
-- no `blockImages` runtime wrapper yet
-- no image auto-resize parity yet
-- no broader OAuth/cloud auth parity yet for all providers
-- no interactive coding-agent/TUI integration yet beyond fuzzy helpers
+- the new Rust `Editor` is still a narrowed slice, not full TS editor parity
+- still missing from Rust editor: autocomplete, undo, kill ring, paste markers, jump mode, richer sticky-column behavior
+- the Rust coding-agent interactive path does not yet consume the new multiline editor in a downstream component
+- broader markdown/select/settings/image widget parity remains deferred
+- broader session-manager/resource-loader/extensions parity remains deferred
 
 Recommended next task:
-- Stay in `packages/coding-agent`, `packages/ai`, `rust/crates/pi-coding-agent-core`, and `rust/crates/pi-coding-agent-cli`
-- Port the remaining CLI startup model-selection parity that does not require session-manager:
-  - xhigh/thinking clamp behavior against model capabilities
-  - any missing availability/auth edge cases that affect initial model selection
-- Keep TUI and session-manager integration deferred for now
+- Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`
+- Consume the new Rust `Editor` in the smallest downstream coding-agent component that genuinely needs multiline editing
+- Best candidate:
+  - ground in `packages/coding-agent/src/modes/interactive/components/extension-editor.ts`
+  - then add the Rust-side equivalent component or the smallest shell integration that uses `pi_tui::Editor`
+- Keep full main-editor parity deferred until that consumer proves which remaining TS editor behaviors are actually needed next
 
 Before editing, ground in:
-- `packages/coding-agent/src/main.ts`
-- `packages/coding-agent/src/core/model-resolver.ts`
-- `packages/ai/src/models.ts`
-- `rust/crates/pi-ai/src/models.rs`
-- `rust/crates/pi-coding-agent-core/src/model_resolver.rs`
-- `rust/crates/pi-coding-agent-core/src/bootstrap.rs`
-- `rust/crates/pi-coding-agent-cli/src/runner.rs`
-- `migration/packages/coding-agent.md`
+- `packages/tui/src/editor-component.ts`
+- `packages/tui/src/components/editor.ts`
+- `packages/tui/test/editor.test.ts`
+- `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+- `packages/coding-agent/src/modes/interactive/components/extension-editor.ts`
+- `rust/crates/pi-tui/src/editor.rs`
+- `rust/crates/pi-tui/tests/editor.rs`
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
 - `migration/packages/tui.md`
+- `migration/packages/coding-agent.md`
 
 Also note:
 - Ignore unrelated existing worktree changes outside the files touched by this migration slice.

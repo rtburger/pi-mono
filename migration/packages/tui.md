@@ -1660,3 +1660,116 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
 - move up to the next honest interactive blocker above the now-live resize path, most likely the multiline/custom-editor slice
 - keep broader markdown/image/theme parity deferred until the higher-value interaction/runtime gaps are closed first
+
+## Milestone 20 update: minimal multiline editor slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/tui/src/editor-component.ts`
+- `packages/tui/src/components/editor.ts`
+- `packages/tui/test/editor.test.ts`
+- `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+- `packages/coding-agent/src/modes/interactive/components/extension-editor.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/lib.rs`
+- `rust/crates/pi-tui/src/input.rs`
+- `rust/crates/pi-tui/src/tui.rs`
+- `rust/crates/pi-tui/tests/input.rs`
+- `rust/crates/pi-tui/tests/tui.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-tui` now exports a first minimal multiline `Editor` widget plus `word_wrap_line(...)`
+- the Rust editor preserves the current high-value TypeScript behavior needed for the first custom-editor / extension-editor migration slice:
+  - multi-line text storage with `get_text()`, `set_text()`, `get_lines()`, and `get_cursor()`
+  - insertion at the current cursor position via `insert_text_at_cursor(...)`
+  - grapheme-aware left/right movement and backspace/delete behavior across line boundaries
+  - line-start / line-end movement
+  - word-left / word-right movement and matching word deletion helpers
+  - `Enter` submit with reset-to-empty behavior and trimmed submitted text
+  - the TypeScript backslash-before-enter newline workaround (`\\` immediately before Enter inserts a newline instead of submitting)
+  - bracketed-paste buffering that preserves newlines and expands tabs to spaces
+  - history storage plus up/down browsing through multi-line entries
+  - word-wrapped rendering with top/bottom borders, viewport-aware vertical clipping, and `CURSOR_MARKER` emission when focused
+- `word_wrap_line(...)` now freezes the first useful subset of the TypeScript wrapping behavior directly in Rust, including whitespace-boundary cases exercised by the TS editor tests
+
+Compatibility note for this slice:
+- this is intentionally the first honest multiline-editor foundation, not full `packages/tui/src/components/editor.ts` parity
+- still deferred from the TypeScript editor:
+  - autocomplete
+  - kill ring / yank / yank-pop
+  - undo stack parity
+  - jump-to-char
+  - sticky visual-column edge cases beyond the basic current implementation
+  - large-paste marker substitution and marker-aware atomic editing
+  - theme-driven border/select-list integration and the TS constructor shape that depends on `TUI`
+- the current Rust `Editor` is therefore suitable as the first shared multiline text component, but not yet a drop-in replacement for the full TypeScript main interactive editor
+
+### Rust design summary
+
+New Rust module:
+- `pi-tui::editor`
+  - `Editor`
+  - `EditorCursor`
+  - `EditorOptions`
+  - `TextChunk`
+  - `word_wrap_line(...)`
+
+Public API added in this milestone:
+- `Editor::new()`
+- `Editor::with_options(...)`
+- `Editor::with_keybindings(...)`
+- `Editor::with_keybindings_and_options(...)`
+- `Editor::get_text()`
+- `Editor::get_expanded_text()`
+- `Editor::set_text(...)`
+- `Editor::get_lines()`
+- `Editor::get_cursor()`
+- `Editor::insert_text_at_cursor(...)`
+- `Editor::set_on_submit(...)` / `clear_on_submit()`
+- `Editor::set_on_change(...)` / `clear_on_change()`
+- `Editor::add_to_history(...)`
+- `Editor::padding_x()` / `set_padding_x(...)`
+- `Editor::is_showing_autocomplete()` (currently fixed `false` for the narrowed slice)
+- crate exports via `pi_tui::{Editor, EditorCursor, EditorOptions, TextChunk, word_wrap_line}`
+
+Implementation choices for this slice:
+- keep the first Rust editor self-contained and keybinding-driven instead of pulling autocomplete, kill ring, undo, and select-list dependencies forward in the same milestone
+- reuse the already-ported key parsing, width helpers, grapheme handling, `CURSOR_MARKER`, and component viewport hook instead of introducing a second rendering/input stack
+- preserve the current TS editor behavior that is most valuable for downstream migration first: multi-line text, cursor movement, submit/newline semantics, paste handling, and wrapped rendering
+- leave the richer TS editor internals deferred until a downstream coding-agent component actually needs them
+
+### Validation summary
+
+New Rust coverage added for:
+- backslash-enter newline behavior without accidental submit
+- submit/reset behavior with trimmed output
+- backspace merging lines at the start of a line
+- multi-line history navigation
+- bracketed-paste newline preservation and tab expansion
+- core `word_wrap_line(...)` whitespace-boundary behavior
+- wide-text wrapped rendering with `CURSOR_MARKER` and width safety
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test editor` passed
+- `cd rust && cargo test -p pi-tui` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- full TypeScript multiline-editor parity (autocomplete, undo, kill ring, paste markers, jump mode, richer sticky-column behavior)
+- broader widget surface still missing (`Box`, markdown, select/settings/image widgets)
+- differential rendering parity remains partial relative to TS `packages/tui/src/tui.ts`
+- the Rust coding-agent interactive path still needs a component that actually consumes this new editor slice
+
+### Recommended next step
+
+Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
+- consume the new `Editor` in the smallest downstream coding-agent component that genuinely needs multiline editing, most likely the Rust equivalent of the extension-editor/custom-editor path
+- keep full main-editor parity deferred until that downstream consumer proves which of the remaining TS editor behaviors are actually needed next

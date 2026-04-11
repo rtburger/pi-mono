@@ -1,3 +1,4 @@
+pub mod editor;
 pub mod fuzzy;
 pub mod input;
 pub mod keybindings;
@@ -11,6 +12,7 @@ pub mod truncated_text;
 pub mod tui;
 pub mod utils;
 
+pub use editor::{Editor, EditorCursor, EditorOptions, TextChunk, word_wrap_line};
 pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
 pub use input::Input;
 pub use keybindings::{
