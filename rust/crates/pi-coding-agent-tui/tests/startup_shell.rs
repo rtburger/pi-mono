@@ -952,6 +952,90 @@ fn startup_shell_can_cancel_extension_editor_and_restore_hidden_prompt() {
 }
 
 #[test]
+fn startup_shell_can_show_model_selector_and_restore_hidden_prompt_after_submit() {
+    let selected = Arc::new(Mutex::new(None::<String>));
+    let selected_for_callback = Arc::clone(&selected);
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_input_value("hidden prompt");
+    shell.show_model_selector(
+        Some(model("alpha", "openai", true)),
+        vec![
+            model("alpha", "openai", true),
+            model("beta", "anthropic", true),
+        ],
+        Some("beta"),
+        move |model| {
+            *selected_for_callback
+                .lock()
+                .expect("selected mutex poisoned") = Some(model.id);
+        },
+        || {},
+    );
+
+    assert!(shell.is_showing_model_selector());
+    let lines = shell.render(60);
+    assert!(lines.iter().any(|line| line.contains("Select model")));
+    assert!(lines.iter().any(|line| line.contains("beta [anthropic]")));
+    assert!(!lines.iter().any(|line| line.contains("hidden prompt")));
+
+    shell.handle_input("\r");
+
+    assert_eq!(
+        selected.lock().expect("selected mutex poisoned").as_deref(),
+        Some("beta")
+    );
+    assert!(!shell.is_showing_model_selector());
+    assert_eq!(shell.input_value(), "hidden prompt");
+}
+
+#[test]
+fn startup_shell_can_cancel_model_selector_and_restore_hidden_prompt() {
+    let cancelled = Arc::new(Mutex::new(0usize));
+    let cancelled_for_callback = Arc::clone(&cancelled);
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_input_value("hidden prompt");
+    shell.show_model_selector(
+        Some(model("alpha", "openai", true)),
+        vec![
+            model("alpha", "openai", true),
+            model("beta", "anthropic", true),
+        ],
+        Some("beta"),
+        |_| {},
+        move || {
+            *cancelled_for_callback
+                .lock()
+                .expect("cancelled mutex poisoned") += 1;
+        },
+    );
+
+    assert!(shell.is_showing_model_selector());
+    shell.handle_input("\x1b");
+
+    assert_eq!(*cancelled.lock().expect("cancelled mutex poisoned"), 1);
+    assert!(!shell.is_showing_model_selector());
+    assert_eq!(shell.input_value(), "hidden prompt");
+}
+
+#[test]
 fn startup_shell_paste_image_callback_overrides_default_clipboard_insert() {
     let temp_dir = TestDir::new("startup-shell-paste-image-callback");
     let paste_calls = Arc::new(Mutex::new(0usize));

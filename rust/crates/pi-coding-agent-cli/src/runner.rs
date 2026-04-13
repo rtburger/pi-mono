@@ -782,13 +782,14 @@ fn install_interactive_submit_handler(
     footer_state_handle: FooterStateHandle,
     exit_requested: Arc<AtomicBool>,
 ) {
-    shell.set_on_submit(move |value| {
+    shell.set_on_submit_with_shell(move |shell, value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             return;
         }
 
         if handle_interactive_slash_command(
+            shell,
             trimmed,
             &core,
             model_registry.as_ref(),
@@ -812,6 +813,7 @@ fn install_interactive_submit_handler(
 }
 
 fn handle_interactive_slash_command(
+    shell: &mut StartupShellComponent,
     text: &str,
     core: &CodingAgentCore,
     model_registry: &ModelRegistry,
@@ -827,11 +829,6 @@ fn handle_interactive_slash_command(
 
     if text == "/model" || text.starts_with("/model ") {
         let search_term = text.strip_prefix("/model").unwrap_or_default().trim();
-        if search_term.is_empty() {
-            status_handle
-                .set_message("Model selector is not supported in the Rust interactive CLI yet. Use /model <provider/model>.");
-            return true;
-        }
 
         if core.state().is_streaming {
             status_handle.set_message(
@@ -841,27 +838,75 @@ fn handle_interactive_slash_command(
         }
 
         let candidates = current_interactive_model_candidates(model_registry, scoped_models);
-        let Some(model) = find_exact_model_reference_match(search_term, &candidates) else {
-            status_handle.set_message(format!("No exact model match for \"{search_term}\""));
-            return true;
-        };
+        if let Some(model) = (!search_term.is_empty())
+            .then(|| find_exact_model_reference_match(search_term, &candidates))
+            .flatten()
+        {
+            if let Err(error) = switch_interactive_model(core, &model) {
+                status_handle.set_message(format!("Error: {error}"));
+                return true;
+            }
 
-        if let Err(error) = switch_interactive_model(core, &model) {
-            status_handle.set_message(format!("Error: {error}"));
+            let state = core.state();
+            footer_state_handle.update(|footer_state| {
+                footer_state.model = Some(state.model.clone());
+                footer_state.context_window = state.model.context_window;
+                footer_state.thinking_level = thinking_level_label(state.thinking_level).to_owned();
+            });
+            status_handle.set_message(format!("Model: {}", state.model.id));
             return true;
         }
 
-        let state = core.state();
-        footer_state_handle.update(|footer_state| {
-            footer_state.model = Some(state.model.clone());
-            footer_state.context_window = state.model.context_window;
-            footer_state.thinking_level = thinking_level_label(state.thinking_level).to_owned();
-        });
-        status_handle.set_message(format!("Model: {}", state.model.id));
+        show_interactive_model_selector(
+            shell,
+            core,
+            model_registry,
+            scoped_models,
+            status_handle,
+            footer_state_handle,
+            (!search_term.is_empty()).then_some(search_term),
+        );
         return true;
     }
 
     false
+}
+
+fn show_interactive_model_selector(
+    shell: &mut StartupShellComponent,
+    core: &CodingAgentCore,
+    model_registry: &ModelRegistry,
+    scoped_models: &[ScopedModel],
+    status_handle: &StatusHandle,
+    footer_state_handle: &FooterStateHandle,
+    initial_search: Option<&str>,
+) {
+    let current_model = Some(core.state().model.clone());
+    let models = current_interactive_model_candidates(model_registry, scoped_models);
+    let core = core.clone();
+    let status_handle_for_select = status_handle.clone();
+    let footer_state_handle_for_select = footer_state_handle.clone();
+
+    shell.show_model_selector(
+        current_model,
+        models,
+        initial_search,
+        move |model| {
+            if let Err(error) = switch_interactive_model(&core, &model) {
+                status_handle_for_select.set_message(format!("Error: {error}"));
+                return;
+            }
+
+            let state = core.state();
+            footer_state_handle_for_select.update(|footer_state| {
+                footer_state.model = Some(state.model.clone());
+                footer_state.context_window = state.model.context_window;
+                footer_state.thinking_level = thinking_level_label(state.thinking_level).to_owned();
+            });
+            status_handle_for_select.set_message(format!("Model: {}", state.model.id));
+        },
+        || {},
+    );
 }
 
 fn switch_interactive_model(core: &CodingAgentCore, model: &Model) -> Result<(), String> {

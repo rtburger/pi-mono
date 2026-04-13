@@ -9,6 +9,7 @@ mod footer;
 mod interactive_binding;
 mod keybinding_hints;
 mod keybindings;
+mod model_selector;
 mod pending_messages;
 mod skill_invocation;
 mod startup_header;
@@ -37,6 +38,7 @@ pub use keybindings::{
     DEFAULT_APP_KEYBINDINGS, KeybindingsManager, MigrateKeybindingsConfigResult,
     migrate_keybindings_config, migrate_keybindings_file,
 };
+pub use model_selector::ModelSelectorComponent;
 pub use pending_messages::PendingMessagesComponent;
 pub use pi_tui::{KeyId, KeybindingConflict, KeybindingDefinition, KeybindingsConfig};
 pub use skill_invocation::SkillInvocationMessageComponent;

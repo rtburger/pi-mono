@@ -1,12 +1,13 @@
 use crate::{
     AssistantMessageComponent, BuiltInHeaderComponent, ClipboardImageSource, CustomEditor,
     DEFAULT_HIDDEN_THINKING_LABEL, ExtensionEditorComponent, FooterComponent, FooterState,
-    FooterStateHandle, KeyHintStyler, KeybindingsManager, PendingMessagesComponent,
-    StartupHeaderStyler, ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult,
-    TranscriptComponent, UserMessageComponent, paste_clipboard_image_into_shell,
+    FooterStateHandle, KeyHintStyler, KeybindingsManager, ModelSelectorComponent,
+    PendingMessagesComponent, StartupHeaderStyler, ToolExecutionComponent, ToolExecutionOptions,
+    ToolExecutionResult, TranscriptComponent, UserMessageComponent,
+    paste_clipboard_image_into_shell,
 };
 use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
-use pi_events::{AssistantMessage, UserContent};
+use pi_events::{AssistantMessage, Model, UserContent};
 use pi_tui::{
     AutocompleteProvider, Component, ComponentId, EditorCursor, RenderHandle, matches_key,
     truncate_to_width,
@@ -23,7 +24,8 @@ use std::{
 
 type ActionCallback = Box<dyn FnMut() + Send + 'static>;
 type ShortcutCallback = Box<dyn FnMut(String) -> bool + Send + 'static>;
-type SubmitCallback = Box<dyn FnMut(String) + Send + 'static>;
+type SubmitCallback = Box<dyn FnMut(&mut StartupShellComponent, String) + Send + 'static>;
+type ModelSelectorSelectCallback = Box<dyn FnMut(Model) + Send + 'static>;
 
 const CLEAR_EXIT_WINDOW: Duration = Duration::from_millis(500);
 const PROMPT_EXTENSION_EDITOR_TITLE: &str = "Edit message";
@@ -122,6 +124,11 @@ enum ShellUpdate {
 
 enum ExtensionEditorEvent {
     Submit(String),
+    Cancel,
+}
+
+enum ModelSelectorEvent {
+    Select(Model),
     Cancel,
 }
 
@@ -232,6 +239,10 @@ pub struct StartupShellComponent {
     extension_editor_events: Arc<Mutex<VecDeque<ExtensionEditorEvent>>>,
     extension_editor_on_submit: Option<SubmitCallback>,
     extension_editor_on_cancel: Option<ActionCallback>,
+    model_selector: Option<ModelSelectorComponent>,
+    model_selector_events: Arc<Mutex<VecDeque<ModelSelectorEvent>>>,
+    model_selector_on_select: Option<ModelSelectorSelectCallback>,
+    model_selector_on_cancel: Option<ActionCallback>,
     restore_prompt_from_extension_editor: bool,
     focused: bool,
 }
@@ -310,9 +321,23 @@ impl StartupShellComponent {
             extension_editor_events: Arc::new(Mutex::new(VecDeque::new())),
             extension_editor_on_submit: None,
             extension_editor_on_cancel: None,
+            model_selector: None,
+            model_selector_events: Arc::new(Mutex::new(VecDeque::new())),
+            model_selector_on_select: None,
+            model_selector_on_cancel: None,
             restore_prompt_from_extension_editor: false,
             focused: false,
         }
+    }
+
+    fn active_prompt_component_height_for_width(&self, width: usize) -> usize {
+        if let Some(model_selector) = &self.model_selector {
+            return model_selector.render(width).len();
+        }
+        if let Some(extension_editor) = &self.extension_editor {
+            return extension_editor.render(width).len();
+        }
+        self.input.render(width).len()
     }
 
     fn transcript_viewport_height_for_width(&self, width: usize) -> Option<usize> {
@@ -320,7 +345,7 @@ impl StartupShellComponent {
         let occupied_height = self.header.render(width).len()
             + self.pending_messages.render(width).len()
             + self.render_status(width).len()
-            + self.input.render(width).len()
+            + self.active_prompt_component_height_for_width(width)
             + self.footer.render(width).len();
         Some(total_height.saturating_sub(occupied_height))
     }
@@ -419,7 +444,7 @@ impl StartupShellComponent {
         if let Some(callback) = &mut on_submit {
             self.clear_input();
             self.last_clear_action.set(None);
-            callback(value);
+            callback(self, value);
         }
         self.on_submit = on_submit;
     }
@@ -446,12 +471,42 @@ impl StartupShellComponent {
                         self.set_input_cursor(value.len());
                     }
                     if let Some(callback) = &mut on_submit {
-                        callback(value);
+                        callback(self, value);
                     }
                 }
                 ExtensionEditorEvent::Cancel => {
                     let mut on_cancel = self.extension_editor_on_cancel.take();
                     self.hide_extension_editor();
+                    if let Some(callback) = &mut on_cancel {
+                        callback();
+                    }
+                }
+            }
+        }
+    }
+
+    fn drain_model_selector_events(&mut self) {
+        loop {
+            let event = self
+                .model_selector_events
+                .lock()
+                .expect("model selector events mutex poisoned")
+                .pop_front();
+            let Some(event) = event else {
+                break;
+            };
+
+            match event {
+                ModelSelectorEvent::Select(model) => {
+                    let mut on_select = self.model_selector_on_select.take();
+                    self.hide_model_selector();
+                    if let Some(callback) = &mut on_select {
+                        callback(model);
+                    }
+                }
+                ModelSelectorEvent::Cancel => {
+                    let mut on_cancel = self.model_selector_on_cancel.take();
+                    self.hide_model_selector();
                     if let Some(callback) = &mut on_cancel {
                         callback();
                     }
@@ -576,9 +631,16 @@ impl StartupShellComponent {
         component
     }
 
-    pub fn set_on_submit<F>(&mut self, on_submit: F)
+    pub fn set_on_submit<F>(&mut self, mut on_submit: F)
     where
         F: FnMut(String) + Send + 'static,
+    {
+        self.set_on_submit_with_shell(move |_shell, value| on_submit(value));
+    }
+
+    pub fn set_on_submit_with_shell<F>(&mut self, on_submit: F)
+    where
+        F: FnMut(&mut StartupShellComponent, String) + Send + 'static,
     {
         self.on_submit = Some(Box::new(on_submit));
     }
@@ -708,12 +770,13 @@ impl StartupShellComponent {
         &mut self,
         title: impl Into<String>,
         prefill: Option<&str>,
-        on_submit: F,
+        mut on_submit: F,
         on_cancel: G,
     ) where
         F: FnMut(String) + Send + 'static,
         G: FnMut() + Send + 'static,
     {
+        self.hide_model_selector();
         self.hide_extension_editor();
 
         let mut editor = ExtensionEditorComponent::new(&self.keybindings, title, prefill);
@@ -740,7 +803,7 @@ impl StartupShellComponent {
         self.input.set_focused(false);
         editor.set_focused(self.focused);
         self.extension_editor = Some(editor);
-        self.extension_editor_on_submit = Some(Box::new(on_submit));
+        self.extension_editor_on_submit = Some(Box::new(move |_shell, value| on_submit(value)));
         self.extension_editor_on_cancel = Some(Box::new(on_cancel));
         self.restore_prompt_from_extension_editor = false;
     }
@@ -750,11 +813,67 @@ impl StartupShellComponent {
         self.extension_editor_on_submit = None;
         self.extension_editor_on_cancel = None;
         self.restore_prompt_from_extension_editor = false;
-        self.input.set_focused(self.focused);
+        self.input
+            .set_focused(self.focused && self.model_selector.is_none());
     }
 
     pub fn is_showing_extension_editor(&self) -> bool {
         self.extension_editor.is_some()
+    }
+
+    pub fn show_model_selector<F, G>(
+        &mut self,
+        current_model: Option<Model>,
+        models: Vec<Model>,
+        initial_search: Option<&str>,
+        on_select: F,
+        on_cancel: G,
+    ) where
+        F: FnMut(Model) + Send + 'static,
+        G: FnMut() + Send + 'static,
+    {
+        self.hide_extension_editor();
+        self.hide_model_selector();
+
+        let mut selector =
+            ModelSelectorComponent::new(&self.keybindings, current_model, models, initial_search);
+        let events = Arc::clone(&self.model_selector_events);
+        selector.set_on_select(move |model| {
+            events
+                .lock()
+                .expect("model selector events mutex poisoned")
+                .push_back(ModelSelectorEvent::Select(model));
+        });
+
+        let events = Arc::clone(&self.model_selector_events);
+        selector.set_on_cancel(move || {
+            events
+                .lock()
+                .expect("model selector events mutex poisoned")
+                .push_back(ModelSelectorEvent::Cancel);
+        });
+
+        if let Some((width, height)) = self.viewport_size.get() {
+            selector.set_viewport_size(width, height);
+        }
+
+        self.input.set_focused(false);
+        selector.set_focused(self.focused);
+        self.model_selector = Some(selector);
+        self.model_selector_on_select = Some(Box::new(on_select));
+        self.model_selector_on_cancel = Some(Box::new(on_cancel));
+    }
+
+    pub fn hide_model_selector(&mut self) {
+        self.model_selector = None;
+        self.model_selector_on_select = None;
+        self.model_selector_on_cancel = None;
+        self.input
+            .set_focused(self.focused && self.extension_editor.is_none());
+    }
+
+    pub fn is_showing_model_selector(&self) -> bool {
+        self.model_selector.is_some()
     }
 
     pub fn add_transcript_item(&mut self, component: Box<dyn Component>) -> ComponentId {
@@ -901,7 +1020,9 @@ impl Component for StartupShellComponent {
         self.drain_pending_updates();
         let header_lines = self.header.render(width);
         let pending_lines = self.pending_messages.render(width);
-        let input_lines = if let Some(extension_editor) = &self.extension_editor {
+        let input_lines = if let Some(model_selector) = &self.model_selector {
+            model_selector.render(width)
+        } else if let Some(extension_editor) = &self.extension_editor {
             extension_editor.render(width)
         } else {
             self.input.render(width)
@@ -928,7 +1049,9 @@ impl Component for StartupShellComponent {
         self.header.invalidate();
         self.transcript.borrow_mut().invalidate();
         self.pending_messages.invalidate();
-        if let Some(extension_editor) = &mut self.extension_editor {
+        if let Some(model_selector) = &mut self.model_selector {
+            model_selector.invalidate();
+        } else if let Some(extension_editor) = &mut self.extension_editor {
             extension_editor.invalidate();
         } else {
             self.input.invalidate();
@@ -937,6 +1060,12 @@ impl Component for StartupShellComponent {
     }
 
     fn handle_input(&mut self, data: &str) {
+        if let Some(model_selector) = &mut self.model_selector {
+            model_selector.handle_input(data);
+            self.drain_model_selector_events();
+            return;
+        }
+
         if let Some(extension_editor) = &mut self.extension_editor {
             extension_editor.handle_input(data);
             self.drain_extension_editor_events();
@@ -1053,8 +1182,12 @@ impl Component for StartupShellComponent {
 
     fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
-        self.input
-            .set_focused(focused && self.extension_editor.is_none());
+        self.input.set_focused(
+            focused && self.extension_editor.is_none() && self.model_selector.is_none(),
+        );
+        if let Some(model_selector) = &mut self.model_selector {
+            model_selector.set_focused(focused);
+        }
         if let Some(extension_editor) = &mut self.extension_editor {
             extension_editor.set_focused(focused);
         }
@@ -1066,6 +1199,9 @@ impl Component for StartupShellComponent {
         self.transcript.borrow().set_viewport_size(width, height);
         self.pending_messages.set_viewport_size(width, height);
         self.input.set_viewport_size(width, height);
+        if let Some(model_selector) = &self.model_selector {
+            model_selector.set_viewport_size(width, height);
+        }
         if let Some(extension_editor) = &self.extension_editor {
             extension_editor.set_viewport_size(width, height);
         }
