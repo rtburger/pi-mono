@@ -782,6 +782,30 @@ fn install_interactive_submit_handler(
     footer_state_handle: FooterStateHandle,
     exit_requested: Arc<AtomicBool>,
 ) {
+    let action_core = core.clone();
+    let action_model_registry = Arc::clone(&model_registry);
+    let action_scoped_models = scoped_models.clone();
+    let action_status_handle = status_handle.clone();
+    let action_footer_state_handle = footer_state_handle.clone();
+    shell.on_action_with_shell("app.model.select", move |shell| {
+        if action_core.state().is_streaming {
+            action_status_handle.set_message(
+                "Model switching while a request is running is not supported in the Rust interactive CLI yet.",
+            );
+            return;
+        }
+
+        show_interactive_model_selector(
+            shell,
+            &action_core,
+            action_model_registry.as_ref(),
+            &action_scoped_models,
+            &action_status_handle,
+            &action_footer_state_handle,
+            None,
+        );
+    });
+
     shell.set_on_submit_with_shell(move |shell, value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {

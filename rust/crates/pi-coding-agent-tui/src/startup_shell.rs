@@ -23,6 +23,7 @@ use std::{
 };
 
 type ActionCallback = Box<dyn FnMut() + Send + 'static>;
+type RegisteredActionCallback = Box<dyn FnMut(&mut StartupShellComponent) + Send + 'static>;
 type ShortcutCallback = Box<dyn FnMut(String) -> bool + Send + 'static>;
 type SubmitCallback = Box<dyn FnMut(&mut StartupShellComponent, String) + Send + 'static>;
 type ModelSelectorSelectCallback = Box<dyn FnMut(Model) + Send + 'static>;
@@ -228,7 +229,7 @@ pub struct StartupShellComponent {
     on_exit: Option<ActionCallback>,
     on_paste_image: Option<ActionCallback>,
     on_extension_shortcut: Option<ShortcutCallback>,
-    action_handlers: Vec<(String, ActionCallback)>,
+    action_handlers: Vec<(String, RegisteredActionCallback)>,
     viewport_size: Cell<Option<(usize, usize)>>,
     last_clear_action: Cell<Option<Instant>>,
     clipboard_image_paste: Option<ClipboardImagePasteConfig>,
@@ -380,15 +381,18 @@ impl StartupShellComponent {
     }
 
     fn invoke_registered_action(&mut self, action: &str) -> bool {
-        if let Some((_, handler)) = self
+        let Some(index) = self
             .action_handlers
-            .iter_mut()
-            .find(|(candidate, _)| candidate == action)
-        {
-            handler();
-            return true;
-        }
-        false
+            .iter()
+            .position(|(candidate, _)| candidate == action)
+        else {
+            return false;
+        };
+
+        let (action_name, mut handler) = self.action_handlers.remove(index);
+        handler(self);
+        self.action_handlers.insert(index, (action_name, handler));
+        true
     }
 
     fn handle_default_clear_action(&mut self) {
@@ -707,9 +711,16 @@ impl StartupShellComponent {
         self.on_extension_shortcut = None;
     }
 
-    pub fn on_action<F>(&mut self, action: impl Into<String>, handler: F)
+    pub fn on_action<F>(&mut self, action: impl Into<String>, mut handler: F)
     where
         F: FnMut() + Send + 'static,
+    {
+        self.on_action_with_shell(action, move |_shell| handler());
+    }
+
+    pub fn on_action_with_shell<F>(&mut self, action: impl Into<String>, handler: F)
+    where
+        F: FnMut(&mut StartupShellComponent) + Send + 'static,
     {
         let action = action.into();
         if let Some((_, existing_handler)) = self

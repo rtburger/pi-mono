@@ -1109,6 +1109,41 @@ fn startup_shell_can_run_registered_app_action_handlers() {
 }
 
 #[test]
+fn startup_shell_shell_aware_action_handler_can_open_model_selector() {
+    let keybindings = KeybindingsManager::new(config(&[("app.model.select", &["ctrl+x"])]), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_input_value("hidden prompt");
+    shell.on_action_with_shell("app.model.select", |shell| {
+        shell.show_model_selector(
+            Some(model("alpha", "openai", true)),
+            vec![
+                model("alpha", "openai", true),
+                model("beta", "anthropic", true),
+            ],
+            None,
+            |_| {},
+            || {},
+        );
+    });
+
+    shell.handle_input("\x18");
+
+    assert!(shell.is_showing_model_selector());
+    assert_eq!(shell.input_value(), "hidden prompt");
+    let lines = shell.render(60);
+    assert!(lines.iter().any(|line| line.contains("Select model")));
+    assert!(!lines.iter().any(|line| line.contains("hidden prompt")));
+}
+
+#[test]
 fn startup_shell_follow_up_binding_submits_current_input_by_default() {
     let submitted = Arc::new(Mutex::new(None::<String>));
     let submitted_for_callback = Arc::clone(&submitted);
