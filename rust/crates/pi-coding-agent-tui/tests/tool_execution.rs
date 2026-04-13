@@ -735,11 +735,8 @@ fn startup_shell_can_render_tool_execution_component_in_transcript() {
         .iter()
         .position(|line| line.contains("Steering: queued message"))
         .expect("pending message should render");
-    let prompt_line = plain_lines
-        .iter()
-        .position(|line| line.starts_with("> "))
-        .expect("prompt should render");
+    let prompt_start = plain_lines.len().saturating_sub(3);
 
     assert!(tool_line < pending_line);
-    assert!(pending_line < prompt_line);
+    assert!(pending_line < prompt_start);
 }

@@ -265,7 +265,7 @@ fn startup_shell_renders_header_above_prompt() {
     let lines = tui.render_for_size(40, 40);
 
     assert!(lines.iter().any(|line| line.contains("Pi v1.2.3")));
-    assert!(lines.last().is_some_and(|line| line.starts_with("> ")));
+    assert!(lines.len() >= 4);
 }
 
 #[test]
@@ -287,8 +287,7 @@ fn quiet_startup_shell_without_changelog_renders_prompt_on_first_line() {
 
     let lines = tui.render_for_size(40, 10);
 
-    assert_eq!(lines.len(), 1);
-    assert!(lines[0].starts_with("> "));
+    assert_eq!(lines.len(), 3);
 }
 
 #[test]
@@ -320,7 +319,7 @@ fn startup_shell_routes_input_and_submit_through_tui() {
     tui.handle_input("i").expect("input should be handled");
 
     let lines = tui.render_for_size(20, 10);
-    assert!(lines[0].contains("hi"));
+    assert!(lines.iter().any(|line| line.contains("hi")));
 
     tui.handle_input("\r").expect("submit should be handled");
 
@@ -330,6 +329,57 @@ fn startup_shell_routes_input_and_submit_through_tui() {
             .expect("submitted mutex poisoned")
             .as_deref(),
         Some("hi")
+    );
+}
+
+#[test]
+fn startup_shell_supports_multiline_prompt_editing_via_custom_editor_bindings() {
+    let submitted = Arc::new(Mutex::new(None::<String>));
+    let submitted_for_callback = Arc::clone(&submitted);
+
+    let keybindings = KeybindingsManager::new(
+        config(&[
+            ("tui.input.newLine", &["ctrl+x"]),
+            ("tui.input.submit", &["ctrl+s"]),
+        ]),
+        None,
+    );
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_on_submit(move |value| {
+        *submitted_for_callback
+            .lock()
+            .expect("submitted mutex poisoned") = Some(value);
+    });
+
+    shell.handle_input("h");
+    shell.handle_input("i");
+    shell.handle_input("\x18");
+    shell.handle_input("t");
+    shell.handle_input("h");
+    shell.handle_input("e");
+    shell.handle_input("r");
+    shell.handle_input("e");
+
+    assert_eq!(shell.input_value(), "hi\nthere");
+    let lines = shell.render(20);
+    assert!(lines.iter().any(|line| line.contains("hi")));
+    assert!(lines.iter().any(|line| line.contains("there")));
+
+    shell.handle_input("\x13");
+    assert_eq!(
+        submitted
+            .lock()
+            .expect("submitted mutex poisoned")
+            .as_deref(),
+        Some("hi\nthere")
     );
 }
 
@@ -966,15 +1016,12 @@ fn startup_shell_renders_transcript_before_pending_messages_and_prompt() {
         .iter()
         .position(|line| line.contains("Follow-up: queued follow-up message"))
         .expect("follow-up line should render");
-    let prompt = lines
-        .iter()
-        .position(|line| line.starts_with("> "))
-        .expect("prompt should render");
+    let prompt_start = lines.len().saturating_sub(3);
 
     assert!(first_transcript < second_transcript);
     assert!(second_transcript < steering);
     assert!(steering < follow_up);
-    assert!(follow_up < prompt);
+    assert!(follow_up < prompt_start);
 }
 
 #[test]
@@ -1009,13 +1056,10 @@ fn startup_shell_renders_status_message_between_pending_messages_and_prompt() {
         .iter()
         .position(|line| line.contains("Working..."))
         .expect("status line should render");
-    let prompt = lines
-        .iter()
-        .position(|line| line.starts_with("> "))
-        .expect("prompt should render");
+    let prompt_start = lines.len().saturating_sub(3);
 
     assert!(pending < status);
-    assert!(status < prompt);
+    assert!(status < prompt_start);
 }
 
 #[test]
@@ -1039,10 +1083,14 @@ fn startup_shell_budgets_transcript_height_for_status_line() {
     let lines = shell.render(24);
 
     assert_eq!(lines.len(), 4);
-    assert!(lines[0].contains("line 5"));
-    assert!(lines[1].contains("line 6"));
-    assert!(lines[2].contains("Working..."));
-    assert!(lines[3].starts_with("> "));
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("line 5") || line.contains("line 6"))
+    );
+    assert!(lines[0].contains("Working..."));
+    assert!(lines[1].chars().all(|character| character == '─'));
+    assert!(lines[3].chars().all(|character| character == '─'));
 }
 
 #[test]
@@ -1060,15 +1108,17 @@ fn startup_shell_truncates_and_clears_status_message() {
     shell.set_status_message("this is a very long working message that must be truncated");
 
     let lines = shell.render(24);
-    assert_eq!(lines.len(), 2);
+    assert_eq!(lines.len(), 4);
     assert!(visible_width(&lines[0]) <= 24);
     assert!(lines[0].contains("..."));
-    assert!(lines[1].starts_with("> "));
+    assert!(lines[1].chars().all(|character| character == '─'));
+    assert!(lines[3].chars().all(|character| character == '─'));
 
     shell.clear_status_message();
     let cleared = shell.render(24);
-    assert_eq!(cleared.len(), 1);
-    assert!(cleared[0].starts_with("> "));
+    assert_eq!(cleared.len(), 3);
+    assert!(cleared[0].chars().all(|character| character == '─'));
+    assert!(cleared[2].chars().all(|character| character == '─'));
 }
 
 #[test]
@@ -1096,7 +1146,7 @@ fn startup_shell_status_handle_updates_shell_after_component_is_moved() {
     status_handle.clear();
     let cleared = tui.render_for_size(24, 10);
     assert!(!cleared.iter().any(|line| line.contains("Working...")));
-    assert!(cleared.iter().any(|line| line.starts_with("> ")));
+    assert_eq!(cleared.len(), 3);
 }
 
 #[test]
@@ -1167,10 +1217,9 @@ fn startup_shell_clips_transcript_to_remaining_viewport_height() {
     let lines = shell.render(24);
 
     assert_eq!(lines.len(), 4);
-    assert!(lines[0].contains("line 4"));
-    assert!(lines[1].contains("line 5"));
-    assert!(lines[2].contains("line 6"));
-    assert!(lines[3].starts_with("> "));
+    assert!(lines[0].contains("line 6"));
+    assert!(lines[1].chars().all(|character| character == '─'));
+    assert!(lines[3].chars().all(|character| character == '─'));
 }
 
 #[test]
@@ -1193,26 +1242,23 @@ fn startup_shell_can_scroll_transcript_without_hiding_prompt() {
 
     let scrolled_up = shell.render(24);
     assert_eq!(shell.transcript_scroll_offset(), 2);
-    assert!(scrolled_up[0].contains("line 2"));
-    assert!(scrolled_up[1].contains("line 3"));
-    assert!(scrolled_up[2].contains("line 4"));
-    assert!(scrolled_up[3].starts_with("> "));
+    assert!(scrolled_up[0].contains("line 4"));
+    assert!(scrolled_up[1].chars().all(|character| character == '─'));
+    assert!(scrolled_up[3].chars().all(|character| character == '─'));
 
     shell.scroll_transcript_down(1);
     let scrolled_down = shell.render(24);
     assert_eq!(shell.transcript_scroll_offset(), 1);
-    assert!(scrolled_down[0].contains("line 3"));
-    assert!(scrolled_down[1].contains("line 4"));
-    assert!(scrolled_down[2].contains("line 5"));
-    assert!(scrolled_down[3].starts_with("> "));
+    assert!(scrolled_down[0].contains("line 5"));
+    assert!(scrolled_down[1].chars().all(|character| character == '─'));
+    assert!(scrolled_down[3].chars().all(|character| character == '─'));
 
     shell.scroll_transcript_to_bottom();
     let bottom = shell.render(24);
     assert_eq!(shell.transcript_scroll_offset(), 0);
-    assert!(bottom[0].contains("line 4"));
-    assert!(bottom[1].contains("line 5"));
-    assert!(bottom[2].contains("line 6"));
-    assert!(bottom[3].starts_with("> "));
+    assert!(bottom[0].contains("line 6"));
+    assert!(bottom[1].chars().all(|character| character == '─'));
+    assert!(bottom[3].chars().all(|character| character == '─'));
 }
 
 #[test]
@@ -1234,30 +1280,27 @@ fn startup_shell_page_keys_scroll_transcript_by_visible_page() {
     shell.set_viewport_size(24, 5);
 
     let bottom = shell.render(24);
-    assert!(bottom[0].contains("line 5"));
-    assert!(bottom[1].contains("line 6"));
-    assert!(bottom[2].contains("line 7"));
-    assert!(bottom[3].contains("line 8"));
-    assert!(bottom[4].starts_with("> "));
+    assert!(bottom[0].contains("line 7"));
+    assert!(bottom[1].contains("line 8"));
+    assert!(bottom[2].chars().all(|character| character == '─'));
+    assert!(bottom[4].chars().all(|character| character == '─'));
 
     shell.handle_input("\x1b[5~");
     let page_up = shell.render(24);
-    assert_eq!(shell.transcript_scroll_offset(), 4);
-    assert!(page_up[0].contains("line 1"));
-    assert!(page_up[1].contains("line 2"));
-    assert!(page_up[2].contains("line 3"));
-    assert!(page_up[3].contains("line 4"));
-    assert!(page_up[4].starts_with("> "));
+    assert_eq!(shell.transcript_scroll_offset(), 2);
+    assert!(page_up[0].contains("line 5"));
+    assert!(page_up[1].contains("line 6"));
+    assert!(page_up[2].chars().all(|character| character == '─'));
+    assert!(page_up[4].chars().all(|character| character == '─'));
     assert_eq!(shell.input_value(), "draft prompt");
 
     shell.handle_input("\x1b[6~");
     let page_down = shell.render(24);
     assert_eq!(shell.transcript_scroll_offset(), 0);
-    assert!(page_down[0].contains("line 5"));
-    assert!(page_down[1].contains("line 6"));
-    assert!(page_down[2].contains("line 7"));
-    assert!(page_down[3].contains("line 8"));
-    assert!(page_down[4].starts_with("> "));
+    assert!(page_down[0].contains("line 7"));
+    assert!(page_down[1].contains("line 8"));
+    assert!(page_down[2].chars().all(|character| character == '─'));
+    assert!(page_down[4].chars().all(|character| character == '─'));
 }
 
 #[test]
@@ -1285,7 +1328,7 @@ fn startup_shell_page_keys_use_configured_keybindings() {
     let _ = shell.render(24);
 
     shell.handle_input("\x1bp");
-    assert_eq!(shell.transcript_scroll_offset(), 4);
+    assert_eq!(shell.transcript_scroll_offset(), 2);
 
     shell.handle_input("\x1bn");
     assert_eq!(shell.transcript_scroll_offset(), 0);
@@ -1320,9 +1363,13 @@ fn startup_shell_budgets_transcript_height_for_footer_lines() {
     let lines = shell.render(40);
 
     assert_eq!(lines.len(), 5);
-    assert!(lines[0].contains("line 3"));
-    assert!(lines[1].contains("line 4"));
-    assert!(lines[2].starts_with("> "));
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("line 3") || line.contains("line 4"))
+    );
+    assert!(lines[0].chars().all(|character| character == '─'));
+    assert!(lines[2].chars().all(|character| character == '─'));
     assert!(lines[3].contains("/tmp/project (main)"));
     assert!(lines[4].contains("gpt-5 • high"));
 }
@@ -1492,19 +1539,16 @@ fn startup_shell_preserves_scrolled_transcript_view_when_new_items_arrive() {
     let _ = shell.render(24);
     shell.scroll_transcript_up(2);
     let before = shell.render(24);
-    assert!(before[0].contains("line 2"));
-    assert!(before[1].contains("line 3"));
-    assert!(before[2].contains("line 4"));
+    assert!(before[0].contains("line 4"));
 
     shell.add_transcript_item(Box::new(Text::new("line 7", 0, 0)));
     let after = shell.render(24);
 
     assert_eq!(shell.transcript_scroll_offset(), 3);
-    assert!(after[0].contains("line 2"));
-    assert!(after[1].contains("line 3"));
-    assert!(after[2].contains("line 4"));
+    assert!(after[0].contains("line 4"));
     assert!(!after.iter().any(|line| line.contains("line 7")));
-    assert!(after[3].starts_with("> "));
+    assert!(after[1].chars().all(|character| character == '─'));
+    assert!(after[3].chars().all(|character| character == '─'));
 }
 
 #[test]
@@ -1566,6 +1610,5 @@ fn startup_shell_truncates_pending_messages_and_can_remove_or_clear_transcript_i
     assert!(tui.set_focus_child(shell_id));
 
     let lines = tui.render_for_size(24, 10);
-    assert_eq!(lines.len(), 1);
-    assert!(lines[0].starts_with("> "));
+    assert_eq!(lines.len(), 3);
 }

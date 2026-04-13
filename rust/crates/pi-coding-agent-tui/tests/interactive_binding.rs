@@ -174,7 +174,7 @@ async fn interactive_binding_submits_prompt_and_renders_user_and_assistant_messa
     let lines = tui.render_current();
     assert!(lines.iter().any(|line| line.contains("hi")));
     assert!(lines.iter().any(|line| line.contains("Hello from faux")));
-    assert!(lines.iter().any(|line| line.starts_with("> ")));
+    assert!(lines.len() >= 3);
     assert!(inspector.write_count() > writes_before);
 
     drop(binding);
@@ -258,7 +258,7 @@ async fn interactive_shell_external_editor_action_mounts_extension_editor_and_re
     assert!(
         restored_prompt_lines
             .iter()
-            .any(|line| line.contains("> hi!"))
+            .any(|line| line.contains("hi!"))
     );
 
     tui.handle_input("\r")

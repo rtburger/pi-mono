@@ -135,6 +135,18 @@ fn history_navigation_supports_multiline_entries() {
 }
 
 #[test]
+fn public_set_cursor_clamps_to_existing_line_and_column() {
+    let mut editor = Editor::new();
+    editor.set_text("alpha\nbeta");
+
+    editor.set_cursor(EditorCursor { line: 99, col: 99 });
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 1, col: 4 });
+
+    editor.set_cursor(EditorCursor { line: 0, col: 2 });
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 2 });
+}
+
+#[test]
 fn word_wrap_line_preserves_boundary_whitespace_rules() {
     let chunks = word_wrap_line("hello world test", 11);
     assert_eq!(chunks.len(), 2);

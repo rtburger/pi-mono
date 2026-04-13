@@ -1,5 +1,5 @@
 use crate::KeybindingsManager;
-use pi_tui::{Component, Editor, EditorOptions, matches_key};
+use pi_tui::{Component, Editor, EditorCursor, EditorOptions, matches_key};
 use std::ops::Deref;
 
 type ActionCallback = Box<dyn FnMut() + Send + 'static>;
@@ -46,6 +46,10 @@ impl CustomEditor {
 
     pub fn insert_text_at_cursor(&mut self, text: impl AsRef<str>) {
         self.editor.insert_text_at_cursor(text);
+    }
+
+    pub fn set_cursor(&mut self, cursor: EditorCursor) {
+        self.editor.set_cursor(cursor);
     }
 
     pub fn add_to_history(&mut self, text: impl AsRef<str>) {

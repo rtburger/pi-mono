@@ -193,6 +193,15 @@ impl Editor {
         }
     }
 
+    pub fn set_cursor(&mut self, cursor: EditorCursor) {
+        let line = cursor.line.min(self.lines.len().saturating_sub(1));
+        let max_col = self.lines.get(line).map(String::len).unwrap_or(0);
+        self.cursor_line = line;
+        self.cursor_col = cursor.col.min(max_col);
+        self.preferred_visual_col = None;
+        self.last_action = None;
+    }
+
     pub fn insert_text_at_cursor(&mut self, text: impl AsRef<str>) {
         let text = text.as_ref();
         if text.is_empty() {

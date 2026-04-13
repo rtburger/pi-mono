@@ -1,5 +1,5 @@
 use crate::{
-    AssistantMessageComponent, BuiltInHeaderComponent, ClipboardImageSource,
+    AssistantMessageComponent, BuiltInHeaderComponent, ClipboardImageSource, CustomEditor,
     DEFAULT_HIDDEN_THINKING_LABEL, ExtensionEditorComponent, FooterComponent, FooterState,
     KeyHintStyler, KeybindingsManager, PendingMessagesComponent, StartupHeaderStyler,
     ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult, TranscriptComponent,
@@ -7,12 +7,11 @@ use crate::{
 };
 use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
 use pi_events::{AssistantMessage, UserContent};
-use pi_tui::{Component, ComponentId, Input, RenderHandle, matches_key, truncate_to_width};
+use pi_tui::{Component, ComponentId, EditorCursor, RenderHandle, matches_key, truncate_to_width};
 use serde_json::Value;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
-    ops::Deref,
     path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex},
@@ -210,7 +209,7 @@ pub struct StartupShellComponent {
     header: BuiltInHeaderComponent,
     transcript: RefCell<TranscriptComponent>,
     pending_messages: PendingMessagesComponent,
-    input: Input,
+    input: CustomEditor,
     footer: FooterComponent,
     keybindings: KeybindingsManager,
     status_message: Arc<Mutex<Option<String>>>,
@@ -288,7 +287,7 @@ impl StartupShellComponent {
             ),
             transcript: RefCell::new(TranscriptComponent::new()),
             pending_messages: PendingMessagesComponent::new(keybindings),
-            input: Input::with_keybindings(keybindings.deref().clone()),
+            input: CustomEditor::new(keybindings),
             footer: FooterComponent::default(),
             keybindings: keybindings.clone(),
             status_message: Arc::new(Mutex::new(None)),
@@ -665,11 +664,11 @@ impl StartupShellComponent {
     }
 
     pub fn input_value(&self) -> String {
-        self.input.value().to_owned()
+        self.input.get_text()
     }
 
     pub fn set_input_value(&mut self, value: impl Into<String>) {
-        self.input.set_value(value);
+        self.input.set_text(value.into());
     }
 
     pub fn insert_input_text_at_cursor(&mut self, text: &str) {
@@ -677,11 +676,13 @@ impl StartupShellComponent {
     }
 
     pub fn set_input_cursor(&mut self, cursor: usize) {
-        self.input.set_cursor(cursor);
+        let text = self.input.get_text();
+        self.input
+            .set_cursor(editor_cursor_from_offset(&text, cursor));
     }
 
     pub fn clear_input(&mut self) {
-        self.input.clear();
+        self.input.set_text("");
     }
 
     pub fn show_extension_editor<F, G>(
@@ -952,13 +953,17 @@ impl Component for StartupShellComponent {
         }
 
         if self.matches_binding(data, "app.interrupt") {
-            if let Some(on_escape) = &mut self.on_escape {
-                on_escape();
-                return;
+            if !self.input.is_showing_autocomplete() {
+                if let Some(on_escape) = &mut self.on_escape {
+                    on_escape();
+                    return;
+                }
+                if self.invoke_registered_action("app.interrupt") {
+                    return;
+                }
             }
-            if self.invoke_registered_action("app.interrupt") {
-                return;
-            }
+            self.input.handle_input(data);
+            return;
         }
 
         if self.matches_binding(data, "app.exit") && self.input_value().is_empty() {
@@ -1031,6 +1036,30 @@ impl Component for StartupShellComponent {
             extension_editor.set_viewport_size(width, height);
         }
         self.footer.set_viewport_size(width, height);
+    }
+}
+
+fn editor_cursor_from_offset(text: &str, cursor: usize) -> EditorCursor {
+    let clamped = cursor.min(text.len());
+    let mut remaining = clamped;
+
+    for (line_index, line) in text.split('\n').enumerate() {
+        if remaining <= line.len() {
+            return EditorCursor {
+                line: line_index,
+                col: remaining,
+            };
+        }
+
+        remaining = remaining.saturating_sub(line.len() + 1);
+    }
+
+    let lines = text.split('\n').collect::<Vec<_>>();
+    let last_line = lines.len().saturating_sub(1);
+    let last_col = lines.last().map(|line| line.len()).unwrap_or(0);
+    EditorCursor {
+        line: last_line,
+        col: last_col,
     }
 }
 

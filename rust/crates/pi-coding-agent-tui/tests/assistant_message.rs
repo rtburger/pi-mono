@@ -273,11 +273,8 @@ fn startup_shell_can_render_assistant_message_component_in_transcript() {
         .iter()
         .position(|line| line.contains("Steering: queued message"))
         .expect("pending message should render");
-    let prompt_line = lines
-        .iter()
-        .position(|line| line.starts_with("> "))
-        .expect("prompt should render");
+    let prompt_start = lines.len().saturating_sub(3);
 
     assert!(assistant_line < pending_line);
-    assert!(pending_line < prompt_line);
+    assert!(pending_line < prompt_start);
 }
