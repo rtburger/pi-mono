@@ -174,3 +174,45 @@ fn slash_command_argument_completion_uses_registered_completer() {
     assert_eq!(suggestions.items[0].label, "beta-model");
     assert_eq!(suggestions.items[0].description.as_deref(), Some("openai"));
 }
+
+#[test]
+fn slash_command_argument_completion_applies_provider_model_value() {
+    let temp_dir = TestDir::new("pi-autocomplete-command-args-apply");
+    let provider = CombinedAutocompleteProvider::new(
+        vec![SlashCommand {
+            name: String::from("model"),
+            description: Some(String::from("Select model")),
+            argument_completions: Some(Arc::new(|prefix| {
+                if prefix != "beta" {
+                    return None;
+                }
+
+                Some(vec![AutocompleteItem {
+                    value: String::from("openai/beta-scoped-model"),
+                    label: String::from("beta-scoped-model"),
+                    description: Some(String::from("openai")),
+                }])
+            })),
+        }],
+        temp_dir.path(),
+    );
+
+    let line = String::from("/model beta");
+    let suggestions = provider
+        .get_suggestions(std::slice::from_ref(&line), 0, line.len(), false)
+        .expect("expected slash command argument suggestions");
+    let applied = provider.apply_completion(
+        std::slice::from_ref(&line),
+        0,
+        line.len(),
+        &suggestions.items[0],
+        &suggestions.prefix,
+    );
+
+    assert_eq!(
+        applied.lines,
+        vec![String::from("/model openai/beta-scoped-model")]
+    );
+    assert_eq!(applied.cursor_line, 0);
+    assert_eq!(applied.cursor_col, "/model openai/beta-scoped-model".len());
+}
