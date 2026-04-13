@@ -1468,6 +1468,34 @@ impl Editor {
                 .starts_with('/')
     }
 
+    fn is_in_attachment_context(&self) -> bool {
+        let text_before_cursor = self.current_line_before_cursor();
+        let Some(at_index) = text_before_cursor.rfind('@') else {
+            return false;
+        };
+
+        if text_before_cursor[at_index + 1..]
+            .chars()
+            .any(is_whitespace_char)
+        {
+            return false;
+        }
+
+        at_index == 0
+            || text_before_cursor[..at_index]
+                .chars()
+                .next_back()
+                .is_some_and(is_whitespace_char)
+    }
+
+    fn just_typed_attachment_prefix(&self) -> bool {
+        let Some(before_at) = self.current_line_before_cursor().strip_suffix('@') else {
+            return false;
+        };
+
+        before_at.is_empty() || matches!(before_at.chars().next_back(), Some(' ' | '\t'))
+    }
+
     fn handle_tab_completion(&mut self) {
         if self.is_in_slash_command_context()
             && !self.current_line_before_cursor().trim_start().contains(' ')
@@ -1610,8 +1638,19 @@ impl Editor {
             return;
         }
 
-        if is_slash_autocomplete_char(character) && self.is_in_slash_command_context() {
-            self.request_autocomplete(false, false);
+        if character == "@" {
+            if self.just_typed_attachment_prefix() {
+                self.request_autocomplete(false, false);
+            }
+            return;
+        }
+
+        if is_slash_autocomplete_char(character) {
+            if self.is_in_slash_command_context() {
+                self.request_autocomplete(false, false);
+            } else if self.is_in_attachment_context() {
+                self.request_autocomplete(false, false);
+            }
         }
     }
 
@@ -1622,6 +1661,8 @@ impl Editor {
         }
 
         if self.is_in_slash_command_context() {
+            self.request_autocomplete(false, false);
+        } else if self.is_in_attachment_context() {
             self.request_autocomplete(false, false);
         }
     }

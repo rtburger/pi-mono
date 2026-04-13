@@ -894,6 +894,63 @@ async fn run_interactive_command_loads_autocomplete_max_visible_setting_for_prom
 }
 
 #[tokio::test]
+async fn run_interactive_command_auto_triggers_attachment_autocomplete_in_prompt() {
+    let provider = unique_name("interactive-provider");
+    let model_id = unique_name("interactive-model");
+    let (api, _recorded) = register_recording_provider("unused");
+    let built_in_model = model(&api, &provider, &model_id);
+    let cwd = unique_temp_dir("runner-interactive-attachment-autocomplete");
+    fs::write(cwd.join("attachment-target.txt"), String::new()).unwrap();
+    let terminal = ScriptedTerminal::new(vec![
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("@")),
+        ),
+        (
+            Duration::from_millis(30),
+            TerminalAction::Input(String::from("\x7f")),
+        ),
+        (
+            Duration::from_millis(30),
+            TerminalAction::Input(String::from("\x04")),
+        ),
+    ]);
+    let inspector = terminal.clone();
+
+    let exit_code = run_interactive_command_with_terminal(
+        RunCommandOptions {
+            args: vec![
+                String::from("--provider"),
+                provider.clone(),
+                String::from("--model"),
+                model_id.clone(),
+            ],
+            stdin_is_tty: true,
+            stdin_content: None,
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![built_in_model],
+            models_json_path: None,
+            agent_dir: None,
+            cwd,
+            default_system_prompt: String::new(),
+            version: String::from("0.1.0"),
+            stream_options: StreamOptions::default(),
+        },
+        Arc::new(move || Box::new(terminal.clone())),
+    )
+    .await;
+
+    assert_eq!(exit_code, 0);
+    let output = strip_terminal_control_sequences(&inspector.output());
+    assert!(output.contains("attachment-target.txt"), "output: {output}");
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
 async fn run_interactive_command_renders_slash_command_autocomplete_for_supported_commands() {
     let provider = unique_name("interactive-provider");
     let model_id = unique_name("interactive-model");

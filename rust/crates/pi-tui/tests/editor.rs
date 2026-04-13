@@ -4,11 +4,42 @@ use pi_tui::{
     apply_completion, visible_width, word_wrap_line,
 };
 use regex::Regex;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 static PASTE_MARKER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\[paste #\d+ (\+\d+ lines|\d+ chars)\]").expect("valid paste marker regex")
 });
+
+struct TestDir {
+    path: PathBuf,
+}
+
+impl TestDir {
+    fn new(prefix: &str) -> Self {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()));
+        fs::create_dir_all(&path).expect("failed to create temp dir");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
 
 fn undo(editor: &mut Editor) {
     editor.handle_input("\x1b[45;5u");
@@ -51,6 +82,18 @@ fn slash_command_provider(commands: Vec<SlashCommand>) -> Arc<CombinedAutocomple
         commands,
         std::env::temp_dir(),
     ))
+}
+
+fn attachment_provider(base_path: &Path) -> Arc<CombinedAutocompleteProvider> {
+    Arc::new(CombinedAutocompleteProvider::new(Vec::new(), base_path))
+}
+
+fn write_file(path: impl AsRef<Path>, content: &str) {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("failed to create parent dir");
+    }
+    fs::write(path, content).expect("failed to write file");
 }
 
 #[test]
@@ -896,6 +939,75 @@ fn enter_submits_a_slash_command_name_after_accepting_completion() {
             .as_deref(),
         Some("/quit")
     );
+}
+
+#[test]
+fn typing_initial_at_auto_triggers_attachment_autocomplete_and_backspacing_hides_it() {
+    let temp_dir = TestDir::new("pi-editor-attachment");
+    write_file(temp_dir.path().join("README.md"), "readme");
+
+    let mut editor = Editor::new();
+    editor.set_autocomplete_provider(attachment_provider(temp_dir.path()));
+
+    editor.handle_input("@");
+
+    assert_eq!(editor.get_text(), "@");
+    assert!(editor.is_showing_autocomplete());
+    let lines = editor.render(40);
+    assert!(lines.iter().any(|line| line.contains("README.md")));
+
+    editor.handle_input("\x7f");
+
+    assert_eq!(editor.get_text(), "");
+    assert!(!editor.is_showing_autocomplete());
+}
+
+#[test]
+fn typing_in_prefilled_attachment_context_auto_triggers_and_updates_autocomplete() {
+    let temp_dir = TestDir::new("pi-editor-attachment-prefilled");
+    write_file(temp_dir.path().join("src/main.rs"), "fn main() {}\n");
+    write_file(temp_dir.path().join("src/other.rs"), "pub fn other() {}\n");
+
+    let mut editor = Editor::new();
+    editor.set_autocomplete_provider(attachment_provider(temp_dir.path()));
+    editor.set_text("@ma");
+
+    editor.handle_input("i");
+
+    assert_eq!(editor.get_text(), "@mai");
+    assert!(editor.is_showing_autocomplete());
+    let lines = editor.render(60);
+    assert!(
+        lines.iter().any(|line| line.contains("main.rs")),
+        "lines: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("other.rs")),
+        "lines: {lines:?}"
+    );
+}
+
+#[test]
+fn backspacing_attachment_query_retriggers_autocomplete_after_no_matches() {
+    let temp_dir = TestDir::new("pi-editor-attachment-backspace");
+    write_file(temp_dir.path().join("main.rs"), "fn main() {}\n");
+
+    let mut editor = Editor::new();
+    editor.set_autocomplete_provider(attachment_provider(temp_dir.path()));
+
+    editor.handle_input("@");
+    assert!(editor.is_showing_autocomplete());
+
+    editor.handle_input("z");
+    assert_eq!(editor.get_text(), "@z");
+    assert!(!editor.is_showing_autocomplete());
+
+    editor.handle_input("\x7f");
+
+    assert_eq!(editor.get_text(), "@");
+    assert!(editor.is_showing_autocomplete());
+    let lines = editor.render(40);
+    assert!(lines.iter().any(|line| line.contains("main.rs")));
 }
 
 #[test]
