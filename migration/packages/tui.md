@@ -2035,3 +2035,81 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
 - continue with the next editor gap that matters in real use, most likely large-paste marker/atomic behavior or jump-mode parity
 - keep broader widget parity and the full theme/markdown/image stack deferred until the next real downstream consumer requires them
+
+## Milestone 24 update: multiline-editor character jump slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- targeted character-jump sections from `packages/tui/src/components/editor.ts`
+- targeted character-jump regressions from `packages/tui/test/editor.test.ts`
+- previously grounded downstream consumer context kept in scope:
+  - `packages/tui/src/editor-component.ts`
+  - `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+  - `packages/coding-agent/src/modes/interactive/components/extension-editor.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/editor.rs`
+- `rust/crates/pi-tui/tests/editor.rs`
+- `migration/packages/tui.md`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-tui::Editor` now ports the first character-jump slice from the TypeScript multiline editor
+- the Rust editor now preserves the current high-value `Ctrl+]` / `Ctrl+Alt+]` behavior needed by the migrated editor surface:
+  - enter forward jump mode via `tui.editor.jumpForward`
+  - enter backward jump mode via `tui.editor.jumpBackward`
+  - jump to the next matching character on the current line or later lines
+  - jump backward to the previous matching character on the current line or earlier lines
+  - keep the cursor unchanged when no match exists
+  - cancel jump mode when the same shortcut is pressed again
+  - cancel jump mode on non-printable input and then fall through to normal editor handling
+- jumping now resets the Rust editor's typing coalescing state, matching the TypeScript `lastAction = null` behavior closely enough for undo parity
+
+Current intentional limitation for this slice:
+- this milestone ports only the character-jump behavior; large-paste marker semantics and the remaining editor parity gaps are still deferred
+- the Rust jump implementation currently uses the existing normalized/grapheme-aware cursor model instead of trying to mimic JavaScript string-index quirks beyond the tested cases
+
+### Rust design summary
+
+Expanded `pi-tui::Editor` with:
+- internal `JumpMode::{Forward, Backward}`
+- pending jump-mode state in the editor runtime
+- `jump_to_char(...)` multi-line search helper
+- top-of-input handling that gives jump mode the same priority/cancel behavior as the TypeScript editor before normal editing resumes
+
+Design choices for this slice:
+- keep jump handling local to `pi-tui::Editor`, matching the TypeScript ownership boundary instead of widening `pi-coding-agent-tui`
+- preserve the TS interaction contract first, while reusing the Rust editor's existing grapheme-safe cursor helpers instead of introducing another cursor index model
+- stop before paste-marker work so the milestone stays small and directly verifiable
+
+### Validation summary
+
+New Rust coverage added for:
+- forward jump on the same line
+- backward jump across multiple lines
+- cancel on repeated jump shortcut
+- cancel on escape with later normal character insertion
+- no-match cursor stability
+- undo coalescing reset after a jump
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test editor` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- large-paste marker/atomic editing parity is still missing from the multiline editor
+- full TypeScript main-editor parity remains incomplete (`autocomplete`, richer sticky-column behavior, paste markers)
+- no broader widget parity yet (`Box`, markdown, select/settings/image widgets)
+- differential rendering parity remains partial relative to TS `packages/tui/src/tui.ts`
+
+### Recommended next step
+
+Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
+- continue with the next editor gap that now has the clearest downstream value: large-paste marker/atomic behavior
+- keep broader widget parity and the full theme/markdown/image stack deferred until the next real downstream consumer requires them

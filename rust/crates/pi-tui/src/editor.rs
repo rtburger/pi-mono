@@ -43,6 +43,12 @@ enum EditorAction {
     TypeWord,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JumpMode {
+    Forward,
+    Backward,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EditorSnapshot {
     lines: Vec<String>,
@@ -78,6 +84,7 @@ pub struct Editor {
     scroll_offset: Cell<usize>,
     paste_buffer: String,
     is_in_paste: bool,
+    jump_mode: Option<JumpMode>,
     history: Vec<String>,
     history_index: Option<usize>,
     preferred_visual_col: Option<usize>,
@@ -123,6 +130,7 @@ impl Editor {
             scroll_offset: Cell::new(0),
             paste_buffer: String::new(),
             is_in_paste: false,
+            jump_mode: None,
             history: Vec::new(),
             history_index: None,
             preferred_visual_col: None,
@@ -235,6 +243,19 @@ impl Editor {
 
     fn process_input(&mut self, data: &str) {
         let mut current = data.to_owned();
+
+        if let Some(jump_mode) = self.jump_mode.take() {
+            if self.matches_binding(&current, "tui.editor.jumpForward")
+                || self.matches_binding(&current, "tui.editor.jumpBackward")
+            {
+                return;
+            }
+
+            if !contains_control_characters(&current) {
+                self.jump_to_char(&current, jump_mode);
+                return;
+            }
+        }
 
         if current.contains(BRACKETED_PASTE_START) {
             self.is_in_paste = true;
@@ -377,6 +398,16 @@ impl Editor {
             } else {
                 self.move_cursor_vertical(1);
             }
+            return;
+        }
+
+        if self.matches_binding(&current, "tui.editor.jumpForward") {
+            self.jump_mode = Some(JumpMode::Forward);
+            return;
+        }
+
+        if self.matches_binding(&current, "tui.editor.jumpBackward") {
+            self.jump_mode = Some(JumpMode::Backward);
             return;
         }
 
@@ -602,6 +633,55 @@ impl Editor {
         } else if self.cursor_line + 1 < self.lines.len() {
             self.cursor_line += 1;
             self.cursor_col = 0;
+        }
+    }
+
+    fn jump_to_char(&mut self, character: &str, direction: JumpMode) {
+        self.last_action = None;
+
+        match direction {
+            JumpMode::Forward => {
+                for line_index in self.cursor_line..self.lines.len() {
+                    let line = &self.lines[line_index];
+                    let search_start = if line_index == self.cursor_line {
+                        next_grapheme_end(line, self.cursor_col).unwrap_or(line.len())
+                    } else {
+                        0
+                    };
+
+                    if search_start > line.len() {
+                        continue;
+                    }
+
+                    if let Some(offset) = line[search_start..].find(character) {
+                        self.cursor_line = line_index;
+                        self.cursor_col = search_start + offset;
+                        self.preferred_visual_col = None;
+                        return;
+                    }
+                }
+            }
+            JumpMode::Backward => {
+                for line_index in (0..=self.cursor_line).rev() {
+                    let line = &self.lines[line_index];
+                    let search_end = if line_index == self.cursor_line {
+                        self.cursor_col.min(line.len())
+                    } else {
+                        line.len()
+                    };
+
+                    if search_end == 0 {
+                        continue;
+                    }
+
+                    if let Some(index) = line[..search_end].rfind(character) {
+                        self.cursor_line = line_index;
+                        self.cursor_col = index;
+                        self.preferred_visual_col = None;
+                        return;
+                    }
+                }
+            }
         }
     }
 

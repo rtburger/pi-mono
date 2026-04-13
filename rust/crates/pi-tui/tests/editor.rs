@@ -422,3 +422,83 @@ fn no_op_delete_operations_do_not_push_undo_snapshots() {
     undo(&mut editor);
     assert_eq!(editor.get_text(), "hello");
 }
+
+#[test]
+fn jump_mode_moves_forward_to_the_next_matching_character() {
+    let mut editor = Editor::new();
+    editor.set_text("hello world");
+    editor.handle_input("\x01");
+
+    editor.handle_input("\x1d");
+    editor.handle_input("o");
+
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 4 });
+}
+
+#[test]
+fn jump_mode_moves_backward_across_multiple_lines() {
+    let mut editor = Editor::new();
+    editor.set_text("abc\ndef\nghi");
+
+    editor.handle_input("\x1b\x1d");
+    editor.handle_input("a");
+
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 0 });
+}
+
+#[test]
+fn jump_mode_can_be_canceled_without_moving_the_cursor() {
+    let mut editor = Editor::new();
+    editor.set_text("hello world");
+    editor.handle_input("\x01");
+
+    editor.handle_input("\x1d");
+    editor.handle_input("\x1b");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 0 });
+
+    editor.handle_input("o");
+    assert_eq!(editor.get_text(), "ohello world");
+}
+
+#[test]
+fn jump_mode_repeat_shortcut_cancels_pending_jump() {
+    let mut editor = Editor::new();
+    editor.set_text("hello world");
+    editor.handle_input("\x01");
+
+    editor.handle_input("\x1d");
+    editor.handle_input("\x1d");
+    editor.handle_input("o");
+
+    assert_eq!(editor.get_text(), "ohello world");
+}
+
+#[test]
+fn jump_mode_leaves_the_cursor_in_place_when_no_match_exists() {
+    let mut editor = Editor::new();
+    editor.set_text("hello world");
+    editor.handle_input("\x01");
+
+    editor.handle_input("\x1d");
+    editor.handle_input("z");
+
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 0 });
+}
+
+#[test]
+fn jump_mode_resets_typing_coalescing_for_undo() {
+    let mut editor = Editor::new();
+    editor.set_text("hello world");
+    editor.handle_input("\x01");
+
+    editor.handle_input("x");
+    assert_eq!(editor.get_text(), "xhello world");
+
+    editor.handle_input("\x1d");
+    editor.handle_input("o");
+    editor.handle_input("Y");
+    assert_eq!(editor.get_text(), "xhellYo world");
+
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "xhello world");
+}
