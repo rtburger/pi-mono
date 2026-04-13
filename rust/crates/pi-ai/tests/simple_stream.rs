@@ -8,8 +8,9 @@ use pi_ai::{
     complete_simple, register_faux_provider,
 };
 use pi_events::{AssistantContent, Context, Message, Model, ToolDefinition, UserContent};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 fn base_context() -> Context {
     Context {
@@ -67,10 +68,10 @@ fn openai_completions_model(base_url: String, max_tokens: u64) -> Model {
     }
 }
 
-fn anthropic_model(base_url: String, max_tokens: u64) -> Model {
+fn anthropic_model_with_id(id: &str, base_url: String, max_tokens: u64) -> Model {
     Model {
-        id: "claude-sonnet-4-20250514".into(),
-        name: "claude-sonnet-4-20250514".into(),
+        id: id.into(),
+        name: id.into(),
         api: "anthropic-messages".into(),
         provider: "anthropic".into(),
         base_url,
@@ -79,6 +80,10 @@ fn anthropic_model(base_url: String, max_tokens: u64) -> Model {
         context_window: 200_000,
         max_tokens,
     }
+}
+
+fn anthropic_model(base_url: String, max_tokens: u64) -> Model {
+    anthropic_model_with_id("claude-sonnet-4-20250514", base_url, max_tokens)
 }
 
 fn openai_codex_model(base_url: String, max_tokens: u64) -> Model {
@@ -100,6 +105,35 @@ fn openai_codex_token() -> String {
         "aaa.{}.bbb",
         "eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjX3Rlc3QifX0="
     )
+}
+
+async fn capture_simple_payload(model: Model) -> Value {
+    let captured = Arc::new(Mutex::new(None));
+    let captured_for_hook = Arc::clone(&captured);
+
+    let _response = complete_simple(
+        model,
+        base_context(),
+        SimpleStreamOptions {
+            api_key: Some("test-key".into()),
+            on_payload: Some(PayloadHook::new(move |payload, _model| {
+                let captured_for_hook = Arc::clone(&captured_for_hook);
+                async move {
+                    *captured_for_hook.lock().unwrap() = Some(payload.clone());
+                    Ok(Some(payload))
+                }
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("payload should be captured before request failure")
 }
 
 #[tokio::test]
@@ -228,6 +262,38 @@ async fn simple_anthropic_adjusts_max_tokens_for_non_adaptive_thinking() {
 
     mock.assert();
     assert_eq!(response.response_id.as_deref(), Some("msg_1"));
+}
+
+#[tokio::test]
+async fn simple_anthropic_disables_thinking_for_budget_reasoning_models_by_default() {
+    let payload = capture_simple_payload(anthropic_model_with_id(
+        "claude-sonnet-4-5",
+        "http://127.0.0.1:9".into(),
+        40_000,
+    ))
+    .await;
+
+    assert_eq!(
+        payload.get("thinking"),
+        Some(&json!({ "type": "disabled" }))
+    );
+    assert!(payload.get("output_config").is_none());
+}
+
+#[tokio::test]
+async fn simple_anthropic_disables_thinking_for_adaptive_reasoning_models_by_default() {
+    let payload = capture_simple_payload(anthropic_model_with_id(
+        "claude-opus-4-6",
+        "http://127.0.0.1:9".into(),
+        40_000,
+    ))
+    .await;
+
+    assert_eq!(
+        payload.get("thinking"),
+        Some(&json!({ "type": "disabled" }))
+    );
+    assert!(payload.get("output_config").is_none());
 }
 
 #[tokio::test]
