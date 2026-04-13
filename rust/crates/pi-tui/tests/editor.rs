@@ -1011,6 +1011,61 @@ fn backspacing_attachment_query_retriggers_autocomplete_after_no_matches() {
 }
 
 #[test]
+fn typing_inside_accepted_quoted_attachment_directory_retriggers_autocomplete() {
+    let temp_dir = TestDir::new("pi-editor-quoted-attachment-dir");
+    write_file(temp_dir.path().join("my folder/target.txt"), "target\n");
+    write_file(temp_dir.path().join("my folder/other.txt"), "other\n");
+
+    let mut editor = Editor::new();
+    editor.set_autocomplete_provider(attachment_provider(temp_dir.path()));
+
+    type_text(&mut editor, "@my");
+    assert!(editor.is_showing_autocomplete());
+
+    editor.handle_input("\t");
+
+    assert_eq!(editor.get_text(), "@\"my folder/\"");
+    assert!(!editor.is_showing_autocomplete());
+
+    editor.handle_input("t");
+
+    assert_eq!(editor.get_text(), "@\"my folder/t\"");
+    assert!(editor.is_showing_autocomplete());
+    let lines = editor.render(60);
+    assert!(
+        lines.iter().any(|line| line.contains("target.txt")),
+        "lines: {lines:?}"
+    );
+}
+
+#[test]
+fn backspacing_quoted_attachment_query_retriggers_autocomplete_after_no_matches() {
+    let temp_dir = TestDir::new("pi-editor-quoted-attachment-backspace");
+    write_file(temp_dir.path().join("my folder/target.txt"), "target\n");
+
+    let mut editor = Editor::new();
+    editor.set_autocomplete_provider(attachment_provider(temp_dir.path()));
+
+    type_text(&mut editor, "@my");
+    editor.handle_input("\t");
+    assert_eq!(editor.get_text(), "@\"my folder/\"");
+
+    editor.handle_input("z");
+    assert_eq!(editor.get_text(), "@\"my folder/z\"");
+    assert!(!editor.is_showing_autocomplete());
+
+    editor.handle_input("\x7f");
+
+    assert_eq!(editor.get_text(), "@\"my folder/\"");
+    assert!(editor.is_showing_autocomplete());
+    let lines = editor.render(60);
+    assert!(
+        lines.iter().any(|line| line.contains("target.txt")),
+        "lines: {lines:?}"
+    );
+}
+
+#[test]
 fn force_tab_autocomplete_auto_applies_single_suggestion_and_undo_restores_prefix() {
     struct SingleSuggestionProvider;
 

@@ -24,6 +24,9 @@ const DEFAULT_VIEWPORT_HEIGHT: usize = 24;
 static PASTE_MARKER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]").expect("valid paste marker regex")
 });
+static ATTACHMENT_CONTEXT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?:^|[ \t])@(?:"[^"]*|[^\s]*)$"#).expect("valid attachment context regex")
+});
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextChunk {
@@ -1469,23 +1472,7 @@ impl Editor {
     }
 
     fn is_in_attachment_context(&self) -> bool {
-        let text_before_cursor = self.current_line_before_cursor();
-        let Some(at_index) = text_before_cursor.rfind('@') else {
-            return false;
-        };
-
-        if text_before_cursor[at_index + 1..]
-            .chars()
-            .any(is_whitespace_char)
-        {
-            return false;
-        }
-
-        at_index == 0
-            || text_before_cursor[..at_index]
-                .chars()
-                .next_back()
-                .is_some_and(is_whitespace_char)
+        ATTACHMENT_CONTEXT_REGEX.is_match(self.current_line_before_cursor())
     }
 
     fn just_typed_attachment_prefix(&self) -> bool {
