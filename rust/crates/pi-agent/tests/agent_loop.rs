@@ -2,7 +2,8 @@ use futures::{StreamExt, stream};
 use pi_agent::{
     AfterToolCallResult, AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentState,
     AgentTool, AgentToolError, AgentToolResult, AssistantStreamer, BeforeToolCallResult,
-    CustomAgentMessage, ThinkingBudgets, ThinkingLevel, agent_loop, agent_loop_continue,
+    CustomAgentMessage, ThinkingBudgets, ThinkingLevel, ToolExecutionMode, agent_loop,
+    agent_loop_continue,
 };
 use pi_ai::{
     AiError, AiProvider, AssistantEventStream, FauxResponse, RegisterFauxProviderOptions,
@@ -16,8 +17,12 @@ use pi_events::{
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
+use tokio::{sync::Notify, time::sleep};
 
 #[derive(Clone)]
 struct ScriptedStreamer {
@@ -544,6 +549,153 @@ async fn executes_sequential_tool_calls_and_continues_with_tool_results() {
     assert!(is_standard_assistant_message(&messages[1]));
     assert!(is_standard_tool_result_message(&messages[2]));
     assert!(is_standard_assistant_message(&messages[3]));
+}
+
+#[tokio::test]
+async fn executes_parallel_tool_calls_and_keeps_tool_results_in_source_order() {
+    let first_resolved = Arc::new(AtomicBool::new(false));
+    let parallel_observed = Arc::new(AtomicBool::new(false));
+    let release_first = Arc::new(Notify::new());
+
+    let tool = AgentTool::new(
+        ToolDefinition {
+            name: "echo".into(),
+            description: "Echo tool".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": { "value": { "type": "string" } },
+                "required": ["value"]
+            }),
+        },
+        {
+            let first_resolved = first_resolved.clone();
+            let parallel_observed = parallel_observed.clone();
+            let release_first = release_first.clone();
+            move |_tool_call_id, args, _signal| {
+                let first_resolved = first_resolved.clone();
+                let parallel_observed = parallel_observed.clone();
+                let release_first = release_first.clone();
+                async move {
+                    let value = args
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+
+                    if value == "first" {
+                        release_first.notified().await;
+                        first_resolved.store(true, Ordering::SeqCst);
+                    }
+                    if value == "second" && !first_resolved.load(Ordering::SeqCst) {
+                        parallel_observed.store(true, Ordering::SeqCst);
+                    }
+
+                    Ok(AgentToolResult {
+                        content: vec![UserContent::Text {
+                            text: format!("echoed: {value}"),
+                        }],
+                        details: json!({ "value": value }),
+                    })
+                }
+            }
+        },
+    );
+
+    let mut context = AgentContext::new("You are helpful.");
+    context.tools.push(tool);
+
+    let call_index = Arc::new(Mutex::new(0usize));
+    let streamer = Arc::new({
+        let call_index = call_index.clone();
+        let release_first = release_first.clone();
+        move |_model: Model,
+              _context: Context,
+              _options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            let current_call = {
+                let mut call_index = call_index.lock().unwrap();
+                let current_call = *call_index;
+                *call_index += 1;
+                current_call
+            };
+            let release_first = release_first.clone();
+
+            Ok(Box::pin(stream::iter(vec![Ok(if current_call == 0 {
+                tokio::spawn(async move {
+                    sleep(std::time::Duration::from_millis(20)).await;
+                    release_first.notify_waiters();
+                });
+                AssistantEvent::Done {
+                    reason: StopReason::ToolUse,
+                    message: AssistantMessage {
+                        role: "assistant".into(),
+                        content: vec![
+                            AssistantContent::ToolCall {
+                                id: "tool-1".into(),
+                                name: "echo".into(),
+                                arguments: serde_json::Map::from_iter([(
+                                    String::from("value"),
+                                    Value::String("first".into()),
+                                )])
+                                .into_iter()
+                                .collect(),
+                                thought_signature: None,
+                            },
+                            AssistantContent::ToolCall {
+                                id: "tool-2".into(),
+                                name: "echo".into(),
+                                arguments: serde_json::Map::from_iter([(
+                                    String::from("value"),
+                                    Value::String("second".into()),
+                                )])
+                                .into_iter()
+                                .collect(),
+                                thought_signature: None,
+                            },
+                        ],
+                        api: "faux:test".into(),
+                        provider: "faux".into(),
+                        model: "mock".into(),
+                        response_id: None,
+                        usage: usage(),
+                        stop_reason: StopReason::ToolUse,
+                        error_message: None,
+                        timestamp: 20,
+                    },
+                }
+            } else {
+                AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message: assistant_message("done", StopReason::Stop, 30),
+                }
+            })])))
+        }
+    }) as Arc<dyn AssistantStreamer>;
+
+    let stream = agent_loop(
+        vec![user_message("run tools", 10).into()],
+        context,
+        AgentLoopConfig::new(model())
+            .with_streamer(streamer)
+            .with_tool_execution_mode(ToolExecutionMode::Parallel),
+    );
+
+    let events = collect_events(stream).await.unwrap();
+    let tool_result_ids = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::MessageEnd {
+                message: AgentMessage::Standard(Message::ToolResult { tool_call_id, .. }),
+            } => Some(tool_call_id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert!(parallel_observed.load(Ordering::SeqCst));
+    assert_eq!(
+        tool_result_ids,
+        vec![String::from("tool-1"), String::from("tool-2")]
+    );
 }
 
 #[tokio::test]

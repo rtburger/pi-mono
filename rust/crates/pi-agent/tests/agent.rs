@@ -2,7 +2,7 @@ use async_stream::try_stream;
 use futures::stream;
 use pi_agent::{
     Agent, AgentError, AgentEvent, AgentMessage, AgentState, AgentTool, AgentToolError,
-    AgentToolResult, CustomAgentMessage, QueueMode, ThinkingBudgets,
+    AgentToolResult, CustomAgentMessage, QueueMode, ThinkingBudgets, ToolExecutionMode,
 };
 use pi_ai::{AiError, AiProvider, AssistantEventStream, StreamOptions};
 use pi_events::{
@@ -12,7 +12,10 @@ use pi_events::{
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{sync::Notify, time::sleep};
@@ -1020,6 +1023,149 @@ async fn wrapper_forwards_custom_thinking_budgets_through_default_streamer() {
 
     pi_ai::unregister_provider("anthropic-messages");
     pi_ai::register_builtin_providers();
+}
+
+#[tokio::test]
+async fn wrapper_can_switch_to_sequential_tool_execution() {
+    let first_resolved = Arc::new(AtomicBool::new(false));
+    let parallel_observed = Arc::new(AtomicBool::new(false));
+    let release_first = Arc::new(Notify::new());
+    let calls = Arc::new(Mutex::new(VecDeque::from([
+        AssistantMessage {
+            role: "assistant".into(),
+            content: vec![
+                AssistantContent::ToolCall {
+                    id: "tool-1".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::Map::from_iter([(
+                        String::from("value"),
+                        Value::String("first".into()),
+                    )])
+                    .into_iter()
+                    .collect(),
+                    thought_signature: None,
+                },
+                AssistantContent::ToolCall {
+                    id: "tool-2".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::Map::from_iter([(
+                        String::from("value"),
+                        Value::String("second".into()),
+                    )])
+                    .into_iter()
+                    .collect(),
+                    thought_signature: None,
+                },
+            ],
+            api: "faux:test".into(),
+            provider: "faux".into(),
+            model: "mock".into(),
+            response_id: None,
+            usage: usage(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 20,
+        },
+        assistant_message("done", StopReason::Stop, 30),
+    ])));
+
+    let streamer = Arc::new({
+        let calls = calls.clone();
+        move |_model: Model,
+              _context: Context,
+              _options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            let message = calls
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("expected scripted assistant message");
+            let reason = message.stop_reason.clone();
+            Ok(Box::pin(try_stream! {
+                yield AssistantEvent::Done { reason, message };
+            }))
+        }
+    });
+
+    let mut initial_state = AgentState::new(model());
+    initial_state.tools.push(AgentTool::new(
+        ToolDefinition {
+            name: "echo".into(),
+            description: "Echo tool".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": { "value": { "type": "string" } },
+                "required": ["value"]
+            }),
+        },
+        {
+            let first_resolved = first_resolved.clone();
+            let parallel_observed = parallel_observed.clone();
+            let release_first = release_first.clone();
+            move |_tool_call_id, args, _signal| {
+                let first_resolved = first_resolved.clone();
+                let parallel_observed = parallel_observed.clone();
+                let release_first = release_first.clone();
+                async move {
+                    let value = args
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+
+                    if value == "first" {
+                        release_first.notified().await;
+                        first_resolved.store(true, Ordering::SeqCst);
+                    }
+                    if value == "second" && !first_resolved.load(Ordering::SeqCst) {
+                        parallel_observed.store(true, Ordering::SeqCst);
+                    }
+
+                    Ok(AgentToolResult {
+                        content: vec![UserContent::Text {
+                            text: format!("echoed: {value}"),
+                        }],
+                        details: json!({ "value": value }),
+                    })
+                }
+            }
+        },
+    ));
+
+    let agent = Agent::with_parts(initial_state, streamer, StreamOptions::default());
+    agent.set_tool_execution_mode(ToolExecutionMode::Sequential);
+    assert_eq!(agent.tool_execution_mode(), ToolExecutionMode::Sequential);
+
+    let release_first_task = release_first.clone();
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(20)).await;
+        release_first_task.notify_waiters();
+    });
+
+    let tool_result_ids = Arc::new(Mutex::new(Vec::new()));
+    let tool_result_ids_listener = tool_result_ids.clone();
+    agent.subscribe(move |event, _signal| {
+        let tool_result_ids_listener = tool_result_ids_listener.clone();
+        async move {
+            if let AgentEvent::MessageEnd {
+                message: AgentMessage::Standard(Message::ToolResult { tool_call_id, .. }),
+            } = event
+            {
+                tool_result_ids_listener
+                    .lock()
+                    .unwrap()
+                    .push(tool_call_id.clone());
+            }
+        }
+    });
+
+    agent.prompt_text("run tools").await.unwrap();
+
+    assert!(!parallel_observed.load(Ordering::SeqCst));
+    assert_eq!(
+        tool_result_ids.lock().unwrap().clone(),
+        vec![String::from("tool-1"), String::from("tool-2")]
+    );
 }
 
 #[tokio::test]

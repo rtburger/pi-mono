@@ -1,6 +1,6 @@
 # packages/agent migration inventory
 
-Status: milestone 10 adds narrowed tool-argument validation/coercion parity plus proxy-stream reconstruction and HTTP proxy-client support on top of the existing loop/state/wrapper/tool/queue slices
+Status: milestone 13 adds configurable sequential/parallel tool-execution parity across the low-level loop and Rust `Agent` wrapper on top of the existing loop/state/wrapper/tool/queue slices
 Target crate: `rust/crates/pi-agent`
 
 ## 1. Files analyzed
@@ -553,7 +553,95 @@ Validation run results:
 ### Remaining gaps after this milestone
 
 Still deferred in `pi-agent`:
-- fuller wrapper/property-surface parity with the TypeScript `Agent` class
-- additional TS top-level simple-stream knobs beyond the current default-streamer `thinkingBudgets` slice
+- fuller wrapper/property-surface parity with the TypeScript `Agent` class beyond the current tool-execution-mode and thinking-budget slices
+- additional TS top-level simple-stream knobs beyond the current default-streamer slices
+- fuller intermediate partial-JSON reconstruction parity in the proxy/tool path
+- downstream coding-agent parity still needs its own runtime streamer update so selected thinking levels and budgets affect the non-interactive app end-to-end
+
+## Milestone 13 update: sequential/parallel tool-execution parity slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/agent/src/types.ts`
+- `packages/agent/src/agent.ts`
+- `packages/agent/src/agent-loop.ts`
+- `packages/agent/test/agent-loop.test.ts`
+- `packages/agent/test/agent.test.ts`
+- `packages/agent/README.md`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-agent/src/lib.rs`
+- `rust/crates/pi-agent/src/agent.rs`
+- `rust/crates/pi-agent/src/loop.rs`
+- `rust/crates/pi-agent/src/tool.rs`
+- `rust/crates/pi-agent/tests/agent.rs`
+- `rust/crates/pi-agent/tests/agent_loop.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- `pi-agent` now exposes explicit sequential vs parallel tool-execution control through the migrated Rust loop/config surface
+- low-level Rust `AgentLoopConfig` now matches the current TypeScript `toolExecution` split:
+  - `ToolExecutionMode::Sequential`
+  - `ToolExecutionMode::Parallel`
+- the Rust loop now preserves the current TS parallel-execution contract for the migrated slice:
+  - tool calls are preflighted sequentially
+  - validation / `prepareArguments(...)` / `beforeToolCall(...)` still happen in assistant source order
+  - runnable tools then execute concurrently
+  - final tool results are still emitted in assistant source order
+- preflight failures still materialize immediately during the preflight pass, matching the TS behavior for:
+  - missing tools
+  - validation failures
+  - blocked `beforeToolCall(...)` results
+- streamed tool updates can now arrive from concurrently executing tool calls while ordered final tool results are preserved for the migrated slice
+- the Rust `Agent` wrapper now has first-class tool-execution-mode control with:
+  - `Agent::set_tool_execution_mode(...)`
+  - `Agent::tool_execution_mode()`
+- the Rust wrapper now defaults to parallel tool execution, matching the current TypeScript `Agent` default
+
+Compatibility note for this slice:
+- this milestone ports the TypeScript behavioral contract, not the TypeScript property syntax verbatim; Rust exposes tool-execution control through explicit methods instead of mutable JS properties
+- the migrated Rust parallel path preserves the important observable guarantees from the TS tests: concurrent execution for runnable tools and source-ordered final tool-result emission
+
+### Rust design summary
+
+Core Rust loop changes:
+- `rust/crates/pi-agent/src/loop.rs`
+  - new `ToolExecutionMode` enum
+  - `AgentLoopConfig.tool_execution`
+  - `AgentLoopConfig::with_tool_execution_mode(...)`
+  - explicit prepared/executed tool-call helper structs for preflight vs execution phases
+  - concurrent runnable-tool execution through spawned tasks plus a shared progress channel
+  - ordered finalization of parallel tool results after completion
+
+Wrapper changes:
+- `rust/crates/pi-agent/src/agent.rs`
+  - `Agent` now stores tool-execution mode in wrapper state
+  - run preparation now forwards the configured tool-execution mode into `AgentLoopConfig`
+  - new wrapper methods:
+    - `set_tool_execution_mode(...)`
+    - `tool_execution_mode()`
+- `rust/crates/pi-agent/src/lib.rs`
+  - now re-exports `ToolExecutionMode`
+
+### Validation summary
+
+New Rust coverage added for:
+- low-level parallel tool execution proving actual concurrency while keeping tool-result messages in source order
+- wrapper-level sequential tool-execution override proving the new wrapper setter reaches the runtime loop path
+- existing tool-flow and update tests continue to pass on top of the widened tool-execution implementation
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-agent --test agent --test agent_loop` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred in `pi-agent`:
+- fuller wrapper/property-surface parity with the TypeScript `Agent` class beyond the current tool-execution-mode and thinking-budget slices
+- additional TS top-level simple-stream knobs beyond the current default-streamer slices
 - fuller intermediate partial-JSON reconstruction parity in the proxy/tool path
 - downstream coding-agent parity still needs its own runtime streamer update so selected thinking levels and budgets affect the non-interactive app end-to-end

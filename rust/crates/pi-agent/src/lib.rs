@@ -13,7 +13,7 @@ pub use r#loop::{
     AfterToolCallContext, AfterToolCallHook, AfterToolCallResult, AgentEvent, AgentEventStream,
     AgentLoopConfig, AssistantStreamer, BeforeToolCallContext, BeforeToolCallHook,
     BeforeToolCallResult, ConvertToLlmHook, DefaultAssistantStreamer, SharedToolArgs,
-    TransformContextHook, agent_loop, agent_loop_continue,
+    ToolExecutionMode, TransformContextHook, agent_loop, agent_loop_continue,
 };
 pub use message::{AgentMessage, CustomAgentMessage};
 pub use pi_ai::ThinkingBudgets;

@@ -121,6 +121,13 @@ pub struct AfterToolCallResult {
     pub is_error: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolExecutionMode {
+    Sequential,
+    #[default]
+    Parallel,
+}
+
 enum ToolExecutionProgress {
     Update(AgentToolResult),
     Complete {
@@ -219,6 +226,7 @@ fn parse_ai_thinking_level(value: &str) -> Option<AiThinkingLevel> {
 pub struct AgentLoopConfig {
     pub model: Model,
     pub stream_options: StreamOptions,
+    pub tool_execution: ToolExecutionMode,
     streamer: Arc<dyn AssistantStreamer>,
     thinking_budgets: ThinkingBudgets,
     uses_default_streamer: bool,
@@ -236,6 +244,7 @@ impl AgentLoopConfig {
         Self {
             model,
             stream_options: StreamOptions::default(),
+            tool_execution: ToolExecutionMode::Parallel,
             streamer: Arc::new(DefaultAssistantStreamer::new(thinking_budgets.clone())),
             thinking_budgets,
             uses_default_streamer: true,
@@ -284,6 +293,11 @@ impl AgentLoopConfig {
 
     pub fn with_after_tool_call_hook(mut self, hook: AfterToolCallHook) -> Self {
         self.after_tool_call = Some(hook);
+        self
+    }
+
+    pub fn with_tool_execution_mode(mut self, tool_execution: ToolExecutionMode) -> Self {
+        self.tool_execution = tool_execution;
         self
     }
 
@@ -532,140 +546,207 @@ fn run_loop(
                 if has_more_tool_calls {
                     let tool_context = current_context_snapshot(&context, &current_messages);
 
-                    for (tool_call_id, tool_name, raw_args) in tool_calls {
-                        yield AgentEvent::ToolExecutionStart {
-                            tool_call_id: tool_call_id.clone(),
-                            tool_name: tool_name.clone(),
-                            args: raw_args.clone(),
-                        };
-
-                        let prepared_args =
-                            prepare_tool_arguments(&context.tools, &tool_name, raw_args.clone());
-                        let validated_args = match validate_prepared_tool_arguments(
-                            &context.tools,
-                            &tool_name,
-                            prepared_args,
-                        ) {
-                            Ok(validated_args) => validated_args,
-                            Err(error) => {
-                                let result = error_tool_result(tool_error_message(&error));
-                                yield AgentEvent::ToolExecutionEnd {
+                    match config.tool_execution {
+                        ToolExecutionMode::Sequential => {
+                            for (tool_call_id, tool_name, raw_args) in tool_calls {
+                                yield AgentEvent::ToolExecutionStart {
                                     tool_call_id: tool_call_id.clone(),
                                     tool_name: tool_name.clone(),
-                                    result: result.clone(),
-                                    is_error: true,
+                                    args: raw_args.clone(),
                                 };
 
-                                let tool_result = build_tool_result_message(
+                                match prepare_tool_call(
+                                    &context.tools,
+                                    &tool_context,
+                                    &final_message,
+                                    &config,
                                     tool_call_id.clone(),
                                     tool_name.clone(),
-                                    result,
-                                    true,
-                                );
-                                let tool_result_message = tool_result_to_agent_message(&tool_result);
-                                yield AgentEvent::MessageStart {
-                                    message: tool_result_message.clone(),
-                                };
-                                yield AgentEvent::MessageEnd {
-                                    message: tool_result_message.clone(),
-                                };
+                                    raw_args.clone(),
+                                )
+                                .await {
+                                    PreparedToolCallState::Immediate { result, is_error } => {
+                                        let final_result = result.clone();
+                                        let (tool_result, tool_result_message) = emit_tool_call_outcome(
+                                            &tool_call_id,
+                                            &tool_name,
+                                            result,
+                                            is_error,
+                                        );
+                                        yield AgentEvent::ToolExecutionEnd {
+                                            tool_call_id,
+                                            tool_name,
+                                            result: final_result,
+                                            is_error,
+                                        };
+                                        yield AgentEvent::MessageStart {
+                                            message: tool_result_message.clone(),
+                                        };
+                                        yield AgentEvent::MessageEnd {
+                                            message: tool_result_message.clone(),
+                                        };
+                                        tool_results.push(tool_result);
+                                        tool_result_messages.push(tool_result_message);
+                                    }
+                                    PreparedToolCallState::Prepared(prepared) => {
+                                        let executed = execute_prepared_tool_call_sequential(
+                                            &prepared,
+                                            config.stream_options.signal.clone(),
+                                        ).await;
+                                        for partial_result in executed.partial_results {
+                                            yield AgentEvent::ToolExecutionUpdate {
+                                                tool_call_id: prepared.tool_call_id.clone(),
+                                                tool_name: prepared.tool_name.clone(),
+                                                args: prepared.raw_args.clone(),
+                                                partial_result,
+                                            };
+                                        }
 
-                                tool_results.push(tool_result);
-                                tool_result_messages.push(tool_result_message);
-                                continue;
+                                        let (tool_result, tool_result_message, final_result, is_error) =
+                                            finalize_prepared_tool_call(
+                                                &tool_context,
+                                                &final_message,
+                                                &config,
+                                                prepared,
+                                                executed.outcome,
+                                            )
+                                            .await;
+                                        yield AgentEvent::ToolExecutionEnd {
+                                            tool_call_id: tool_result.tool_call_id.clone(),
+                                            tool_name: tool_result.tool_name.clone(),
+                                            result: final_result,
+                                            is_error,
+                                        };
+                                        yield AgentEvent::MessageStart {
+                                            message: tool_result_message.clone(),
+                                        };
+                                        yield AgentEvent::MessageEnd {
+                                            message: tool_result_message.clone(),
+                                        };
+                                        tool_results.push(tool_result);
+                                        tool_result_messages.push(tool_result_message);
+                                    }
+                                }
                             }
-                        };
-                        let shared_args = Arc::new(Mutex::new(validated_args));
+                        }
+                        ToolExecutionMode::Parallel => {
+                            let mut prepared_tool_calls = Vec::new();
 
-                        let (result, is_error) = if let Some(blocked_result) = run_before_tool_call(
-                            &config,
-                            &tool_context,
-                            &final_message,
-                            &tool_call_id,
-                            &tool_name,
-                            shared_args.clone(),
-                        )
-                        .await
-                        {
-                            (blocked_result, true)
-                        } else {
-                            let execution_args = shared_args.lock().unwrap().clone();
-                            let mut execution_stream = execute_tool_call_stream(
-                                &context.tools,
-                                &tool_call_id,
-                                &tool_name,
-                                execution_args.clone(),
-                                config.stream_options.signal.clone(),
-                            );
-                            let (mut result, mut is_error) = loop {
-                                let Some(progress) = execution_stream.next().await else {
-                                    break (
-                                        error_tool_result(
-                                            "tool execution ended without a completion event".into(),
-                                        ),
-                                        true,
-                                    );
+                            for (tool_call_id, tool_name, raw_args) in tool_calls {
+                                yield AgentEvent::ToolExecutionStart {
+                                    tool_call_id: tool_call_id.clone(),
+                                    tool_name: tool_name.clone(),
+                                    args: raw_args.clone(),
                                 };
-                                match progress {
+
+                                match prepare_tool_call(
+                                    &context.tools,
+                                    &tool_context,
+                                    &final_message,
+                                    &config,
+                                    tool_call_id.clone(),
+                                    tool_name.clone(),
+                                    raw_args.clone(),
+                                )
+                                .await {
+                                    PreparedToolCallState::Immediate { result, is_error } => {
+                                        let (tool_result, tool_result_message) = emit_tool_call_outcome(
+                                            &tool_call_id,
+                                            &tool_name,
+                                            result.clone(),
+                                            is_error,
+                                        );
+                                        yield AgentEvent::ToolExecutionEnd {
+                                            tool_call_id,
+                                            tool_name,
+                                            result,
+                                            is_error,
+                                        };
+                                        yield AgentEvent::MessageStart {
+                                            message: tool_result_message.clone(),
+                                        };
+                                        yield AgentEvent::MessageEnd {
+                                            message: tool_result_message.clone(),
+                                        };
+                                        tool_results.push(tool_result);
+                                        tool_result_messages.push(tool_result_message);
+                                    }
+                                    PreparedToolCallState::Prepared(prepared) => {
+                                        prepared_tool_calls.push(prepared);
+                                    }
+                                }
+                            }
+
+                            let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+                            for (index, prepared) in prepared_tool_calls.iter().cloned().enumerate() {
+                                spawn_parallel_tool_execution(
+                                    index,
+                                    prepared,
+                                    config.stream_options.signal.clone(),
+                                    progress_tx.clone(),
+                                );
+                            }
+                            drop(progress_tx);
+
+                            let mut completed_outcomes = vec![None; prepared_tool_calls.len()];
+                            let mut completed_count = 0usize;
+                            let mut next_completion_index = 0usize;
+
+                            while completed_count < prepared_tool_calls.len() {
+                                let progress = progress_rx.recv().await.ok_or_else(|| {
+                                    AiError::Message("parallel tool execution ended unexpectedly".into())
+                                })?;
+                                let prepared = &prepared_tool_calls[progress.index];
+                                match progress.progress {
                                     ToolExecutionProgress::Update(partial_result) => {
                                         yield AgentEvent::ToolExecutionUpdate {
-                                            tool_call_id: tool_call_id.clone(),
-                                            tool_name: tool_name.clone(),
-                                            args: raw_args.clone(),
+                                            tool_call_id: prepared.tool_call_id.clone(),
+                                            tool_name: prepared.tool_name.clone(),
+                                            args: prepared.raw_args.clone(),
                                             partial_result,
                                         };
                                     }
                                     ToolExecutionProgress::Complete { result, is_error } => {
-                                        break (result, is_error);
+                                        completed_outcomes[progress.index] =
+                                            Some(ExecutedToolCallOutcome { result, is_error });
+                                        completed_count += 1;
+
+                                        while next_completion_index < prepared_tool_calls.len() {
+                                            let Some(executed) =
+                                                completed_outcomes[next_completion_index].take()
+                                            else {
+                                                break;
+                                            };
+                                            let prepared = prepared_tool_calls[next_completion_index].clone();
+                                            let (tool_result, tool_result_message, final_result, is_error) =
+                                                finalize_prepared_tool_call(
+                                                    &tool_context,
+                                                    &final_message,
+                                                    &config,
+                                                    prepared,
+                                                    executed,
+                                                )
+                                                .await;
+                                            yield AgentEvent::ToolExecutionEnd {
+                                                tool_call_id: tool_result.tool_call_id.clone(),
+                                                tool_name: tool_result.tool_name.clone(),
+                                                result: final_result,
+                                                is_error,
+                                            };
+                                            yield AgentEvent::MessageStart {
+                                                message: tool_result_message.clone(),
+                                            };
+                                            yield AgentEvent::MessageEnd {
+                                                message: tool_result_message.clone(),
+                                            };
+                                            tool_results.push(tool_result);
+                                            tool_result_messages.push(tool_result_message);
+                                            next_completion_index += 1;
+                                        }
                                     }
                                 }
-                            };
-
-                            if let Some(after_result) = run_after_tool_call(
-                                &config,
-                                &tool_context,
-                                &final_message,
-                                &tool_call_id,
-                                &tool_name,
-                                execution_args,
-                                result.clone(),
-                                is_error,
-                            )
-                            .await
-                            {
-                                result = AgentToolResult {
-                                    content: after_result.content.unwrap_or(result.content),
-                                    details: after_result.details.unwrap_or(result.details),
-                                };
-                                is_error = after_result.is_error.unwrap_or(is_error);
                             }
-
-                            (result, is_error)
-                        };
-
-                        yield AgentEvent::ToolExecutionEnd {
-                            tool_call_id: tool_call_id.clone(),
-                            tool_name: tool_name.clone(),
-                            result: result.clone(),
-                            is_error,
-                        };
-
-                        let tool_result = build_tool_result_message(
-                            tool_call_id.clone(),
-                            tool_name.clone(),
-                            result,
-                            is_error,
-                        );
-                        let tool_result_message = tool_result_to_agent_message(&tool_result);
-                        yield AgentEvent::MessageStart {
-                            message: tool_result_message.clone(),
-                        };
-                        yield AgentEvent::MessageEnd {
-                            message: tool_result_message.clone(),
-                        };
-
-                        tool_results.push(tool_result);
-                        tool_result_messages.push(tool_result_message);
+                        }
                     }
                 }
 
@@ -725,26 +806,6 @@ async fn convert_to_llm(
     }
 }
 
-fn prepare_tool_arguments(tools: &[AgentTool], tool_name: &str, raw_args: Value) -> Value {
-    tools
-        .iter()
-        .find(|tool| tool.definition.name == tool_name)
-        .map(|tool| tool.prepare_arguments(raw_args.clone()))
-        .unwrap_or(raw_args)
-}
-
-fn validate_prepared_tool_arguments(
-    tools: &[AgentTool],
-    tool_name: &str,
-    prepared_args: Value,
-) -> Result<Value, AgentToolError> {
-    tools
-        .iter()
-        .find(|tool| tool.definition.name == tool_name)
-        .map(|tool| validate_tool_arguments(tool, prepared_args.clone()))
-        .unwrap_or(Ok(prepared_args))
-}
-
 async fn get_pending_messages(source: &Option<MessageQueueHook>) -> Vec<AgentMessage> {
     match source {
         Some(source) => source().await,
@@ -761,6 +822,196 @@ fn current_context_snapshot(
         messages: messages.to_vec(),
         tools: base_context.tools.clone(),
     }
+}
+
+#[derive(Clone)]
+struct PreparedToolCall {
+    tool_call_id: String,
+    tool_name: String,
+    raw_args: Value,
+    args: Value,
+    tool: AgentTool,
+}
+
+enum PreparedToolCallState {
+    Immediate {
+        result: AgentToolResult,
+        is_error: bool,
+    },
+    Prepared(PreparedToolCall),
+}
+
+#[derive(Clone)]
+struct ExecutedToolCallOutcome {
+    result: AgentToolResult,
+    is_error: bool,
+}
+
+struct SequentialToolExecutionOutcome {
+    partial_results: Vec<AgentToolResult>,
+    outcome: ExecutedToolCallOutcome,
+}
+
+struct ParallelToolExecutionProgress {
+    index: usize,
+    progress: ToolExecutionProgress,
+}
+
+async fn prepare_tool_call(
+    tools: &[AgentTool],
+    context: &AgentContext,
+    assistant_message: &AssistantMessage,
+    config: &AgentLoopConfig,
+    tool_call_id: String,
+    tool_name: String,
+    raw_args: Value,
+) -> PreparedToolCallState {
+    let Some(tool) = tools
+        .iter()
+        .find(|tool| tool.definition.name == tool_name)
+        .cloned()
+    else {
+        return PreparedToolCallState::Immediate {
+            result: error_tool_result(format!("Tool {tool_name} not found")),
+            is_error: true,
+        };
+    };
+
+    let prepared_args = tool.prepare_arguments(raw_args.clone());
+    let validated_args = match validate_tool_arguments(&tool, prepared_args) {
+        Ok(validated_args) => validated_args,
+        Err(error) => {
+            return PreparedToolCallState::Immediate {
+                result: error_tool_result(tool_error_message(&error)),
+                is_error: true,
+            };
+        }
+    };
+    let shared_args = Arc::new(Mutex::new(validated_args));
+
+    if let Some(blocked_result) = run_before_tool_call(
+        config,
+        context,
+        assistant_message,
+        &tool_call_id,
+        &tool_name,
+        shared_args.clone(),
+    )
+    .await
+    {
+        return PreparedToolCallState::Immediate {
+            result: blocked_result,
+            is_error: true,
+        };
+    }
+
+    PreparedToolCallState::Prepared(PreparedToolCall {
+        tool_call_id,
+        tool_name,
+        raw_args,
+        args: shared_args.lock().unwrap().clone(),
+        tool,
+    })
+}
+
+async fn execute_prepared_tool_call_sequential(
+    prepared: &PreparedToolCall,
+    signal: Option<watch::Receiver<bool>>,
+) -> SequentialToolExecutionOutcome {
+    let mut execution_stream = execute_tool_call_stream(
+        prepared.tool.clone(),
+        prepared.tool_call_id.clone(),
+        prepared.args.clone(),
+        signal,
+    );
+    let mut partial_results = Vec::new();
+
+    let outcome = loop {
+        let Some(progress) = execution_stream.next().await else {
+            break ExecutedToolCallOutcome {
+                result: error_tool_result("tool execution ended without a completion event".into()),
+                is_error: true,
+            };
+        };
+        match progress {
+            ToolExecutionProgress::Update(partial_result) => {
+                partial_results.push(partial_result);
+            }
+            ToolExecutionProgress::Complete { result, is_error } => {
+                break ExecutedToolCallOutcome { result, is_error };
+            }
+        }
+    };
+
+    SequentialToolExecutionOutcome {
+        partial_results,
+        outcome,
+    }
+}
+
+async fn finalize_prepared_tool_call(
+    context: &AgentContext,
+    assistant_message: &AssistantMessage,
+    config: &AgentLoopConfig,
+    prepared: PreparedToolCall,
+    executed: ExecutedToolCallOutcome,
+) -> (ToolResultMessage, AgentMessage, AgentToolResult, bool) {
+    let mut result = executed.result;
+    let mut is_error = executed.is_error;
+
+    if let Some(after_result) = run_after_tool_call(
+        config,
+        context,
+        assistant_message,
+        &prepared.tool_call_id,
+        &prepared.tool_name,
+        prepared.args.clone(),
+        result.clone(),
+        is_error,
+    )
+    .await
+    {
+        result = AgentToolResult {
+            content: after_result.content.unwrap_or(result.content),
+            details: after_result.details.unwrap_or(result.details),
+        };
+        is_error = after_result.is_error.unwrap_or(is_error);
+    }
+
+    let final_result = result.clone();
+    let (tool_result, tool_result_message) = emit_tool_call_outcome(
+        &prepared.tool_call_id,
+        &prepared.tool_name,
+        result,
+        is_error,
+    );
+
+    (tool_result, tool_result_message, final_result, is_error)
+}
+
+fn spawn_parallel_tool_execution(
+    index: usize,
+    prepared: PreparedToolCall,
+    signal: Option<watch::Receiver<bool>>,
+    progress_tx: mpsc::UnboundedSender<ParallelToolExecutionProgress>,
+) {
+    tokio::spawn(async move {
+        let mut execution_stream = execute_tool_call_stream(
+            prepared.tool.clone(),
+            prepared.tool_call_id.clone(),
+            prepared.args.clone(),
+            signal,
+        );
+
+        while let Some(progress) = execution_stream.next().await {
+            if progress_tx
+                .send(ParallelToolExecutionProgress { index, progress })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
 }
 
 async fn run_before_tool_call(
@@ -828,9 +1079,8 @@ async fn run_after_tool_call(
 }
 
 fn execute_tool_call_stream(
-    tools: &[AgentTool],
-    tool_call_id: &str,
-    tool_name: &str,
+    tool: AgentTool,
+    tool_call_id: String,
     args: Value,
     signal: Option<watch::Receiver<bool>>,
 ) -> Pin<Box<dyn Stream<Item = ToolExecutionProgress> + Send>> {
@@ -843,22 +1093,7 @@ fn execute_tool_call_stream(
         });
     }
 
-    let tool = tools
-        .iter()
-        .find(|tool| tool.definition.name == tool_name)
-        .cloned();
-    let tool_call_id = tool_call_id.to_string();
-    let tool_name = tool_name.to_string();
-
     Box::pin(stream! {
-        let Some(tool) = tool else {
-            yield ToolExecutionProgress::Complete {
-                result: error_tool_result(format!("Tool {tool_name} not found")),
-                is_error: true,
-            };
-            return;
-        };
-
         let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
         let on_update = Arc::new(move |partial_result| {
             let _ = updates_tx.send(partial_result);
@@ -930,6 +1165,22 @@ fn error_tool_result(message: String) -> AgentToolResult {
         content: vec![UserContent::Text { text: message }],
         details: Value::Null,
     }
+}
+
+fn emit_tool_call_outcome(
+    tool_call_id: &str,
+    tool_name: &str,
+    result: AgentToolResult,
+    is_error: bool,
+) -> (ToolResultMessage, AgentMessage) {
+    let tool_result = build_tool_result_message(
+        tool_call_id.to_string(),
+        tool_name.to_string(),
+        result,
+        is_error,
+    );
+    let tool_result_message = tool_result_to_agent_message(&tool_result);
+    (tool_result, tool_result_message)
 }
 
 fn build_tool_result_message(

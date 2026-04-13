@@ -1,6 +1,6 @@
 # Rust workspace status
 
-Date: 2026-04-11
+Date: 2026-04-13
 
 ## Workspace scaffold
 
@@ -22,7 +22,7 @@ The Rust workspace under `rust/` already exists and matches the requested migrat
 
 This is not a blank scaffold. It is already a working partial rewrite with passing Rust tests.
 
-Revalidated directly against the current Rust workspace sources on 2026-04-11 by checking:
+Revalidated directly against the current Rust workspace sources on 2026-04-13 by checking:
 - `rust/Cargo.toml`
 - `rust/apps/pi/src/main.rs`
 - `rust/crates/pi-ai/src/lib.rs`
@@ -38,7 +38,7 @@ Revalidated directly against the current Rust workspace sources on 2026-04-11 by
 ### Shared crates
 
 - `pi-core`: minimal shared error/result surface
-- `pi-config`: runtime settings loading for image behavior and thinking budgets
+- `pi-config`: runtime settings loading for image behavior, thinking budgets, editor padding, and autocomplete sizing
 - `pi-events`: shared normalized model/message/event types used across AI, agent, coding-agent, and TUI layers
 - `pi-test-harness`: still much thinner than the long-term migration target; most behavior is currently frozen through per-crate tests instead of a fully shared scenario harness
 
@@ -141,16 +141,17 @@ Current Rust TUI work is materially beyond the early-widget stage.
 - terminal abstraction and process-backed terminal support
 - terminal image capability / cell-size helpers
 - width, truncation, wrapping, and ANSI-aware text helpers
-- `Text`, `TruncatedText`, `Spacer`, `Input`, and a first multiline `Editor`
-- `word_wrap_line(...)` for the first Rust multiline-editor slice
-- `Tui`, `Container`, overlays, render handles, focus/input routing
-- live resize callback support in the real process-backed terminal path
+- `Text`, `TruncatedText`, `Spacer`, `Input`, `Autocomplete`, and a multiline `Editor`
+- kill-ring, undo-stack, and character-jump slices on the migrated multiline editor path
+- `word_wrap_line(...)` for the Rust multiline-editor slice
+- `Tui`, `Container`, overlays, overlay handles, render handles, focus/input routing
+- real process-backed terminal input plus live resize callback support
 
 `pi-coding-agent-tui` already includes coding-agent-specific presentation/runtime helpers such as:
-- transcript-related components
-- user / assistant / tool-execution renderers
+- transcript container plus concrete branch-summary, compaction-summary, user, assistant, tool-execution, skill-invocation, and custom-message components
 - footer and keybinding hint helpers
 - startup header / startup shell
+- custom editor and extension editor components on top of the migrated multiline editor
 - interactive runtime binding via `InteractiveCoreBinding`
 - keybinding migration helpers
 - clipboard-image support slices
@@ -196,6 +197,6 @@ The next practical blocker is no longer workspace creation; it is closing the hi
 
 ## Validation snapshot
 
-Validated on 2026-04-11:
+Validated on 2026-04-13:
 
 - `cd rust && cargo test -q --workspace` passed

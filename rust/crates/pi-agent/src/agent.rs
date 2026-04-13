@@ -2,7 +2,8 @@ use crate::{
     AfterToolCallContext, AfterToolCallHook, AfterToolCallResult, AgentContext, AgentError,
     AgentEvent, AgentEventStream, AgentLoopConfig, AgentMessage, AgentState, AssistantStreamer,
     BeforeToolCallContext, BeforeToolCallHook, BeforeToolCallResult, ConvertToLlmHook,
-    DefaultAssistantStreamer, TransformContextHook, agent_loop, agent_loop_continue,
+    DefaultAssistantStreamer, ToolExecutionMode, TransformContextHook, agent_loop,
+    agent_loop_continue,
 };
 use futures::StreamExt;
 use pi_ai::{AiError, StreamOptions, ThinkingBudgets};
@@ -78,6 +79,7 @@ struct PreparedRun {
     uses_default_streamer: bool,
     stream_options: StreamOptions,
     thinking_budgets: ThinkingBudgets,
+    tool_execution: ToolExecutionMode,
     convert_to_llm: Option<ConvertToLlmHook>,
     transform_context: Option<TransformContextHook>,
     before_tool_call: Option<BeforeToolCallHook>,
@@ -100,6 +102,7 @@ struct AgentInner {
     transform_context: Option<TransformContextHook>,
     before_tool_call: Option<BeforeToolCallHook>,
     after_tool_call: Option<AfterToolCallHook>,
+    tool_execution: ToolExecutionMode,
     steering_queue: PendingMessageQueue,
     follow_up_queue: PendingMessageQueue,
     active_run: Option<ActiveRun>,
@@ -147,6 +150,7 @@ impl Agent {
                 transform_context: None,
                 before_tool_call: None,
                 after_tool_call: None,
+                tool_execution: ToolExecutionMode::Parallel,
                 steering_queue: PendingMessageQueue::default(),
                 follow_up_queue: PendingMessageQueue::default(),
                 active_run: None,
@@ -240,6 +244,14 @@ impl Agent {
 
     pub fn thinking_budgets(&self) -> ThinkingBudgets {
         self.inner.lock().unwrap().thinking_budgets.clone()
+    }
+
+    pub fn set_tool_execution_mode(&self, tool_execution: ToolExecutionMode) {
+        self.inner.lock().unwrap().tool_execution = tool_execution;
+    }
+
+    pub fn tool_execution_mode(&self) -> ToolExecutionMode {
+        self.inner.lock().unwrap().tool_execution
     }
 
     pub fn set_steering_mode(&self, mode: QueueMode) {
@@ -419,6 +431,7 @@ impl Agent {
                 uses_default_streamer: inner.uses_default_streamer,
                 stream_options,
                 thinking_budgets: inner.thinking_budgets.clone(),
+                tool_execution: inner.tool_execution,
                 convert_to_llm: inner.convert_to_llm.clone(),
                 transform_context: inner.transform_context.clone(),
                 before_tool_call: inner.before_tool_call.clone(),
@@ -432,6 +445,7 @@ impl Agent {
             prepared.uses_default_streamer,
             prepared.stream_options,
             prepared.thinking_budgets,
+            prepared.tool_execution,
             prepared.skip_initial_steering_poll,
         );
         if let Some(convert_to_llm) = prepared.convert_to_llm {
@@ -480,13 +494,16 @@ impl Agent {
         uses_default_streamer: bool,
         stream_options: StreamOptions,
         thinking_budgets: ThinkingBudgets,
+        tool_execution: ToolExecutionMode,
         skip_initial_steering_poll: bool,
     ) -> AgentLoopConfig {
         let skip_initial_steering_poll = Arc::new(Mutex::new(skip_initial_steering_poll));
         let steering_inner = self.inner.clone();
         let follow_up_inner = self.inner.clone();
 
-        let mut config = AgentLoopConfig::new(model).with_stream_options(stream_options);
+        let mut config = AgentLoopConfig::new(model)
+            .with_stream_options(stream_options)
+            .with_tool_execution_mode(tool_execution);
         if uses_default_streamer {
             config = config.with_thinking_budgets(thinking_budgets);
         } else {
