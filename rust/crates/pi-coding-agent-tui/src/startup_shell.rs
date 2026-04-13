@@ -24,6 +24,7 @@ type ShortcutCallback = Box<dyn FnMut(String) -> bool + Send + 'static>;
 type SubmitCallback = Box<dyn FnMut(String) + Send + 'static>;
 
 const CLEAR_EXIT_WINDOW: Duration = Duration::from_millis(500);
+const PROMPT_EXTENSION_EDITOR_TITLE: &str = "Edit message";
 
 #[derive(Clone)]
 pub struct StatusHandle {
@@ -229,6 +230,7 @@ pub struct StartupShellComponent {
     extension_editor_events: Arc<Mutex<VecDeque<ExtensionEditorEvent>>>,
     extension_editor_on_submit: Option<SubmitCallback>,
     extension_editor_on_cancel: Option<ActionCallback>,
+    restore_prompt_from_extension_editor: bool,
     focused: bool,
 }
 
@@ -306,6 +308,7 @@ impl StartupShellComponent {
             extension_editor_events: Arc::new(Mutex::new(VecDeque::new())),
             extension_editor_on_submit: None,
             extension_editor_on_cancel: None,
+            restore_prompt_from_extension_editor: false,
             focused: false,
         }
     }
@@ -396,6 +399,18 @@ impl StartupShellComponent {
         self.submit_current_input();
     }
 
+    fn show_prompt_extension_editor(&mut self) {
+        let current_input = self.input_value();
+        let prefill = if current_input.is_empty() {
+            None
+        } else {
+            Some(current_input.as_str())
+        };
+
+        self.show_extension_editor(PROMPT_EXTENSION_EDITOR_TITLE, prefill, |_| {}, || {});
+        self.restore_prompt_from_extension_editor = true;
+    }
+
     fn submit_current_input(&mut self) {
         let value = self.input_value();
         let mut on_submit = self.on_submit.take();
@@ -420,8 +435,14 @@ impl StartupShellComponent {
 
             match event {
                 ExtensionEditorEvent::Submit(value) => {
+                    let restore_prompt_from_extension_editor =
+                        self.restore_prompt_from_extension_editor;
                     let mut on_submit = self.extension_editor_on_submit.take();
                     self.hide_extension_editor();
+                    if restore_prompt_from_extension_editor {
+                        self.set_input_value(value.clone());
+                        self.set_input_cursor(value.len());
+                    }
                     if let Some(callback) = &mut on_submit {
                         callback(value);
                     }
@@ -701,12 +722,14 @@ impl StartupShellComponent {
         self.extension_editor = Some(editor);
         self.extension_editor_on_submit = Some(Box::new(on_submit));
         self.extension_editor_on_cancel = Some(Box::new(on_cancel));
+        self.restore_prompt_from_extension_editor = false;
     }
 
     pub fn hide_extension_editor(&mut self) {
         self.extension_editor = None;
         self.extension_editor_on_submit = None;
         self.extension_editor_on_cancel = None;
+        self.restore_prompt_from_extension_editor = false;
         self.input.set_focused(self.focused);
     }
 
@@ -956,6 +979,14 @@ impl Component for StartupShellComponent {
             return;
         }
 
+        if self.matches_binding(data, "app.editor.external") {
+            if self.invoke_registered_action("app.editor.external") {
+                return;
+            }
+            self.show_prompt_extension_editor();
+            return;
+        }
+
         if self.matches_binding(data, "tui.input.submit") || data == "\n" {
             self.submit_current_input();
             return;
@@ -983,7 +1014,8 @@ impl Component for StartupShellComponent {
 
     fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
-        self.input.set_focused(focused && self.extension_editor.is_none());
+        self.input
+            .set_focused(focused && self.extension_editor.is_none());
         if let Some(extension_editor) = &mut self.extension_editor {
             extension_editor.set_focused(focused);
         }

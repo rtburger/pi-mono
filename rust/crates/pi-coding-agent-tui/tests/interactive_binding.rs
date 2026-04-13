@@ -183,6 +183,146 @@ async fn interactive_binding_submits_prompt_and_renders_user_and_assistant_messa
 }
 
 #[tokio::test]
+async fn interactive_shell_external_editor_action_mounts_extension_editor_and_restores_prompt() {
+    let faux = register_faux_provider(RegisterFauxProviderOptions {
+        provider: "interactive-shell-editor-faux".into(),
+        models: vec![FauxModelDefinition {
+            id: "interactive-shell-editor-faux-1".into(),
+            name: Some("Interactive Shell Editor Faux".into()),
+            reasoning: false,
+        }],
+        ..RegisterFauxProviderOptions::default()
+    });
+    faux.set_responses(vec![FauxResponse::text("Edited prompt received")]);
+    let model = faux
+        .get_model(Some("interactive-shell-editor-faux-1"))
+        .unwrap();
+
+    let created = create_coding_agent_core(CodingAgentCoreOptions {
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            model.provider.clone(),
+            "test-token",
+        )])),
+        built_in_models: vec![model],
+        models_json_path: None,
+        cwd: Some(unique_temp_dir("interactive-shell-editor-cwd")),
+        tools: None,
+        system_prompt: String::new(),
+        bootstrap: SessionBootstrapOptions::default(),
+        stream_options: StreamOptions::default(),
+    })
+    .unwrap();
+
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+
+    let terminal = RecordingTerminal::new();
+    let mut tui = Tui::new(terminal);
+    let binding =
+        InteractiveCoreBinding::bind(created.core.clone(), &mut shell, tui.render_handle());
+    let shell_id = tui.add_child(Box::new(shell));
+    assert!(tui.set_focus_child(shell_id));
+    tui.start().expect("start should succeed");
+
+    tui.handle_input("h").expect("input should be handled");
+    tui.handle_input("i").expect("input should be handled");
+    tui.handle_input("\x07")
+        .expect("external-editor action should be handled");
+
+    let extension_editor_lines = tui.render_current();
+    assert!(
+        extension_editor_lines
+            .iter()
+            .any(|line| line.contains("Edit message"))
+    );
+    assert!(
+        !extension_editor_lines
+            .iter()
+            .any(|line| line.contains("> hi"))
+    );
+
+    tui.handle_input("!")
+        .expect("extension editor input should be handled");
+    tui.handle_input("\r")
+        .expect("extension editor submit should be handled");
+
+    let restored_prompt_lines = tui.render_current();
+    assert!(
+        restored_prompt_lines
+            .iter()
+            .any(|line| line.contains("> hi!"))
+    );
+
+    tui.handle_input("\r")
+        .expect("prompt submit should be handled");
+
+    tokio::task::yield_now().await;
+    created.core.wait_for_idle().await;
+    tui.drain_terminal_events()
+        .expect("queued interactive updates should drain successfully");
+
+    let lines = tui.render_current();
+    assert!(lines.iter().any(|line| line.contains("hi!")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Edited prompt received"))
+    );
+
+    drop(binding);
+    tui.stop().expect("stop should succeed");
+    faux.unregister();
+}
+
+#[tokio::test]
+async fn interactive_shell_external_editor_action_respects_registered_override() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_input_value("draft prompt");
+    shell.set_input_cursor("draft prompt".len());
+
+    let action_calls = Arc::new(Mutex::new(0usize));
+    let action_calls_for_handler = Arc::clone(&action_calls);
+    shell.on_action("app.editor.external", move || {
+        *action_calls_for_handler
+            .lock()
+            .expect("action mutex poisoned") += 1;
+    });
+
+    let terminal = RecordingTerminal::new();
+    let mut tui = Tui::new(terminal);
+    let shell_id = tui.add_child(Box::new(shell));
+    assert!(tui.set_focus_child(shell_id));
+    tui.start().expect("start should succeed");
+
+    tui.handle_input("\x07")
+        .expect("external-editor action should be handled");
+
+    let lines = tui.render_current();
+    assert_eq!(*action_calls.lock().expect("action mutex poisoned"), 1);
+    assert!(lines.iter().any(|line| line.contains("draft prompt")));
+    assert!(!lines.iter().any(|line| line.contains("Edit message")));
+
+    tui.stop().expect("stop should succeed");
+}
+
+#[tokio::test]
 async fn interactive_binding_renders_tool_execution_updates() {
     let cwd = unique_temp_dir("interactive-tool-binding-cwd");
     let faux = register_faux_provider(RegisterFauxProviderOptions {
