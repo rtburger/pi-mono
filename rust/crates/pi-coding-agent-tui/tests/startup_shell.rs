@@ -642,6 +642,86 @@ fn startup_shell_default_paste_image_ignores_empty_clipboard() {
 }
 
 #[test]
+fn startup_shell_can_show_extension_editor_and_restore_hidden_prompt_after_submit() {
+    let submitted = Arc::new(Mutex::new(None::<String>));
+    let submitted_for_callback = Arc::clone(&submitted);
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_input_value("hidden prompt");
+    shell.show_extension_editor(
+        "Extension editor",
+        Some("prefill"),
+        move |value| {
+            *submitted_for_callback
+                .lock()
+                .expect("submitted mutex poisoned") = Some(value);
+        },
+        || {},
+    );
+
+    assert!(shell.is_showing_extension_editor());
+    let lines = shell.render(60);
+    assert!(lines.iter().any(|line| line.contains("Extension editor")));
+    assert!(!lines.iter().any(|line| line.contains("hidden prompt")));
+
+    shell.handle_input("x");
+    shell.handle_input("\r");
+
+    assert_eq!(
+        submitted
+            .lock()
+            .expect("submitted mutex poisoned")
+            .as_deref(),
+        Some("prefillx")
+    );
+    assert!(!shell.is_showing_extension_editor());
+    assert_eq!(shell.input_value(), "hidden prompt");
+}
+
+#[test]
+fn startup_shell_can_cancel_extension_editor_and_restore_hidden_prompt() {
+    let cancelled = Arc::new(Mutex::new(0usize));
+    let cancelled_for_callback = Arc::clone(&cancelled);
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_input_value("hidden prompt");
+    shell.show_extension_editor(
+        "Extension editor",
+        Some("prefill"),
+        |_| {},
+        move || {
+            *cancelled_for_callback
+                .lock()
+                .expect("cancelled mutex poisoned") += 1;
+        },
+    );
+
+    assert!(shell.is_showing_extension_editor());
+    shell.handle_input("x");
+    shell.handle_input("\x1b");
+
+    assert_eq!(*cancelled.lock().expect("cancelled mutex poisoned"), 1);
+    assert!(!shell.is_showing_extension_editor());
+    assert_eq!(shell.input_value(), "hidden prompt");
+}
+
+#[test]
 fn startup_shell_paste_image_callback_overrides_default_clipboard_insert() {
     let temp_dir = TestDir::new("startup-shell-paste-image-callback");
     let paste_calls = Arc::new(Mutex::new(0usize));

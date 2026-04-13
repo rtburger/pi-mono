@@ -1,9 +1,9 @@
 use crate::{
     AssistantMessageComponent, BuiltInHeaderComponent, ClipboardImageSource,
-    DEFAULT_HIDDEN_THINKING_LABEL, FooterComponent, FooterState, KeyHintStyler, KeybindingsManager,
-    PendingMessagesComponent, StartupHeaderStyler, ToolExecutionComponent, ToolExecutionOptions,
-    ToolExecutionResult, TranscriptComponent, UserMessageComponent,
-    paste_clipboard_image_into_shell,
+    DEFAULT_HIDDEN_THINKING_LABEL, ExtensionEditorComponent, FooterComponent, FooterState,
+    KeyHintStyler, KeybindingsManager, PendingMessagesComponent, StartupHeaderStyler,
+    ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult, TranscriptComponent,
+    UserMessageComponent, paste_clipboard_image_into_shell,
 };
 use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
 use pi_events::{AssistantMessage, UserContent};
@@ -117,6 +117,11 @@ enum ShellUpdate {
     },
 }
 
+enum ExtensionEditorEvent {
+    Submit(String),
+    Cancel,
+}
+
 #[derive(Clone)]
 pub(crate) struct ShellUpdateHandle {
     pending_updates: Arc<Mutex<VecDeque<ShellUpdate>>>,
@@ -220,6 +225,11 @@ pub struct StartupShellComponent {
     pending_updates: Arc<Mutex<VecDeque<ShellUpdate>>>,
     current_assistant: RefCell<Option<SharedComponent<AssistantMessageComponent>>>,
     tool_components: RefCell<HashMap<String, SharedComponent<ToolExecutionComponent>>>,
+    extension_editor: Option<ExtensionEditorComponent>,
+    extension_editor_events: Arc<Mutex<VecDeque<ExtensionEditorEvent>>>,
+    extension_editor_on_submit: Option<SubmitCallback>,
+    extension_editor_on_cancel: Option<ActionCallback>,
+    focused: bool,
 }
 
 impl StatusHandle {
@@ -292,6 +302,11 @@ impl StartupShellComponent {
             pending_updates: Arc::new(Mutex::new(VecDeque::new())),
             current_assistant: RefCell::new(None),
             tool_components: RefCell::new(HashMap::new()),
+            extension_editor: None,
+            extension_editor_events: Arc::new(Mutex::new(VecDeque::new())),
+            extension_editor_on_submit: None,
+            extension_editor_on_cancel: None,
+            focused: false,
         }
     }
 
@@ -382,7 +397,7 @@ impl StartupShellComponent {
     }
 
     fn submit_current_input(&mut self) {
-        let value = self.input_value().to_owned();
+        let value = self.input_value();
         let mut on_submit = self.on_submit.take();
         if let Some(callback) = &mut on_submit {
             self.clear_input();
@@ -390,6 +405,36 @@ impl StartupShellComponent {
             callback(value);
         }
         self.on_submit = on_submit;
+    }
+
+    fn drain_extension_editor_events(&mut self) {
+        loop {
+            let event = self
+                .extension_editor_events
+                .lock()
+                .expect("extension editor events mutex poisoned")
+                .pop_front();
+            let Some(event) = event else {
+                break;
+            };
+
+            match event {
+                ExtensionEditorEvent::Submit(value) => {
+                    let mut on_submit = self.extension_editor_on_submit.take();
+                    self.hide_extension_editor();
+                    if let Some(callback) = &mut on_submit {
+                        callback(value);
+                    }
+                }
+                ExtensionEditorEvent::Cancel => {
+                    let mut on_cancel = self.extension_editor_on_cancel.take();
+                    self.hide_extension_editor();
+                    if let Some(callback) = &mut on_cancel {
+                        callback();
+                    }
+                }
+            }
+        }
     }
 
     fn drain_pending_updates(&self) {
@@ -598,8 +643,8 @@ impl StartupShellComponent {
             .retain(|(candidate, _)| candidate != action);
     }
 
-    pub fn input_value(&self) -> &str {
-        self.input.value()
+    pub fn input_value(&self) -> String {
+        self.input.value().to_owned()
     }
 
     pub fn set_input_value(&mut self, value: impl Into<String>) {
@@ -616,6 +661,57 @@ impl StartupShellComponent {
 
     pub fn clear_input(&mut self) {
         self.input.clear();
+    }
+
+    pub fn show_extension_editor<F, G>(
+        &mut self,
+        title: impl Into<String>,
+        prefill: Option<&str>,
+        on_submit: F,
+        on_cancel: G,
+    ) where
+        F: FnMut(String) + Send + 'static,
+        G: FnMut() + Send + 'static,
+    {
+        self.hide_extension_editor();
+
+        let mut editor = ExtensionEditorComponent::new(&self.keybindings, title, prefill);
+        let events = Arc::clone(&self.extension_editor_events);
+        editor.set_on_submit(move |value| {
+            events
+                .lock()
+                .expect("extension editor events mutex poisoned")
+                .push_back(ExtensionEditorEvent::Submit(value));
+        });
+
+        let events = Arc::clone(&self.extension_editor_events);
+        editor.set_on_cancel(move || {
+            events
+                .lock()
+                .expect("extension editor events mutex poisoned")
+                .push_back(ExtensionEditorEvent::Cancel);
+        });
+
+        if let Some((width, height)) = self.viewport_size.get() {
+            editor.set_viewport_size(width, height);
+        }
+
+        self.input.set_focused(false);
+        editor.set_focused(self.focused);
+        self.extension_editor = Some(editor);
+        self.extension_editor_on_submit = Some(Box::new(on_submit));
+        self.extension_editor_on_cancel = Some(Box::new(on_cancel));
+    }
+
+    pub fn hide_extension_editor(&mut self) {
+        self.extension_editor = None;
+        self.extension_editor_on_submit = None;
+        self.extension_editor_on_cancel = None;
+        self.input.set_focused(self.focused);
+    }
+
+    pub fn is_showing_extension_editor(&self) -> bool {
+        self.extension_editor.is_some()
     }
 
     pub fn add_transcript_item(&mut self, component: Box<dyn Component>) -> ComponentId {
@@ -742,7 +838,7 @@ impl StartupShellComponent {
     }
 
     pub fn is_focused(&self) -> bool {
-        self.input.is_focused()
+        self.focused
     }
 }
 
@@ -751,7 +847,11 @@ impl Component for StartupShellComponent {
         self.drain_pending_updates();
         let header_lines = self.header.render(width);
         let pending_lines = self.pending_messages.render(width);
-        let input_lines = self.input.render(width);
+        let input_lines = if let Some(extension_editor) = &self.extension_editor {
+            extension_editor.render(width)
+        } else {
+            self.input.render(width)
+        };
         let footer_lines = self.footer.render(width);
         let status_lines = self.render_status(width);
         let transcript_height = self.transcript_viewport_height_for_width(width);
@@ -774,11 +874,21 @@ impl Component for StartupShellComponent {
         self.header.invalidate();
         self.transcript.borrow_mut().invalidate();
         self.pending_messages.invalidate();
-        self.input.invalidate();
+        if let Some(extension_editor) = &mut self.extension_editor {
+            extension_editor.invalidate();
+        } else {
+            self.input.invalidate();
+        }
         self.footer.invalidate();
     }
 
     fn handle_input(&mut self, data: &str) {
+        if let Some(extension_editor) = &mut self.extension_editor {
+            extension_editor.handle_input(data);
+            self.drain_extension_editor_events();
+            return;
+        }
+
         if let Some(on_extension_shortcut) = &mut self.on_extension_shortcut
             && on_extension_shortcut(data.to_owned())
         {
@@ -872,7 +982,11 @@ impl Component for StartupShellComponent {
     }
 
     fn set_focused(&mut self, focused: bool) {
-        self.input.set_focused(focused);
+        self.focused = focused;
+        self.input.set_focused(focused && self.extension_editor.is_none());
+        if let Some(extension_editor) = &mut self.extension_editor {
+            extension_editor.set_focused(focused);
+        }
     }
 
     fn set_viewport_size(&self, width: usize, height: usize) {
@@ -881,6 +995,9 @@ impl Component for StartupShellComponent {
         self.transcript.borrow().set_viewport_size(width, height);
         self.pending_messages.set_viewport_size(width, height);
         self.input.set_viewport_size(width, height);
+        if let Some(extension_editor) = &self.extension_editor {
+            extension_editor.set_viewport_size(width, height);
+        }
         self.footer.set_viewport_size(width, height);
     }
 }
