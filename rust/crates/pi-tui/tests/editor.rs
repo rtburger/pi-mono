@@ -1,6 +1,7 @@
 use pi_tui::{
-    AutocompleteProvider, AutocompleteSuggestions, CURSOR_MARKER, Component, Editor, EditorCursor,
-    EditorOptions, apply_completion, visible_width, word_wrap_line,
+    AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, CURSOR_MARKER,
+    CombinedAutocompleteProvider, Component, Editor, EditorCursor, EditorOptions, SlashCommand,
+    apply_completion, visible_width, word_wrap_line,
 };
 use regex::Regex;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -43,6 +44,13 @@ fn all_markers(text: &str) -> Vec<String> {
         .find_iter(text)
         .map(|marker| marker.as_str().to_owned())
         .collect()
+}
+
+fn slash_command_provider(commands: Vec<SlashCommand>) -> Arc<CombinedAutocompleteProvider> {
+    Arc::new(CombinedAutocompleteProvider::new(
+        commands,
+        std::env::temp_dir(),
+    ))
 }
 
 #[test]
@@ -768,6 +776,125 @@ fn submit_expands_large_paste_markers() {
             .expect("submitted mutex poisoned")
             .as_deref(),
         Some(pasted_text.as_str())
+    );
+}
+
+#[test]
+fn typing_initial_slash_auto_triggers_command_autocomplete_and_backspacing_hides_it() {
+    let mut editor = Editor::new();
+    editor.set_autocomplete_provider(slash_command_provider(vec![
+        SlashCommand {
+            name: String::from("model"),
+            description: Some(String::from("Select model")),
+            argument_completions: None,
+        },
+        SlashCommand {
+            name: String::from("help"),
+            description: Some(String::from("Show help")),
+            argument_completions: None,
+        },
+    ]));
+
+    editor.handle_input("/");
+
+    assert_eq!(editor.get_text(), "/");
+    assert!(editor.is_showing_autocomplete());
+    let lines = editor.render(40);
+    assert!(lines.iter().any(|line| line.contains("model")));
+    assert!(lines.iter().any(|line| line.contains("help")));
+
+    editor.handle_input("\x7f");
+
+    assert_eq!(editor.get_text(), "");
+    assert!(!editor.is_showing_autocomplete());
+}
+
+#[test]
+fn typing_in_prefilled_slash_argument_context_auto_triggers_argument_autocomplete() {
+    let mut editor = Editor::new();
+    editor.set_autocomplete_provider(slash_command_provider(vec![SlashCommand {
+        name: String::from("load-skills"),
+        description: Some(String::from("Load skills")),
+        argument_completions: Some(Arc::new(|prefix| {
+            prefix.starts_with('s').then_some(vec![AutocompleteItem {
+                value: String::from("skill-a"),
+                label: String::from("skill-a"),
+                description: None,
+            }])
+        })),
+    }]));
+    editor.set_text("/load-skills ");
+
+    editor.handle_input("s");
+
+    assert!(editor.is_showing_autocomplete());
+    editor.handle_input("\t");
+    assert_eq!(editor.get_text(), "/load-skills skill-a");
+    assert!(!editor.is_showing_autocomplete());
+}
+
+#[test]
+fn enter_keeps_exact_typed_model_argument_when_autocomplete_is_showing() {
+    let mut editor = Editor::new();
+    editor.set_autocomplete_provider(slash_command_provider(vec![SlashCommand {
+        name: String::from("model"),
+        description: Some(String::from("Switch model")),
+        argument_completions: Some(Arc::new(|prefix| {
+            let items = ["gpt-4o", "gpt-4o-mini", "claude-sonnet"]
+                .into_iter()
+                .filter(|value| value.starts_with(prefix))
+                .map(|value| AutocompleteItem {
+                    value: value.to_owned(),
+                    label: value.to_owned(),
+                    description: None,
+                })
+                .collect::<Vec<_>>();
+            (!items.is_empty()).then_some(items)
+        })),
+    }]));
+    editor.set_text("/model ");
+    type_text(&mut editor, "gpt-4o-mini");
+
+    assert!(editor.is_showing_autocomplete());
+    editor.handle_input("\r");
+
+    assert_eq!(editor.get_text(), "/model gpt-4o-mini");
+    assert!(!editor.is_showing_autocomplete());
+}
+
+#[test]
+fn enter_submits_a_slash_command_name_after_accepting_completion() {
+    let submitted = Arc::new(Mutex::new(None::<String>));
+    let submitted_clone = Arc::clone(&submitted);
+
+    let mut editor = Editor::new();
+    editor.set_autocomplete_provider(slash_command_provider(vec![
+        SlashCommand {
+            name: String::from("quit"),
+            description: Some(String::from("Quit pi")),
+            argument_completions: None,
+        },
+        SlashCommand {
+            name: String::from("model"),
+            description: Some(String::from("Switch model")),
+            argument_completions: None,
+        },
+    ]));
+    editor.set_on_submit(move |value| {
+        *submitted_clone.lock().expect("submitted mutex poisoned") = Some(value);
+    });
+    type_text(&mut editor, "/quit");
+
+    assert!(editor.is_showing_autocomplete());
+    editor.handle_input("\r");
+
+    assert_eq!(editor.get_text(), "");
+    assert_eq!(
+        submitted
+            .lock()
+            .expect("submitted mutex poisoned")
+            .as_deref(),
+        Some("/quit")
     );
 }
 

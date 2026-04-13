@@ -1034,7 +1034,8 @@ async fn run_interactive_command_switches_models_via_model_slash_command() {
     let initial_model_id = unique_name("alpha-model");
     let switched_model_id = unique_name("beta-model");
     let (api, recorded) = register_recording_provider("interactive-switched");
-    let mut script = format!("/model {provider}/{switched_model_id}")
+    let partial_model_id = &switched_model_id[..switched_model_id.len().min(4)];
+    let mut script = format!("/model {partial_model_id}")
         .chars()
         .map(|character| {
             (
@@ -1044,6 +1045,10 @@ async fn run_interactive_command_switches_models_via_model_slash_command() {
         })
         .collect::<Vec<_>>();
     script.extend([
+        (
+            Duration::from_millis(25),
+            TerminalAction::Input(String::from("\r")),
+        ),
         (
             Duration::from_millis(25),
             TerminalAction::Input(String::from("\r")),

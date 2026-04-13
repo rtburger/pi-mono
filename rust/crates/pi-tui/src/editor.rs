@@ -367,13 +367,19 @@ impl Editor {
                 return;
             }
 
-            if self.matches_binding(&current, "tui.input.tab")
-                || self.matches_binding(&current, "tui.select.confirm")
+            if self.matches_binding(&current, "tui.input.tab") {
+                self.accept_autocomplete_selection();
+                return;
+            }
+
+            if self.matches_binding(&current, "tui.select.confirm")
                 || self.matches_binding(&current, "tui.input.submit")
                 || current == "\r"
             {
-                self.accept_autocomplete_selection();
-                return;
+                let submit_slash_command = self.accept_autocomplete_selection();
+                if !submit_slash_command {
+                    return;
+                }
             }
         }
 
@@ -646,7 +652,7 @@ impl Editor {
 
         self.last_action = Some(EditorAction::TypeWord);
         self.insert_text_at_cursor_internal(character);
-        self.refresh_autocomplete_after_edit();
+        self.refresh_autocomplete_after_character_input(character);
     }
 
     fn handle_paste(&mut self, pasted_text: &str) {
@@ -749,7 +755,7 @@ impl Editor {
 
         self.preferred_visual_col = None;
         self.emit_change();
-        self.refresh_autocomplete_after_edit();
+        self.refresh_autocomplete_after_delete();
     }
 
     fn handle_forward_delete(&mut self) {
@@ -778,7 +784,7 @@ impl Editor {
 
         self.preferred_visual_col = None;
         self.emit_change();
-        self.refresh_autocomplete_after_edit();
+        self.refresh_autocomplete_after_delete();
     }
 
     fn move_to_line_start(&mut self) {
@@ -1444,6 +1450,16 @@ impl Editor {
         self.emit_change();
     }
 
+    fn is_at_start_of_message(&self) -> bool {
+        if self.cursor_line != 0 {
+            return false;
+        }
+
+        let before_cursor = self.current_line_before_cursor();
+        let trimmed = before_cursor.trim();
+        trimmed.is_empty() || trimmed == "/"
+    }
+
     fn is_in_slash_command_context(&self) -> bool {
         self.cursor_line == 0
             && self
@@ -1545,16 +1561,18 @@ impl Editor {
         self.emit_change();
     }
 
-    fn accept_autocomplete_selection(&mut self) {
+    fn accept_autocomplete_selection(&mut self) -> bool {
         let Some(state) = &self.autocomplete_state else {
-            return;
+            return false;
         };
         let Some(item) = state.items.get(state.selected).cloned() else {
             self.cancel_autocomplete();
-            return;
+            return false;
         };
         let prefix = state.prefix.clone();
+        let submit_slash_command = prefix.starts_with('/');
         self.apply_autocomplete_completion(item, &prefix);
+        submit_slash_command
     }
 
     fn move_autocomplete_selection(&mut self, delta: isize) {
@@ -1579,9 +1597,32 @@ impl Editor {
         }
     }
 
-    fn refresh_autocomplete_after_edit(&mut self) {
+    fn refresh_autocomplete_after_character_input(&mut self, character: &str) {
         if self.is_showing_autocomplete() {
             self.update_autocomplete();
+            return;
+        }
+
+        if character == "/" {
+            if self.is_at_start_of_message() {
+                self.request_autocomplete(false, false);
+            }
+            return;
+        }
+
+        if is_slash_autocomplete_char(character) && self.is_in_slash_command_context() {
+            self.request_autocomplete(false, false);
+        }
+    }
+
+    fn refresh_autocomplete_after_delete(&mut self) {
+        if self.is_showing_autocomplete() {
+            self.update_autocomplete();
+            return;
+        }
+
+        if self.is_in_slash_command_context() {
+            self.request_autocomplete(false, false);
         }
     }
 
@@ -1964,6 +2005,12 @@ fn contains_control_characters(data: &str) -> bool {
         let code = character as u32;
         code < 32 || code == 0x7f || (0x80..=0x9f).contains(&code)
     })
+}
+
+fn is_slash_autocomplete_char(character: &str) -> bool {
+    character
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_'))
 }
 
 fn grapheme_is_whitespace(grapheme: &str) -> bool {
