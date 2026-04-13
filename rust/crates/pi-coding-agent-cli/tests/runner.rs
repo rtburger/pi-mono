@@ -678,6 +678,90 @@ async fn run_interactive_command_renders_live_transcript_and_exits() {
 }
 
 #[tokio::test]
+async fn run_interactive_command_loads_autocomplete_max_visible_setting_for_prompt() {
+    let provider = unique_name("interactive-provider");
+    let model_id = unique_name("interactive-model");
+    let (api, _recorded) = register_recording_provider("unused");
+    let built_in_model = model(&api, &provider, &model_id);
+    let cwd = unique_temp_dir("runner-interactive-autocomplete-cwd");
+    let agent_dir = unique_temp_dir("runner-interactive-autocomplete-agent");
+    for index in 1..=4 {
+        fs::write(cwd.join(format!("readme-{index}.md")), String::new()).unwrap();
+    }
+    fs::write(
+        agent_dir.join("settings.json"),
+        serde_json::json!({
+            "autocompleteMaxVisible": 3
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let terminal = ScriptedTerminal::new(vec![
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("r")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("e")),
+        ),
+        (
+            Duration::from_millis(25),
+            TerminalAction::Input(String::from("\t")),
+        ),
+        (
+            Duration::from_millis(80),
+            TerminalAction::Input(String::from("\x7f")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("\x7f")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("\x04")),
+        ),
+    ]);
+    let inspector = terminal.clone();
+
+    let exit_code = run_interactive_command_with_terminal(
+        RunCommandOptions {
+            args: vec![
+                String::from("--provider"),
+                provider.clone(),
+                String::from("--model"),
+                model_id.clone(),
+            ],
+            stdin_is_tty: true,
+            stdin_content: None,
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![built_in_model],
+            models_json_path: None,
+            agent_dir: Some(agent_dir),
+            cwd,
+            default_system_prompt: String::new(),
+            version: String::from("0.1.0"),
+            stream_options: StreamOptions::default(),
+        },
+        Arc::new(move || Box::new(terminal.clone())),
+    )
+    .await;
+
+    assert_eq!(exit_code, 0);
+    let output = inspector.output();
+    assert!(output.contains("readme-1.md"), "output: {output}");
+    assert!(output.contains("readme-2.md"), "output: {output}");
+    assert!(output.contains("readme-3.md"), "output: {output}");
+    assert!(!output.contains("readme-4.md"), "output: {output}");
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
 async fn run_command_lists_models_without_entering_print_or_interactive_mode() {
     let result = run_command(RunCommandOptions {
         args: vec![String::from("--list-models")],

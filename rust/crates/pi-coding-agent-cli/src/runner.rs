@@ -266,6 +266,7 @@ pub async fn run_interactive_command_with_terminal(
         None,
         false,
     );
+    shell.set_autocomplete_max_visible(runtime_settings.settings.autocomplete_max_visible);
     shell.set_autocomplete_provider(Arc::new(CombinedAutocompleteProvider::new(
         Vec::new(),
         cwd.clone(),

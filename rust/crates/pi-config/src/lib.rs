@@ -51,10 +51,21 @@ pub struct ThinkingBudgetsSettings {
     pub high: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSettings {
     pub images: ImageSettings,
     pub thinking_budgets: ThinkingBudgetsSettings,
+    pub autocomplete_max_visible: usize,
+}
+
+impl Default for RuntimeSettings {
+    fn default() -> Self {
+        Self {
+            images: ImageSettings::default(),
+            thinking_budgets: ThinkingBudgetsSettings::default(),
+            autocomplete_max_visible: 5,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -70,6 +81,7 @@ struct RawSettings {
     images: RawImageSettings,
     #[serde(default)]
     thinking_budgets: RawThinkingBudgetsSettings,
+    autocomplete_max_visible: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -128,6 +140,13 @@ fn apply_settings_file(loaded: &mut LoadedRuntimeSettings, scope: SettingsScope,
     }
     if let Some(high) = parsed.thinking_budgets.high {
         loaded.settings.thinking_budgets.high = Some(high);
+    }
+
+    if let Some(autocomplete_max_visible) = parsed.autocomplete_max_visible {
+        if autocomplete_max_visible.is_finite() {
+            loaded.settings.autocomplete_max_visible =
+                autocomplete_max_visible.floor().clamp(3.0, 20.0) as usize;
+        }
     }
 }
 
