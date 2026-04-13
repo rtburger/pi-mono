@@ -1,9 +1,9 @@
 use crate::{
     AssistantMessageComponent, BuiltInHeaderComponent, ClipboardImageSource, CustomEditor,
     DEFAULT_HIDDEN_THINKING_LABEL, ExtensionEditorComponent, FooterComponent, FooterState,
-    KeyHintStyler, KeybindingsManager, PendingMessagesComponent, StartupHeaderStyler,
-    ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult, TranscriptComponent,
-    UserMessageComponent, paste_clipboard_image_into_shell,
+    FooterStateHandle, KeyHintStyler, KeybindingsManager, PendingMessagesComponent,
+    StartupHeaderStyler, ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult,
+    TranscriptComponent, UserMessageComponent, paste_clipboard_image_into_shell,
 };
 use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
 use pi_events::{AssistantMessage, UserContent};
@@ -853,6 +853,17 @@ impl StartupShellComponent {
 
     pub fn set_footer_state(&mut self, state: FooterState) {
         self.footer.set_state(state);
+    }
+
+    pub fn footer_state_handle(&self) -> FooterStateHandle {
+        self.footer.state_handle()
+    }
+
+    pub fn footer_state_handle_with_render_handle(
+        &self,
+        render_handle: RenderHandle,
+    ) -> FooterStateHandle {
+        self.footer.state_handle_with_render_handle(render_handle)
     }
 
     pub fn clear_footer(&mut self) {

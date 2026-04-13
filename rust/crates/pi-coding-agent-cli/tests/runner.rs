@@ -894,6 +894,237 @@ async fn run_interactive_command_loads_autocomplete_max_visible_setting_for_prom
 }
 
 #[tokio::test]
+async fn run_interactive_command_renders_slash_command_autocomplete_for_supported_commands() {
+    let provider = unique_name("interactive-provider");
+    let model_id = unique_name("interactive-model");
+    let (api, _recorded) = register_recording_provider("unused");
+    let built_in_model = model(&api, &provider, &model_id);
+    let terminal = ScriptedTerminal::new(vec![
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("/")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("m")),
+        ),
+        (
+            Duration::from_millis(25),
+            TerminalAction::Input(String::from("\t")),
+        ),
+        (
+            Duration::from_millis(40),
+            TerminalAction::Input(String::from("\x03")),
+        ),
+        (
+            Duration::from_millis(40),
+            TerminalAction::Input(String::from("\x04")),
+        ),
+    ]);
+    let inspector = terminal.clone();
+
+    let exit_code = run_interactive_command_with_terminal(
+        RunCommandOptions {
+            args: vec![
+                String::from("--provider"),
+                provider.clone(),
+                String::from("--model"),
+                model_id.clone(),
+            ],
+            stdin_is_tty: true,
+            stdin_content: None,
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![built_in_model],
+            models_json_path: None,
+            agent_dir: None,
+            cwd: unique_temp_dir("runner-interactive-slash-autocomplete"),
+            default_system_prompt: String::new(),
+            version: String::from("0.1.0"),
+            stream_options: StreamOptions::default(),
+        },
+        Arc::new(move || Box::new(terminal.clone())),
+    )
+    .await;
+
+    assert_eq!(exit_code, 0);
+    let output = strip_terminal_control_sequences(&inspector.output());
+    assert!(output.contains("model — Select model"), "output: {output}");
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
+async fn run_interactive_command_executes_quit_slash_command_without_prompting_model() {
+    let provider = unique_name("interactive-provider");
+    let model_id = unique_name("interactive-model");
+    let (api, recorded) = register_recording_provider("unused");
+    let built_in_model = model(&api, &provider, &model_id);
+    let terminal = ScriptedTerminal::new(vec![
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("/")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("q")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("u")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("i")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("t")),
+        ),
+        (
+            Duration::from_millis(25),
+            TerminalAction::Input(String::from("\r")),
+        ),
+        (
+            Duration::from_millis(40),
+            TerminalAction::Input(String::from("\x04")),
+        ),
+    ]);
+    let inspector = terminal.clone();
+
+    let exit_code = run_interactive_command_with_terminal(
+        RunCommandOptions {
+            args: vec![
+                String::from("--provider"),
+                provider.clone(),
+                String::from("--model"),
+                model_id.clone(),
+            ],
+            stdin_is_tty: true,
+            stdin_content: None,
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![built_in_model],
+            models_json_path: None,
+            agent_dir: None,
+            cwd: unique_temp_dir("runner-interactive-quit-command"),
+            default_system_prompt: String::new(),
+            version: String::from("0.1.0"),
+            stream_options: StreamOptions::default(),
+        },
+        Arc::new(move || Box::new(terminal.clone())),
+    )
+    .await;
+
+    assert_eq!(exit_code, 0);
+    assert!(recorded.lock().unwrap().context.is_none());
+    let output = strip_terminal_control_sequences(&inspector.output());
+    assert!(output.contains("/quit"), "output: {output}");
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
+async fn run_interactive_command_switches_models_via_model_slash_command() {
+    let provider = unique_name("interactive-provider");
+    let initial_model_id = unique_name("alpha-model");
+    let switched_model_id = unique_name("beta-model");
+    let (api, recorded) = register_recording_provider("interactive-switched");
+    let mut script = format!("/model {provider}/{switched_model_id}")
+        .chars()
+        .map(|character| {
+            (
+                Duration::from_millis(5),
+                TerminalAction::Input(character.to_string()),
+            )
+        })
+        .collect::<Vec<_>>();
+    script.extend([
+        (
+            Duration::from_millis(25),
+            TerminalAction::Input(String::from("\r")),
+        ),
+        (
+            Duration::from_millis(40),
+            TerminalAction::Input(String::from("h")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("i")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("\r")),
+        ),
+        (
+            Duration::from_millis(80),
+            TerminalAction::Input(String::from("\x04")),
+        ),
+    ]);
+    let terminal = ScriptedTerminal::new(script);
+    let inspector = terminal.clone();
+
+    let exit_code = run_interactive_command_with_terminal(
+        RunCommandOptions {
+            args: vec![
+                String::from("--provider"),
+                provider.clone(),
+                String::from("--model"),
+                initial_model_id.clone(),
+            ],
+            stdin_is_tty: true,
+            stdin_content: None,
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![
+                model(&api, &provider, &initial_model_id),
+                model(&api, &provider, &switched_model_id),
+            ],
+            models_json_path: None,
+            agent_dir: None,
+            cwd: unique_temp_dir("runner-interactive-model-command"),
+            default_system_prompt: String::new(),
+            version: String::from("0.1.0"),
+            stream_options: StreamOptions::default(),
+        },
+        Arc::new(move || Box::new(terminal.clone())),
+    )
+    .await;
+
+    assert_eq!(exit_code, 0);
+    let output = strip_terminal_control_sequences(&inspector.output());
+    assert!(output.contains("Model:"), "output: {output}");
+    assert!(output.contains(&switched_model_id), "output: {output}");
+    assert!(output.contains("interactive-switched"), "output: {output}");
+
+    let request = recorded.lock().unwrap().clone();
+    assert_eq!(
+        request.model.as_ref().map(|model| model.id.as_str()),
+        Some(switched_model_id.as_str())
+    );
+    let context = request.context.expect("expected recorded context");
+    match context.messages.first() {
+        Some(pi_events::Message::User { content, .. }) => {
+            assert_eq!(
+                content,
+                &vec![UserContent::Text {
+                    text: String::from("hi"),
+                }]
+            );
+        }
+        other => panic!("expected user message, got {other:?}"),
+    }
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
 async fn run_command_lists_models_without_entering_print_or_interactive_mode() {
     let result = run_command(RunCommandOptions {
         args: vec![String::from("--list-models")],

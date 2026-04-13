@@ -64,8 +64,37 @@ impl Default for FooterState {
     }
 }
 
+#[derive(Clone)]
+pub struct FooterStateHandle {
+    state: Arc<Mutex<FooterState>>,
+    render_handle: Option<RenderHandle>,
+}
+
+impl FooterStateHandle {
+    fn new(state: Arc<Mutex<FooterState>>, render_handle: Option<RenderHandle>) -> Self {
+        Self {
+            state,
+            render_handle,
+        }
+    }
+
+    pub fn set_state(&self, state: FooterState) {
+        *self.state.lock().expect("footer state mutex poisoned") = state;
+        if let Some(render_handle) = &self.render_handle {
+            render_handle.request_render();
+        }
+    }
+
+    pub fn update(&self, updater: impl FnOnce(&mut FooterState)) {
+        updater(&mut self.state.lock().expect("footer state mutex poisoned"));
+        if let Some(render_handle) = &self.render_handle {
+            render_handle.request_render();
+        }
+    }
+}
+
 pub struct FooterComponent {
-    state: Mutex<FooterState>,
+    state: Arc<Mutex<FooterState>>,
     pending_snapshot: Arc<Mutex<Option<FooterDataSnapshot>>>,
     data_subscription: Mutex<Option<BranchChangeSubscription>>,
 }
@@ -73,10 +102,21 @@ pub struct FooterComponent {
 impl FooterComponent {
     pub fn new(state: FooterState) -> Self {
         Self {
-            state: Mutex::new(state),
+            state: Arc::new(Mutex::new(state)),
             pending_snapshot: Arc::new(Mutex::new(None)),
             data_subscription: Mutex::new(None),
         }
+    }
+
+    pub fn state_handle(&self) -> FooterStateHandle {
+        FooterStateHandle::new(Arc::clone(&self.state), None)
+    }
+
+    pub fn state_handle_with_render_handle(
+        &self,
+        render_handle: RenderHandle,
+    ) -> FooterStateHandle {
+        FooterStateHandle::new(Arc::clone(&self.state), Some(render_handle))
     }
 
     pub fn state(&self) -> FooterState {

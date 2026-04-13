@@ -1,7 +1,8 @@
-use pi_tui::{AutocompleteProvider, CombinedAutocompleteProvider};
+use pi_tui::{AutocompleteItem, AutocompleteProvider, CombinedAutocompleteProvider, SlashCommand};
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -105,4 +106,71 @@ fn quoted_completion_reuses_existing_closing_quote() {
         &suggestions.prefix,
     );
     assert_eq!(applied.lines[0], "\"my folder/test.txt\"");
+}
+
+#[test]
+fn slash_command_completion_filters_registered_commands() {
+    let temp_dir = TestDir::new("pi-autocomplete-slash");
+    let provider = CombinedAutocompleteProvider::new(
+        vec![
+            SlashCommand {
+                name: String::from("model"),
+                description: Some(String::from("Select model")),
+                argument_completions: None,
+            },
+            SlashCommand {
+                name: String::from("quit"),
+                description: Some(String::from("Quit pi")),
+                argument_completions: None,
+            },
+        ],
+        temp_dir.path(),
+    );
+
+    let line = String::from("/m");
+    let suggestions = provider
+        .get_suggestions(std::slice::from_ref(&line), 0, line.len(), false)
+        .expect("expected slash command suggestions");
+
+    assert_eq!(suggestions.prefix, "/m");
+    assert_eq!(suggestions.items.len(), 1);
+    assert_eq!(suggestions.items[0].value, "model");
+    assert_eq!(
+        suggestions.items[0].description.as_deref(),
+        Some("Select model")
+    );
+}
+
+#[test]
+fn slash_command_argument_completion_uses_registered_completer() {
+    let temp_dir = TestDir::new("pi-autocomplete-command-args");
+    let provider = CombinedAutocompleteProvider::new(
+        vec![SlashCommand {
+            name: String::from("model"),
+            description: Some(String::from("Select model")),
+            argument_completions: Some(Arc::new(|prefix| {
+                if prefix != "be" {
+                    return None;
+                }
+
+                Some(vec![AutocompleteItem {
+                    value: String::from("openai/beta-model"),
+                    label: String::from("beta-model"),
+                    description: Some(String::from("openai")),
+                }])
+            })),
+        }],
+        temp_dir.path(),
+    );
+
+    let line = String::from("/model be");
+    let suggestions = provider
+        .get_suggestions(std::slice::from_ref(&line), 0, line.len(), false)
+        .expect("expected slash command argument suggestions");
+
+    assert_eq!(suggestions.prefix, "be");
+    assert_eq!(suggestions.items.len(), 1);
+    assert_eq!(suggestions.items[0].value, "openai/beta-model");
+    assert_eq!(suggestions.items[0].label, "beta-model");
+    assert_eq!(suggestions.items[0].description.as_deref(), Some("openai"));
 }

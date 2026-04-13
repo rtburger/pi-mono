@@ -3,19 +3,26 @@ use crate::{
     ProcessFileOptions, build_initial_message, list_models::render_list_models, parse_args,
     process_file_arguments, resolve_app_mode, run_print_mode, to_print_output_mode,
 };
-use pi_ai::{StreamOptions, ThinkingBudgets};
+use pi_agent::ThinkingLevel;
+use pi_ai::{StreamOptions, ThinkingBudgets, supports_xhigh};
 use pi_coding_agent_core::{
-    AuthSource, BootstrapDiagnosticLevel, CodingAgentCoreError, CodingAgentCoreOptions,
-    FooterDataProvider, ModelRegistry, ScopedModel, SessionBootstrapOptions,
-    create_coding_agent_core, resolve_cli_model, resolve_model_scope,
+    AuthSource, BootstrapDiagnosticLevel, CodingAgentCore, CodingAgentCoreError,
+    CodingAgentCoreOptions, FooterDataProvider, ModelRegistry, ScopedModel,
+    SessionBootstrapOptions, create_coding_agent_core, find_exact_model_reference_match,
+    resolve_cli_model, resolve_model_scope,
 };
 use pi_coding_agent_tui::{
-    InteractiveCoreBinding, KeybindingsManager, PlainKeyHintStyler, StartupShellComponent,
+    FooterStateHandle, InteractiveCoreBinding, KeybindingsManager, PlainKeyHintStyler,
+    StartupShellComponent, StatusHandle,
 };
 use pi_config::{ThinkingBudgetsSettings, load_runtime_settings};
 use pi_events::{Message, Model, UserContent};
-use pi_tui::{CombinedAutocompleteProvider, ProcessTerminal, Terminal, Tui};
+use pi_tui::{
+    AutocompleteItem, CombinedAutocompleteProvider, ProcessTerminal, SlashCommand, Terminal, Tui,
+    fuzzy_filter,
+};
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{
@@ -160,6 +167,7 @@ pub async fn run_interactive_command_with_terminal(
     } else {
         Vec::new()
     };
+    let interactive_scoped_models = scoped_models.clone();
 
     let stdin_content = normalize_stdin_content(stdin_is_tty, stdin_content);
     let processed_files = match process_file_arguments(
@@ -269,7 +277,10 @@ pub async fn run_interactive_command_with_terminal(
     shell.set_input_padding_x(runtime_settings.settings.editor_padding_x);
     shell.set_autocomplete_max_visible(runtime_settings.settings.autocomplete_max_visible);
     shell.set_autocomplete_provider(Arc::new(CombinedAutocompleteProvider::new(
-        Vec::new(),
+        build_interactive_slash_commands(
+            created.core.model_registry(),
+            interactive_scoped_models.clone(),
+        ),
         cwd.clone(),
     )));
 
@@ -281,9 +292,21 @@ pub async fn run_interactive_command_with_terminal(
 
     let footer_provider = FooterDataProvider::new(&cwd);
     let mut tui = Tui::new(interactive_terminal_factory());
-    shell.bind_footer_data_provider_with_render_handle(&footer_provider, tui.render_handle());
+    let render_handle = tui.render_handle();
+    shell.bind_footer_data_provider_with_render_handle(&footer_provider, render_handle.clone());
     let binding =
-        InteractiveCoreBinding::bind(created.core.clone(), &mut shell, tui.render_handle());
+        InteractiveCoreBinding::bind(created.core.clone(), &mut shell, render_handle.clone());
+    let status_handle = shell.status_handle_with_render_handle(render_handle.clone());
+    let footer_state_handle = shell.footer_state_handle_with_render_handle(render_handle);
+    install_interactive_submit_handler(
+        &mut shell,
+        created.core.clone(),
+        created.core.model_registry(),
+        interactive_scoped_models,
+        status_handle,
+        footer_state_handle,
+        Arc::clone(&exit_requested),
+    );
     let shell_id = tui.add_child(Box::new(shell));
     let _ = tui.set_focus_child(shell_id);
     let _ = tui.terminal_mut().set_title("pi");
@@ -670,6 +693,210 @@ fn map_thinking_budgets(settings: &ThinkingBudgetsSettings) -> ThinkingBudgets {
         low: settings.low,
         medium: settings.medium,
         high: settings.high,
+    }
+}
+
+fn build_interactive_slash_commands(
+    model_registry: Arc<ModelRegistry>,
+    scoped_models: Vec<ScopedModel>,
+) -> Vec<SlashCommand> {
+    #[derive(Clone)]
+    struct ModelCommandItem {
+        id: String,
+        provider: String,
+        value: String,
+    }
+
+    let model_registry_for_arguments = model_registry.clone();
+    let scoped_models_for_arguments = scoped_models.clone();
+
+    vec![
+        SlashCommand {
+            name: String::from("model"),
+            description: Some(String::from("Select model")),
+            argument_completions: Some(Arc::new(move |prefix| {
+                let models = current_interactive_model_candidates(
+                    model_registry_for_arguments.as_ref(),
+                    &scoped_models_for_arguments,
+                );
+                if models.is_empty() {
+                    return None;
+                }
+
+                let items = models
+                    .into_iter()
+                    .map(|model| ModelCommandItem {
+                        value: format!("{}/{}", model.provider, model.id),
+                        id: model.id,
+                        provider: model.provider,
+                    })
+                    .collect::<Vec<_>>();
+
+                let filtered = fuzzy_filter(&items, prefix, |item| {
+                    Cow::Owned(format!("{} {}", item.id, item.provider))
+                });
+                if filtered.is_empty() {
+                    return None;
+                }
+
+                Some(
+                    filtered
+                        .into_iter()
+                        .map(|item| AutocompleteItem {
+                            value: item.value.clone(),
+                            label: item.id.clone(),
+                            description: Some(item.provider.clone()),
+                        })
+                        .collect(),
+                )
+            })),
+        },
+        SlashCommand {
+            name: String::from("quit"),
+            description: Some(String::from("Quit pi")),
+            argument_completions: None,
+        },
+    ]
+}
+
+fn current_interactive_model_candidates(
+    model_registry: &ModelRegistry,
+    scoped_models: &[ScopedModel],
+) -> Vec<Model> {
+    if !scoped_models.is_empty() {
+        return scoped_models
+            .iter()
+            .map(|scoped_model| scoped_model.model.clone())
+            .collect();
+    }
+
+    model_registry.get_available()
+}
+
+fn install_interactive_submit_handler(
+    shell: &mut StartupShellComponent,
+    core: CodingAgentCore,
+    model_registry: Arc<ModelRegistry>,
+    scoped_models: Vec<ScopedModel>,
+    status_handle: StatusHandle,
+    footer_state_handle: FooterStateHandle,
+    exit_requested: Arc<AtomicBool>,
+) {
+    shell.set_on_submit(move |value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        if handle_interactive_slash_command(
+            trimmed,
+            &core,
+            model_registry.as_ref(),
+            &scoped_models,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+        ) {
+            return;
+        }
+
+        status_handle.set_message("Working...");
+        let core = core.clone();
+        let status_handle = status_handle.clone();
+        tokio::spawn(async move {
+            if let Err(error) = core.prompt_text(value).await {
+                status_handle.set_message(format!("Error: {error}"));
+            }
+        });
+    });
+}
+
+fn handle_interactive_slash_command(
+    text: &str,
+    core: &CodingAgentCore,
+    model_registry: &ModelRegistry,
+    scoped_models: &[ScopedModel],
+    status_handle: &StatusHandle,
+    footer_state_handle: &FooterStateHandle,
+    exit_requested: &Arc<AtomicBool>,
+) -> bool {
+    if text == "/quit" {
+        exit_requested.store(true, Ordering::Relaxed);
+        return true;
+    }
+
+    if text == "/model" || text.starts_with("/model ") {
+        let search_term = text.strip_prefix("/model").unwrap_or_default().trim();
+        if search_term.is_empty() {
+            status_handle
+                .set_message("Model selector is not supported in the Rust interactive CLI yet. Use /model <provider/model>.");
+            return true;
+        }
+
+        if core.state().is_streaming {
+            status_handle.set_message(
+                "Model switching while a request is running is not supported in the Rust interactive CLI yet.",
+            );
+            return true;
+        }
+
+        let candidates = current_interactive_model_candidates(model_registry, scoped_models);
+        let Some(model) = find_exact_model_reference_match(search_term, &candidates) else {
+            status_handle.set_message(format!("No exact model match for \"{search_term}\""));
+            return true;
+        };
+
+        if let Err(error) = switch_interactive_model(core, &model) {
+            status_handle.set_message(format!("Error: {error}"));
+            return true;
+        }
+
+        let state = core.state();
+        footer_state_handle.update(|footer_state| {
+            footer_state.model = Some(state.model.clone());
+            footer_state.context_window = state.model.context_window;
+            footer_state.thinking_level = thinking_level_label(state.thinking_level).to_owned();
+        });
+        status_handle.set_message(format!("Model: {}", state.model.id));
+        return true;
+    }
+
+    false
+}
+
+fn switch_interactive_model(core: &CodingAgentCore, model: &Model) -> Result<(), String> {
+    if !core.model_registry().has_configured_auth(model) {
+        return Err(format!("No API key for {}/{}", model.provider, model.id));
+    }
+
+    let next_model = model.clone();
+    core.agent().update_state(move |state| {
+        state.model = next_model;
+        state.thinking_level = clamp_interactive_thinking_level(state.thinking_level, &state.model);
+    });
+    Ok(())
+}
+
+fn clamp_interactive_thinking_level(level: ThinkingLevel, model: &Model) -> ThinkingLevel {
+    if !model.reasoning {
+        return ThinkingLevel::Off;
+    }
+
+    if level == ThinkingLevel::XHigh && !supports_xhigh(model) {
+        return ThinkingLevel::High;
+    }
+
+    level
+}
+
+fn thinking_level_label(level: ThinkingLevel) -> &'static str {
+    match level {
+        ThinkingLevel::Off => "off",
+        ThinkingLevel::Minimal => "minimal",
+        ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High => "high",
+        ThinkingLevel::XHigh => "xhigh",
     }
 }
 

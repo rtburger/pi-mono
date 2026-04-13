@@ -30,7 +30,7 @@ pub use custom_message::CustomMessageComponent;
 pub use extension_editor::{
     ExtensionEditorComponent, ExternalEditorCommandRunner, ExternalEditorHost,
 };
-pub use footer::{FooterComponent, FooterState};
+pub use footer::{FooterComponent, FooterState, FooterStateHandle};
 pub use interactive_binding::InteractiveCoreBinding;
 pub use keybinding_hints::{KeyHintStyler, PlainKeyHintStyler, key_hint, key_text, raw_key_hint};
 pub use keybindings::{
