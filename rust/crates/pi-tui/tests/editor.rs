@@ -1,7 +1,12 @@
 use pi_tui::{
     CURSOR_MARKER, Component, Editor, EditorCursor, EditorOptions, visible_width, word_wrap_line,
 };
-use std::sync::{Arc, Mutex};
+use regex::Regex;
+use std::sync::{Arc, LazyLock, Mutex};
+
+static PASTE_MARKER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[paste #\d+ (\+\d+ lines|\d+ chars)\]").expect("valid paste marker regex")
+});
 
 fn undo(editor: &mut Editor) {
     editor.handle_input("\x1b[45;5u");
@@ -18,6 +23,25 @@ fn type_text(editor: &mut Editor, text: &str) {
         let mut buffer = [0; 4];
         editor.handle_input(character.encode_utf8(&mut buffer));
     }
+}
+
+fn paste_with_marker(editor: &mut Editor, text: &str) {
+    editor.handle_input(&format!("\x1b[200~{text}\x1b[201~"));
+}
+
+fn first_marker(text: &str) -> String {
+    PASTE_MARKER_REGEX
+        .find(text)
+        .expect("expected paste marker")
+        .as_str()
+        .to_owned()
+}
+
+fn all_markers(text: &str) -> Vec<String> {
+    PASTE_MARKER_REGEX
+        .find_iter(text)
+        .map(|marker| marker.as_str().to_owned())
+        .collect()
 }
 
 #[test]
@@ -501,4 +525,235 @@ fn jump_mode_resets_typing_coalescing_for_undo() {
 
     undo(&mut editor);
     assert_eq!(editor.get_text(), "xhello world");
+}
+
+#[test]
+fn large_pastes_insert_a_marker_and_preserve_expanded_text() {
+    let mut editor = Editor::new();
+    let pasted_text = [
+        "line 1",
+        "line 2",
+        "line 3",
+        "line 4",
+        "line 5",
+        "line 6",
+        "line 7",
+        "line 8",
+        "line 9",
+        "line 10",
+        "tokens $1 $2 $& $$ $` $' end",
+    ]
+    .join("\n");
+
+    paste_with_marker(&mut editor, &pasted_text);
+
+    assert!(PASTE_MARKER_REGEX.is_match(&editor.get_text()));
+    assert_eq!(editor.get_expanded_text(), pasted_text);
+}
+
+#[test]
+fn paste_markers_are_atomic_for_horizontal_cursor_movement() {
+    let mut editor = Editor::new();
+    editor.handle_input("A");
+    paste_with_marker(&mut editor, &"line\n".repeat(20).trim_end().to_owned());
+    editor.handle_input("B");
+
+    let marker = first_marker(&editor.get_text());
+
+    editor.handle_input("\x01");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 0 });
+
+    editor.handle_input("\x1b[C");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 1 });
+
+    editor.handle_input("\x1b[C");
+    assert_eq!(
+        editor.get_cursor(),
+        EditorCursor {
+            line: 0,
+            col: 1 + marker.len(),
+        }
+    );
+
+    editor.handle_input("\x1b[C");
+    assert_eq!(
+        editor.get_cursor(),
+        EditorCursor {
+            line: 0,
+            col: 1 + marker.len() + 1,
+        }
+    );
+
+    editor.handle_input("\x1b[D");
+    assert_eq!(
+        editor.get_cursor(),
+        EditorCursor {
+            line: 0,
+            col: 1 + marker.len(),
+        }
+    );
+
+    editor.handle_input("\x1b[D");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 1 });
+}
+
+#[test]
+fn paste_markers_are_atomic_for_backspace_delete_and_undo() {
+    let mut editor = Editor::new();
+    editor.handle_input("A");
+    paste_with_marker(&mut editor, &"line\n".repeat(20).trim_end().to_owned());
+    editor.handle_input("B");
+
+    let original = editor.get_text();
+    let marker = first_marker(&original);
+
+    editor.handle_input("\x01");
+    editor.handle_input("\x1b[C");
+    editor.handle_input("\x1b[C");
+    assert_eq!(
+        editor.get_cursor(),
+        EditorCursor {
+            line: 0,
+            col: 1 + marker.len(),
+        }
+    );
+
+    editor.handle_input("\x7f");
+    assert_eq!(editor.get_text(), "AB");
+
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), original);
+
+    editor.handle_input("\x01");
+    editor.handle_input("\x1b[C");
+    editor.handle_input("\x1b[3~");
+    assert_eq!(editor.get_text(), "AB");
+}
+
+#[test]
+fn paste_markers_are_atomic_for_word_movement() {
+    let mut editor = Editor::new();
+    editor.handle_input("X");
+    editor.handle_input(" ");
+    paste_with_marker(&mut editor, &"line\n".repeat(20).trim_end().to_owned());
+    editor.handle_input(" ");
+    editor.handle_input("Y");
+
+    let marker = first_marker(&editor.get_text());
+
+    editor.handle_input("\x01");
+    editor.handle_input("\x1b[1;5C");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 1 });
+
+    editor.handle_input("\x1b[1;5C");
+    assert_eq!(
+        editor.get_cursor(),
+        EditorCursor {
+            line: 0,
+            col: 2 + marker.len(),
+        }
+    );
+}
+
+#[test]
+fn multiple_paste_markers_remain_atomic() {
+    let mut editor = Editor::new();
+    paste_with_marker(&mut editor, &"line\n".repeat(20).trim_end().to_owned());
+    editor.handle_input(" ");
+    paste_with_marker(&mut editor, &"row\n".repeat(20).trim_end().to_owned());
+
+    let markers = all_markers(&editor.get_text());
+    assert_eq!(markers.len(), 2);
+
+    editor.handle_input("\x01");
+    editor.handle_input("\x1b[C");
+    assert_eq!(
+        editor.get_cursor(),
+        EditorCursor {
+            line: 0,
+            col: markers[0].len(),
+        }
+    );
+
+    editor.handle_input("\x1b[C");
+    assert_eq!(
+        editor.get_cursor(),
+        EditorCursor {
+            line: 0,
+            col: markers[0].len() + 1,
+        }
+    );
+
+    editor.handle_input("\x1b[C");
+    assert_eq!(
+        editor.get_cursor(),
+        EditorCursor {
+            line: 0,
+            col: markers[0].len() + 1 + markers[1].len(),
+        }
+    );
+}
+
+#[test]
+fn manually_typed_marker_like_text_is_not_atomic_without_a_valid_paste_id() {
+    let mut editor = Editor::new();
+    type_text(&mut editor, "[paste #99 +5 lines]");
+
+    editor.handle_input("\x01");
+    editor.handle_input("\x1b[C");
+
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 1 });
+}
+
+#[test]
+fn render_wraps_large_paste_markers_without_overflow() {
+    let mut editor = Editor::new();
+    paste_with_marker(&mut editor, &"line\n".repeat(47).trim_end().to_owned());
+
+    let lines = editor.render(8);
+    for line in &lines {
+        assert!(
+            visible_width(line) <= 8,
+            "line exceeds width 8: visible={} text={line:?}",
+            visible_width(line)
+        );
+    }
+}
+
+#[test]
+fn submit_expands_large_paste_markers() {
+    let submitted = Arc::new(Mutex::new(None::<String>));
+    let submitted_for_callback = Arc::clone(&submitted);
+
+    let mut editor = Editor::new();
+    editor.set_on_submit(move |value| {
+        *submitted_for_callback
+            .lock()
+            .expect("submitted mutex poisoned") = Some(value);
+    });
+
+    let pasted_text = [
+        "line 1",
+        "line 2",
+        "line 3",
+        "line 4",
+        "line 5",
+        "line 6",
+        "line 7",
+        "line 8",
+        "line 9",
+        "line 10",
+        "tokens $1 $2 $& $$ $` $' end",
+    ]
+    .join("\n");
+    paste_with_marker(&mut editor, &pasted_text);
+    editor.handle_input("\r");
+
+    assert_eq!(
+        submitted
+            .lock()
+            .expect("submitted mutex poisoned")
+            .as_deref(),
+        Some(pasted_text.as_str())
+    );
 }

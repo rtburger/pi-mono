@@ -200,7 +200,7 @@ impl ExtensionEditorComponent {
         };
 
         let temp_path = extension_editor_temp_path();
-        if fs::write(&temp_path, self.editor.get_text()).is_err() {
+        if fs::write(&temp_path, self.editor.get_expanded_text()).is_err() {
             return;
         }
 

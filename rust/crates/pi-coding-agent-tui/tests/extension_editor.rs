@@ -249,6 +249,42 @@ fn extension_editor_external_editor_callback_takes_precedence_over_default_actio
 }
 
 #[test]
+fn extension_editor_writes_expanded_large_paste_content_to_the_external_editor_file() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut component = ExtensionEditorComponent::new(&keybindings, "Title", None);
+    let runner = RecordingRunner::with_result(None, Some(1));
+    let runner_calls = Arc::clone(&runner.calls);
+    component.set_external_editor_command_runner(runner);
+    component.set_external_editor_command("mock-editor --wait");
+
+    let pasted_text = [
+        "line 1",
+        "line 2",
+        "line 3",
+        "line 4",
+        "line 5",
+        "line 6",
+        "line 7",
+        "line 8",
+        "line 9",
+        "line 10",
+        "tokens $1 $2 $& $$ $` $' end",
+    ]
+    .join("\n");
+    component.handle_input(&format!("\x1b[200~{pasted_text}\x1b[201~"));
+
+    component.handle_input("\x07");
+
+    assert_eq!(
+        runner_calls
+            .lock()
+            .expect("runner calls mutex poisoned")
+            .as_slice(),
+        &[(String::from("mock-editor --wait"), pasted_text)]
+    );
+}
+
+#[test]
 fn extension_editor_uses_configured_cancel_and_external_editor_keybindings() {
     let cancel_calls = Arc::new(Mutex::new(0usize));
     let cancel_calls_for_callback = Arc::clone(&cancel_calls);

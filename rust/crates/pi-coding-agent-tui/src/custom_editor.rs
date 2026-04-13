@@ -36,6 +36,10 @@ impl CustomEditor {
         self.editor.get_text()
     }
 
+    pub fn get_expanded_text(&self) -> String {
+        self.editor.get_expanded_text()
+    }
+
     pub fn set_text(&mut self, text: impl AsRef<str>) {
         self.editor.set_text(text);
     }

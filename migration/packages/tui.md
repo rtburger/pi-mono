@@ -2113,3 +2113,96 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
 - continue with the next editor gap that now has the clearest downstream value: large-paste marker/atomic behavior
 - keep broader widget parity and the full theme/markdown/image stack deferred until the next real downstream consumer requires them
+
+## Milestone 25 update: multiline-editor large-paste marker / atomic behavior slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- targeted large-paste / marker behavior sections from `packages/tui/src/components/editor.ts`
+- targeted large-paste / marker regressions from `packages/tui/test/editor.test.ts`
+- downstream consumer grounding kept in scope:
+  - `packages/coding-agent/src/modes/interactive/components/extension-editor.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/editor.rs`
+- `rust/crates/pi-tui/tests/editor.rs`
+- `rust/crates/pi-coding-agent-tui/src/custom_editor.rs`
+- `rust/crates/pi-coding-agent-tui/src/extension_editor.rs`
+- `rust/crates/pi-coding-agent-tui/tests/extension_editor.rs`
+- `migration/packages/tui.md`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-tui::Editor` now ports the large-paste marker slice from the TypeScript multiline editor
+- bracketed pastes larger than the current TS thresholds now insert a compact marker instead of raw content:
+  - more than 10 lines -> `[paste #<id> +<lines> lines]`
+  - more than 1000 characters -> `[paste #<id> <chars> chars]`
+- the raw pasted content is retained behind the marker and now flows through the same Rust-expanded paths as TypeScript for the migrated surface:
+  - `get_expanded_text()` returns literal pasted content
+  - submit expands markers before invoking the callback
+- valid paste markers are now atomic in the Rust editor for the current high-value interaction set:
+  - left/right cursor movement
+  - backspace / forward delete
+  - word-left / word-right movement
+  - vertical-move snapping
+  - word-wrapped layout and narrow-width rendering
+- marker atomicity remains gated by the live paste-id map, matching the TS behavior that manually typed marker-like text is not special unless its id is currently known
+- the first downstream coding-agent consumer now preserves the same TS-expanded behavior for the migrated slice:
+  - `ExtensionEditorComponent` writes expanded editor content, not raw marker text, into the external-editor temp file
+
+Current intentional limitation for this slice:
+- this milestone ports marker storage/expansion/atomic-editing behavior only
+- the Rust editor still does not have TypeScript autocomplete or the remaining richer main-editor behaviors beyond the already-migrated multiline subset
+
+### Rust design summary
+
+Expanded `pi-tui::Editor` with:
+- internal paste tracking (`pastes`, `paste_counter`)
+- regex-backed marker detection for valid paste ids
+- marker-aware segmentation reused across cursor movement, deletion, word movement, rendering, and wrapped layout
+- marker expansion on `get_expanded_text()` and submit
+- marker-aware wrapping fallback for narrow terminals where the visible marker is wider than the render width
+
+Downstream Rust integration changes:
+- `pi-coding-agent-tui::CustomEditor`
+  - now exposes `get_expanded_text()`
+- `pi-coding-agent-tui::ExtensionEditorComponent`
+  - now writes expanded text to the external-editor temp file
+
+Design choices for this slice:
+- keep the marker logic local to `pi-tui::Editor`, where the TypeScript source of truth already owns paste tracking and atomic editing behavior
+- use explicit valid-id gating rather than treating every marker-like string as atomic
+- stop before broader autocomplete/main-editor parity so the milestone stays focused on the next concrete multiline-editor gap proven by the existing downstream consumer
+
+### Validation summary
+
+New Rust coverage added for:
+- large-paste marker creation and expanded-text recovery
+- atomic left/right movement across markers
+- atomic backspace / forward delete plus undo restoration for markers
+- atomic word movement and multiple-marker behavior
+- manual marker-like text remaining non-atomic without a valid paste id
+- narrow-width rendering staying within bounds when a marker is wider than the viewport
+- submit expanding large pasted content literally
+- extension-editor temp-file writes using expanded content rather than raw marker text
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test editor` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test extension_editor` passed
+- `cd rust && cargo test -p pi-tui && cargo test -p pi-coding-agent-tui` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- full TypeScript main-editor parity remains incomplete (`autocomplete`, richer sticky-column behavior around the full TS surface)
+- no broader widget parity yet (`Box`, markdown, select/settings/image widgets)
+- differential rendering parity remains partial relative to TS `packages/tui/src/tui.ts`
+
+### Recommended next step
+
+Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
+- continue with the next editor gap that has direct downstream value after paste markers, most likely autocomplete or another proven custom-editor/main-editor interaction gap
+- keep broader widget parity and the full theme/markdown/image stack deferred until the next real downstream consumer requires them

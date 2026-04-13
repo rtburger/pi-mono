@@ -6,7 +6,12 @@ use crate::{
     undo_stack::UndoStack,
     utils::{is_punctuation_char, is_whitespace_char, truncate_to_width, visible_width},
 };
-use std::{cell::Cell, collections::BTreeMap};
+use regex::Regex;
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::LazyLock,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 const BRACKETED_PASTE_START: &str = "\x1b[200~";
@@ -14,6 +19,10 @@ const BRACKETED_PASTE_END: &str = "\x1b[201~";
 const CURSOR_ON: &str = "\x1b[7m";
 const CURSOR_OFF: &str = "\x1b[0m";
 const DEFAULT_VIEWPORT_HEIGHT: usize = 24;
+
+static PASTE_MARKER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]").expect("valid paste marker regex")
+});
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextChunk {
@@ -70,6 +79,14 @@ struct LayoutLine {
     cursor_pos: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditorSegment {
+    text: String,
+    start: usize,
+    end: usize,
+    is_paste_marker: bool,
+}
+
 pub struct Editor {
     lines: Vec<String>,
     cursor_line: usize,
@@ -84,6 +101,8 @@ pub struct Editor {
     scroll_offset: Cell<usize>,
     paste_buffer: String,
     is_in_paste: bool,
+    pastes: HashMap<usize, String>,
+    paste_counter: usize,
     jump_mode: Option<JumpMode>,
     history: Vec<String>,
     history_index: Option<usize>,
@@ -130,6 +149,8 @@ impl Editor {
             scroll_offset: Cell::new(0),
             paste_buffer: String::new(),
             is_in_paste: false,
+            pastes: HashMap::new(),
+            paste_counter: 0,
             jump_mode: None,
             history: Vec::new(),
             history_index: None,
@@ -145,7 +166,7 @@ impl Editor {
     }
 
     pub fn get_expanded_text(&self) -> String {
-        self.get_text()
+        self.expand_paste_markers(&self.get_text())
     }
 
     pub fn set_text(&mut self, text: impl AsRef<str>) {
@@ -443,6 +464,40 @@ impl Editor {
         &self.current_line()[..self.cursor_col]
     }
 
+    fn expand_paste_markers(&self, text: &str) -> String {
+        if self.pastes.is_empty() || !text.contains("[paste #") {
+            return text.to_owned();
+        }
+
+        PASTE_MARKER_REGEX
+            .replace_all(text, |captures: &regex::Captures<'_>| {
+                let original = captures
+                    .get(0)
+                    .map(|capture| capture.as_str())
+                    .unwrap_or("");
+                let Some(paste_id) = captures
+                    .get(1)
+                    .and_then(|capture| capture.as_str().parse::<usize>().ok())
+                else {
+                    return original.to_owned();
+                };
+
+                self.pastes
+                    .get(&paste_id)
+                    .cloned()
+                    .unwrap_or_else(|| original.to_owned())
+            })
+            .into_owned()
+    }
+
+    fn valid_paste_ids(&self) -> HashSet<usize> {
+        self.pastes.keys().copied().collect()
+    }
+
+    fn segment_text(&self, text: &str) -> Vec<EditorSegment> {
+        segment_with_markers(text, &self.valid_paste_ids())
+    }
+
     fn set_text_internal(&mut self, text: &str) {
         let normalized = normalize_text(text);
         let mut lines = normalized
@@ -518,7 +573,29 @@ impl Editor {
             .collect::<String>();
         self.history_index = None;
         self.last_action = None;
+
+        if filtered.is_empty() {
+            return;
+        }
+
         self.push_undo_snapshot();
+
+        let pasted_line_count = filtered.split('\n').count();
+        let total_chars = js_string_length(&filtered);
+        if pasted_line_count > 10 || total_chars > 1000 {
+            self.paste_counter += 1;
+            let paste_id = self.paste_counter;
+            self.pastes.insert(paste_id, filtered.clone());
+
+            let marker = if pasted_line_count > 10 {
+                format!("[paste #{paste_id} +{pasted_line_count} lines]")
+            } else {
+                format!("[paste #{paste_id} {total_chars} chars]")
+            };
+            self.insert_text_at_cursor_internal(&marker);
+            return;
+        }
+
         self.insert_text_at_cursor_internal(&filtered);
     }
 
@@ -547,6 +624,8 @@ impl Editor {
         self.preferred_visual_col = None;
         self.last_action = None;
         self.scroll_offset.set(0);
+        self.pastes.clear();
+        self.paste_counter = 0;
         self.undo_stack.clear();
         self.emit_change();
         if let Some(on_submit) = &mut self.on_submit {
@@ -561,9 +640,16 @@ impl Editor {
         if self.cursor_col > 0 {
             self.push_undo_snapshot();
             let line = self.current_line().to_owned();
-            let previous_start = previous_grapheme_start(&line, self.cursor_col).unwrap_or(0);
-            self.lines[self.cursor_line].replace_range(previous_start..self.cursor_col, "");
-            self.cursor_col = previous_start;
+            let segments = self.segment_text(&line);
+            let Some(previous_segment) = segments
+                .iter()
+                .take_while(|segment| segment.start < self.cursor_col)
+                .last()
+            else {
+                return;
+            };
+            self.lines[self.cursor_line].replace_range(previous_segment.start..self.cursor_col, "");
+            self.cursor_col = previous_segment.start;
         } else if self.cursor_line > 0 {
             self.push_undo_snapshot();
             let current = self.lines.remove(self.cursor_line);
@@ -587,8 +673,14 @@ impl Editor {
         if self.cursor_col < current_len {
             self.push_undo_snapshot();
             let line = self.current_line().to_owned();
-            let next_end = next_grapheme_end(&line, self.cursor_col).unwrap_or(self.cursor_col);
-            self.lines[self.cursor_line].replace_range(self.cursor_col..next_end, "");
+            let segments = self.segment_text(&line);
+            let Some(next_segment) = segments
+                .iter()
+                .find(|segment| segment.end > self.cursor_col)
+            else {
+                return;
+            };
+            self.lines[self.cursor_line].replace_range(self.cursor_col..next_segment.end, "");
         } else if self.cursor_line + 1 < self.lines.len() {
             self.push_undo_snapshot();
             let next = self.lines.remove(self.cursor_line + 1);
@@ -616,10 +708,18 @@ impl Editor {
     fn move_cursor_horizontal(&mut self, delta: isize) {
         self.preferred_visual_col = None;
         self.last_action = None;
+
+        let current_line = self.current_line().to_owned();
+        let segments = self.segment_text(&current_line);
+
         if delta < 0 {
             if self.cursor_col > 0 {
-                self.cursor_col =
-                    previous_grapheme_start(self.current_line(), self.cursor_col).unwrap_or(0);
+                self.cursor_col = segments
+                    .iter()
+                    .take_while(|segment| segment.start < self.cursor_col)
+                    .last()
+                    .map(|segment| segment.start)
+                    .unwrap_or(0);
             } else if self.cursor_line > 0 {
                 self.cursor_line -= 1;
                 self.cursor_col = self.current_line().len();
@@ -627,9 +727,12 @@ impl Editor {
             return;
         }
 
-        if self.cursor_col < self.current_line().len() {
-            self.cursor_col = next_grapheme_end(self.current_line(), self.cursor_col)
-                .unwrap_or(self.current_line().len());
+        if self.cursor_col < current_line.len() {
+            self.cursor_col = segments
+                .iter()
+                .find(|segment| segment.end > self.cursor_col)
+                .map(|segment| segment.end)
+                .unwrap_or(current_line.len());
         } else if self.cursor_line + 1 < self.lines.len() {
             self.cursor_line += 1;
             self.cursor_col = 0;
@@ -696,40 +799,44 @@ impl Editor {
             return;
         }
 
-        let mut graphemes = self
-            .current_line_before_cursor()
-            .grapheme_indices(true)
-            .map(|(index, grapheme)| (index, grapheme.to_owned()))
+        let current_line = self.current_line().to_owned();
+        let mut segments = self
+            .segment_text(&current_line)
+            .into_iter()
+            .take_while(|segment| segment.end <= self.cursor_col)
             .collect::<Vec<_>>();
 
-        while graphemes
-            .last()
-            .is_some_and(|(_, grapheme)| grapheme_is_whitespace(grapheme))
-        {
-            if let Some((index, _)) = graphemes.pop() {
-                self.cursor_col = index;
+        while segments.last().is_some_and(segment_is_whitespace) {
+            if let Some(segment) = segments.pop() {
+                self.cursor_col = segment.start;
             }
         }
 
-        let Some((_, last_grapheme)) = graphemes.last() else {
+        let Some(last_segment) = segments.last() else {
             self.preferred_visual_col = None;
             return;
         };
-        let consume_punctuation = grapheme_is_punctuation(last_grapheme);
 
-        while let Some((index, grapheme)) = graphemes.last() {
-            if grapheme_is_whitespace(grapheme) {
+        if last_segment.is_paste_marker {
+            self.cursor_col = last_segment.start;
+            self.preferred_visual_col = None;
+            return;
+        }
+
+        let consume_punctuation = segment_is_punctuation(last_segment);
+        while let Some(segment) = segments.last() {
+            if segment_is_whitespace(segment) || segment.is_paste_marker {
                 break;
             }
             if consume_punctuation {
-                if !grapheme_is_punctuation(grapheme) {
+                if !segment_is_punctuation(segment) {
                     break;
                 }
-            } else if grapheme_is_punctuation(grapheme) {
+            } else if segment_is_punctuation(segment) {
                 break;
             }
-            self.cursor_col = *index;
-            graphemes.pop();
+            self.cursor_col = segment.start;
+            segments.pop();
         }
 
         self.preferred_visual_col = None;
@@ -747,36 +854,45 @@ impl Editor {
         }
 
         let current_line = self.current_line().to_owned();
-        let suffix = &current_line[self.cursor_col..];
-        let graphemes = suffix.grapheme_indices(true).collect::<Vec<_>>();
+        let segments = self
+            .segment_text(&current_line)
+            .into_iter()
+            .skip_while(|segment| segment.end <= self.cursor_col)
+            .collect::<Vec<_>>();
         let mut index = 0;
         let mut new_cursor_col = self.cursor_col;
 
-        while index < graphemes.len() && grapheme_is_whitespace(graphemes[index].1) {
-            new_cursor_col += graphemes[index].1.len();
+        while index < segments.len() && segment_is_whitespace(&segments[index]) {
+            new_cursor_col = segments[index].end;
             index += 1;
         }
 
-        if index >= graphemes.len() {
+        if index >= segments.len() {
             self.cursor_col = new_cursor_col;
             self.preferred_visual_col = None;
             return;
         }
 
-        let consume_punctuation = grapheme_is_punctuation(graphemes[index].1);
-        while index < graphemes.len() {
-            let grapheme = graphemes[index].1;
-            if grapheme_is_whitespace(grapheme) {
+        if segments[index].is_paste_marker {
+            self.cursor_col = segments[index].end;
+            self.preferred_visual_col = None;
+            return;
+        }
+
+        let consume_punctuation = segment_is_punctuation(&segments[index]);
+        while index < segments.len() {
+            let segment = &segments[index];
+            if segment_is_whitespace(segment) || segment.is_paste_marker {
                 break;
             }
             if consume_punctuation {
-                if !grapheme_is_punctuation(grapheme) {
+                if !segment_is_punctuation(segment) {
                     break;
                 }
-            } else if grapheme_is_punctuation(grapheme) {
+            } else if segment_is_punctuation(segment) {
                 break;
             }
-            new_cursor_col += grapheme.len();
+            new_cursor_col = segment.end;
             index += 1;
         }
 
@@ -972,9 +1088,27 @@ impl Editor {
             .unwrap_or(self.cursor_col.saturating_sub(current.start_col));
         let target = visual_lines[target_visual_line as usize];
         self.cursor_line = target.logical_line;
-        let logical_line_len = self.lines[target.logical_line].len();
-        self.cursor_col =
+
+        let logical_line = self.lines[target.logical_line].clone();
+        let logical_line_len = logical_line.len();
+        let mut target_col =
             (target.start_col + desired_visual_col.min(target.length)).min(logical_line_len);
+
+        for segment in self.segment_text(&logical_line) {
+            if !segment.is_paste_marker {
+                continue;
+            }
+            if target_col >= segment.start && target_col < segment.end {
+                target_col = if delta < 0 {
+                    segment.start
+                } else {
+                    segment.end
+                };
+                break;
+            }
+        }
+
+        self.cursor_col = target_col;
         self.preferred_visual_col = Some(desired_visual_col);
     }
 
@@ -1067,7 +1201,8 @@ impl Editor {
                 continue;
             }
 
-            for chunk in word_wrap_line(line, width) {
+            let segments = self.segment_text(line);
+            for chunk in word_wrap_line_with_segments(line, width, &segments) {
                 visual_lines.push(VisualLine {
                     logical_line: index,
                     start_col: chunk.start_index,
@@ -1137,7 +1272,8 @@ impl Editor {
                 continue;
             }
 
-            let chunks = word_wrap_line(line, content_width);
+            let segments = self.segment_text(line);
+            let chunks = word_wrap_line_with_segments(line, content_width, &segments);
             for (chunk_index, chunk) in chunks.iter().enumerate() {
                 let is_last_chunk = chunk_index + 1 == chunks.len();
                 let mut has_cursor = false;
@@ -1268,7 +1404,8 @@ impl Component for Editor {
                 let before_cursor = &display_text[..cursor_pos];
                 let after_cursor = &display_text[cursor_pos..];
                 let marker = if self.focused { CURSOR_MARKER } else { "" };
-                if let Some(grapheme) = after_cursor.graphemes(true).next() {
+                if let Some(segment) = self.segment_text(after_cursor).first() {
+                    let grapheme = &segment.text;
                     let rest = &after_cursor[grapheme.len()..];
                     display_text =
                         format!("{before_cursor}{marker}{CURSOR_ON}{grapheme}{CURSOR_OFF}{rest}");
@@ -1311,6 +1448,15 @@ impl Component for Editor {
 }
 
 pub fn word_wrap_line(line: &str, max_width: usize) -> Vec<TextChunk> {
+    let segments = segment_graphemes(line);
+    word_wrap_line_with_segments(line, max_width, &segments)
+}
+
+fn word_wrap_line_with_segments(
+    line: &str,
+    max_width: usize,
+    segments: &[EditorSegment],
+) -> Vec<TextChunk> {
     if line.is_empty() || max_width == 0 {
         return vec![TextChunk {
             text: String::new(),
@@ -1327,11 +1473,6 @@ pub fn word_wrap_line(line: &str, max_width: usize) -> Vec<TextChunk> {
         }];
     }
 
-    let segments = line
-        .grapheme_indices(true)
-        .map(|(index, grapheme)| (index, grapheme.to_owned()))
-        .collect::<Vec<_>>();
-
     let mut chunks = Vec::new();
     let mut current_width = 0usize;
     let mut chunk_start = 0usize;
@@ -1339,9 +1480,9 @@ pub fn word_wrap_line(line: &str, max_width: usize) -> Vec<TextChunk> {
     let mut wrap_opp_width = 0usize;
 
     for index in 0..segments.len() {
-        let (char_index, grapheme) = &segments[index];
-        let grapheme_width = visible_width(grapheme);
-        let is_whitespace = grapheme_is_whitespace(grapheme);
+        let segment = &segments[index];
+        let grapheme_width = visible_width(&segment.text);
+        let is_whitespace = segment_is_whitespace(segment);
 
         if current_width + grapheme_width > max_width {
             if let Some(wrap_index) = wrap_opp_index {
@@ -1353,25 +1494,42 @@ pub fn word_wrap_line(line: &str, max_width: usize) -> Vec<TextChunk> {
                     });
                     chunk_start = wrap_index;
                     current_width = current_width.saturating_sub(wrap_opp_width);
-                } else if chunk_start < *char_index {
+                } else if chunk_start < segment.start {
                     chunks.push(TextChunk {
-                        text: line[chunk_start..*char_index].to_owned(),
+                        text: line[chunk_start..segment.start].to_owned(),
                         start_index: chunk_start,
-                        end_index: *char_index,
+                        end_index: segment.start,
                     });
-                    chunk_start = *char_index;
+                    chunk_start = segment.start;
                     current_width = 0;
                 }
-            } else if chunk_start < *char_index {
+            } else if chunk_start < segment.start {
                 chunks.push(TextChunk {
-                    text: line[chunk_start..*char_index].to_owned(),
+                    text: line[chunk_start..segment.start].to_owned(),
                     start_index: chunk_start,
-                    end_index: *char_index,
+                    end_index: segment.start,
                 });
-                chunk_start = *char_index;
+                chunk_start = segment.start;
                 current_width = 0;
             }
             wrap_opp_index = None;
+        }
+
+        if segment.is_paste_marker && grapheme_width > max_width {
+            let sub_chunks = word_wrap_line(&segment.text, max_width);
+            for sub_chunk in sub_chunks.iter().take(sub_chunks.len().saturating_sub(1)) {
+                chunks.push(TextChunk {
+                    text: sub_chunk.text.clone(),
+                    start_index: segment.start + sub_chunk.start_index,
+                    end_index: segment.start + sub_chunk.end_index,
+                });
+            }
+            if let Some(last_chunk) = sub_chunks.last() {
+                chunk_start = segment.start + last_chunk.start_index;
+                current_width = visible_width(&last_chunk.text);
+            }
+            wrap_opp_index = None;
+            continue;
         }
 
         current_width += grapheme_width;
@@ -1379,9 +1537,9 @@ pub fn word_wrap_line(line: &str, max_width: usize) -> Vec<TextChunk> {
         if is_whitespace
             && segments
                 .get(index + 1)
-                .is_some_and(|(_, next)| !grapheme_is_whitespace(next))
+                .is_some_and(|next| next.is_paste_marker || !segment_is_whitespace(next))
         {
-            wrap_opp_index = segments.get(index + 1).map(|(next_index, _)| *next_index);
+            wrap_opp_index = segments.get(index + 1).map(|next| next.start);
             wrap_opp_width = current_width;
         }
     }
@@ -1395,20 +1553,81 @@ pub fn word_wrap_line(line: &str, max_width: usize) -> Vec<TextChunk> {
     chunks
 }
 
+fn segment_graphemes(text: &str) -> Vec<EditorSegment> {
+    text.grapheme_indices(true)
+        .map(|(index, grapheme)| EditorSegment {
+            text: grapheme.to_owned(),
+            start: index,
+            end: index + grapheme.len(),
+            is_paste_marker: false,
+        })
+        .collect()
+}
+
+fn segment_with_markers(text: &str, valid_ids: &HashSet<usize>) -> Vec<EditorSegment> {
+    if valid_ids.is_empty() || !text.contains("[paste #") {
+        return segment_graphemes(text);
+    }
+
+    let markers = PASTE_MARKER_REGEX
+        .captures_iter(text)
+        .filter_map(|captures| {
+            let paste_id = captures
+                .get(1)
+                .and_then(|capture| capture.as_str().parse::<usize>().ok())?;
+            if !valid_ids.contains(&paste_id) {
+                return None;
+            }
+            let marker = captures.get(0)?;
+            Some((marker.start(), marker.end()))
+        })
+        .collect::<Vec<_>>();
+    if markers.is_empty() {
+        return segment_graphemes(text);
+    }
+
+    let mut result = Vec::new();
+    let mut marker_index = 0usize;
+    for (index, grapheme) in text.grapheme_indices(true) {
+        while marker_index < markers.len() && markers[marker_index].1 <= index {
+            marker_index += 1;
+        }
+
+        let marker = markers.get(marker_index).copied();
+        if let Some((start, end)) = marker
+            && index >= start
+            && index < end
+        {
+            if index == start {
+                result.push(EditorSegment {
+                    text: text[start..end].to_owned(),
+                    start,
+                    end,
+                    is_paste_marker: true,
+                });
+            }
+            continue;
+        }
+
+        result.push(EditorSegment {
+            text: grapheme.to_owned(),
+            start: index,
+            end: index + grapheme.len(),
+            is_paste_marker: false,
+        });
+    }
+
+    result
+}
+
+fn js_string_length(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
 fn normalize_text(text: &str) -> String {
     text.replace("\r\n", "\n")
         .replace('\r', "\n")
         .replace('\t', "    ")
-}
-
-fn previous_grapheme_start(text: &str, cursor: usize) -> Option<usize> {
-    if cursor == 0 {
-        return None;
-    }
-    text[..cursor]
-        .grapheme_indices(true)
-        .last()
-        .map(|(index, _)| index)
 }
 
 fn next_grapheme_end(text: &str, cursor: usize) -> Option<usize> {
@@ -1419,6 +1638,14 @@ fn next_grapheme_end(text: &str, cursor: usize) -> Option<usize> {
         .grapheme_indices(true)
         .next()
         .map(|(index, grapheme)| cursor + index + grapheme.len())
+}
+
+fn segment_is_whitespace(segment: &EditorSegment) -> bool {
+    !segment.is_paste_marker && grapheme_is_whitespace(&segment.text)
+}
+
+fn segment_is_punctuation(segment: &EditorSegment) -> bool {
+    !segment.is_paste_marker && grapheme_is_punctuation(&segment.text)
 }
 
 fn contains_control_characters(data: &str) -> bool {
