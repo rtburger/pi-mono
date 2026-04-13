@@ -1,3 +1,4 @@
+pub mod autocomplete;
 pub mod editor;
 pub mod fuzzy;
 pub mod input;
@@ -14,6 +15,10 @@ pub mod tui;
 mod undo_stack;
 pub mod utils;
 
+pub use autocomplete::{
+    AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, CombinedAutocompleteProvider,
+    CompletionResult, SlashCommand, apply_completion,
+};
 pub use editor::{Editor, EditorCursor, EditorOptions, TextChunk, word_wrap_line};
 pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
 pub use input::Input;

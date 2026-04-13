@@ -14,7 +14,7 @@ use pi_coding_agent_tui::{
 };
 use pi_config::{ThinkingBudgetsSettings, load_runtime_settings};
 use pi_events::{Message, Model, UserContent};
-use pi_tui::{ProcessTerminal, Terminal, Tui};
+use pi_tui::{CombinedAutocompleteProvider, ProcessTerminal, Terminal, Tui};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -266,6 +266,10 @@ pub async fn run_interactive_command_with_terminal(
         None,
         false,
     );
+    shell.set_autocomplete_provider(Arc::new(CombinedAutocompleteProvider::new(
+        Vec::new(),
+        cwd.clone(),
+    )));
 
     let exit_requested = Arc::new(AtomicBool::new(false));
     let exit_requested_for_shell = Arc::clone(&exit_requested);

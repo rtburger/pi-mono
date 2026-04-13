@@ -4,7 +4,10 @@ use pi_coding_agent_tui::{
     PlainKeyHintStyler, StartupShellComponent,
 };
 use pi_events::Model;
-use pi_tui::{Component, Terminal, Text, Tui, TuiError, visible_width};
+use pi_tui::{
+    AutocompleteProvider, AutocompleteSuggestions, Component, Terminal, Text, Tui, TuiError,
+    apply_completion, visible_width,
+};
 use std::{
     collections::BTreeMap,
     fs,
@@ -461,6 +464,183 @@ fn startup_shell_interrupt_uses_app_keybinding_binding_and_escape_callback() {
 
     shell.handle_input("\x1b");
     assert_eq!(*interrupted.lock().expect("interrupt mutex poisoned"), 1);
+}
+
+#[test]
+fn startup_shell_interrupt_cancels_autocomplete_before_escape_callback() {
+    struct MultiSuggestionProvider;
+
+    impl AutocompleteProvider for MultiSuggestionProvider {
+        fn get_suggestions(
+            &self,
+            lines: &[String],
+            _cursor_line: usize,
+            cursor_col: usize,
+            force: bool,
+        ) -> Option<AutocompleteSuggestions> {
+            if !force {
+                return None;
+            }
+            let text = lines.first().map(String::as_str).unwrap_or("");
+            let prefix = &text[..cursor_col.min(text.len())];
+            (prefix == "src").then(|| AutocompleteSuggestions {
+                items: vec![
+                    pi_tui::AutocompleteItem {
+                        value: String::from("src/"),
+                        label: String::from("src/"),
+                        description: None,
+                    },
+                    pi_tui::AutocompleteItem {
+                        value: String::from("src.txt"),
+                        label: String::from("src.txt"),
+                        description: None,
+                    },
+                ],
+                prefix: String::from("src"),
+            })
+        }
+
+        fn apply_completion(
+            &self,
+            lines: &[String],
+            cursor_line: usize,
+            cursor_col: usize,
+            item: &pi_tui::AutocompleteItem,
+            prefix: &str,
+        ) -> pi_tui::CompletionResult {
+            apply_completion(lines, cursor_line, cursor_col, item, prefix)
+        }
+    }
+
+    let interrupted = Arc::new(Mutex::new(0usize));
+    let interrupted_for_callback = Arc::clone(&interrupted);
+
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_autocomplete_provider(Arc::new(MultiSuggestionProvider));
+    shell.set_on_escape(move || {
+        *interrupted_for_callback
+            .lock()
+            .expect("interrupt mutex poisoned") += 1;
+    });
+
+    shell.handle_input("s");
+    shell.handle_input("r");
+    shell.handle_input("c");
+    shell.handle_input("\t");
+    assert!(shell.render(20).iter().any(|line| line.contains("src.txt")));
+
+    shell.handle_input("\x1b");
+
+    assert_eq!(*interrupted.lock().expect("interrupt mutex poisoned"), 0);
+    assert_eq!(shell.input_value(), "src");
+    assert!(!shell.render(20).iter().any(|line| line.contains("src.txt")));
+}
+
+#[test]
+fn startup_shell_submit_accepts_autocomplete_before_submitting_prompt() {
+    struct ReadmeSuggestionProvider;
+
+    impl AutocompleteProvider for ReadmeSuggestionProvider {
+        fn get_suggestions(
+            &self,
+            lines: &[String],
+            _cursor_line: usize,
+            cursor_col: usize,
+            force: bool,
+        ) -> Option<AutocompleteSuggestions> {
+            if !force {
+                return None;
+            }
+            let text = lines.first().map(String::as_str).unwrap_or("");
+            let prefix = &text[..cursor_col.min(text.len())];
+            (prefix == "rea").then(|| AutocompleteSuggestions {
+                items: vec![
+                    pi_tui::AutocompleteItem {
+                        value: String::from("readme.md"),
+                        label: String::from("readme.md"),
+                        description: None,
+                    },
+                    pi_tui::AutocompleteItem {
+                        value: String::from("readme.txt"),
+                        label: String::from("readme.txt"),
+                        description: None,
+                    },
+                ],
+                prefix: String::from("rea"),
+            })
+        }
+
+        fn apply_completion(
+            &self,
+            lines: &[String],
+            cursor_line: usize,
+            cursor_col: usize,
+            item: &pi_tui::AutocompleteItem,
+            prefix: &str,
+        ) -> pi_tui::CompletionResult {
+            apply_completion(lines, cursor_line, cursor_col, item, prefix)
+        }
+    }
+
+    let submitted = Arc::new(Mutex::new(Vec::<String>::new()));
+    let submitted_for_callback = Arc::clone(&submitted);
+
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_autocomplete_provider(Arc::new(ReadmeSuggestionProvider));
+    shell.set_on_submit(move |value| {
+        submitted_for_callback
+            .lock()
+            .expect("submitted mutex poisoned")
+            .push(value);
+    });
+
+    shell.handle_input("r");
+    shell.handle_input("e");
+    shell.handle_input("a");
+    shell.handle_input("\t");
+    assert!(
+        shell
+            .render(30)
+            .iter()
+            .any(|line| line.contains("readme.txt"))
+    );
+
+    shell.handle_input("\r");
+    assert_eq!(shell.input_value(), "readme.md");
+    assert!(
+        submitted
+            .lock()
+            .expect("submitted mutex poisoned")
+            .is_empty()
+    );
+
+    shell.handle_input("\r");
+    assert_eq!(shell.input_value(), "");
+    assert_eq!(
+        submitted
+            .lock()
+            .expect("submitted mutex poisoned")
+            .as_slice(),
+        [String::from("readme.md")]
+    );
 }
 
 #[test]

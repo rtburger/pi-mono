@@ -1,4 +1,5 @@
 use crate::{
+    autocomplete::{AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions},
     keybindings::KeybindingsManager,
     keys::{decode_kitty_printable, matches_key},
     kill_ring::KillRing,
@@ -10,7 +11,7 @@ use regex::Regex;
 use std::{
     cell::Cell,
     collections::{BTreeMap, HashMap, HashSet},
-    sync::LazyLock,
+    sync::{Arc, LazyLock},
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -58,6 +59,20 @@ enum JumpMode {
     Backward,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutocompleteMode {
+    Regular,
+    Force,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutocompleteState {
+    mode: AutocompleteMode,
+    prefix: String,
+    items: Vec<AutocompleteItem>,
+    selected: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EditorSnapshot {
     lines: Vec<String>,
@@ -99,6 +114,9 @@ pub struct Editor {
     last_width: Cell<usize>,
     viewport_size: Cell<Option<(usize, usize)>>,
     scroll_offset: Cell<usize>,
+    autocomplete_provider: Option<Arc<dyn AutocompleteProvider>>,
+    autocomplete_state: Option<AutocompleteState>,
+    autocomplete_max_visible: usize,
     paste_buffer: String,
     is_in_paste: bool,
     pastes: HashMap<usize, String>,
@@ -147,6 +165,9 @@ impl Editor {
             last_width: Cell::new(80),
             viewport_size: Cell::new(None),
             scroll_offset: Cell::new(0),
+            autocomplete_provider: None,
+            autocomplete_state: None,
+            autocomplete_max_visible: 5,
             paste_buffer: String::new(),
             is_in_paste: false,
             pastes: HashMap::new(),
@@ -170,6 +191,7 @@ impl Editor {
     }
 
     pub fn set_text(&mut self, text: impl AsRef<str>) {
+        self.cancel_autocomplete();
         self.history_index = None;
         self.preferred_visual_col = None;
         self.last_action = None;
@@ -194,6 +216,7 @@ impl Editor {
     }
 
     pub fn set_cursor(&mut self, cursor: EditorCursor) {
+        self.cancel_autocomplete();
         let line = cursor.line.min(self.lines.len().saturating_sub(1));
         let max_col = self.lines.get(line).map(String::len).unwrap_or(0);
         self.cursor_line = line;
@@ -208,6 +231,7 @@ impl Editor {
             return;
         }
 
+        self.cancel_autocomplete();
         self.history_index = None;
         self.preferred_visual_col = None;
         self.last_action = None;
@@ -263,8 +287,26 @@ impl Editor {
         self.padding_x = padding_x;
     }
 
+    pub fn autocomplete_max_visible(&self) -> usize {
+        self.autocomplete_max_visible
+    }
+
+    pub fn set_autocomplete_max_visible(&mut self, max_visible: usize) {
+        self.autocomplete_max_visible = max_visible.clamp(3, 20);
+    }
+
+    pub fn set_autocomplete_provider(&mut self, provider: Arc<dyn AutocompleteProvider>) {
+        self.cancel_autocomplete();
+        self.autocomplete_provider = Some(provider);
+    }
+
+    pub fn clear_autocomplete_provider(&mut self) {
+        self.cancel_autocomplete();
+        self.autocomplete_provider = None;
+    }
+
     pub fn is_showing_autocomplete(&self) -> bool {
-        false
+        self.autocomplete_state.is_some()
     }
 
     pub fn handle_input(&mut self, data: &str) {
@@ -306,6 +348,37 @@ impl Editor {
                     self.process_input(&remaining);
                 }
             }
+            return;
+        }
+
+        if self.is_showing_autocomplete() {
+            if self.matches_binding(&current, "tui.select.cancel") {
+                self.cancel_autocomplete();
+                return;
+            }
+
+            if self.matches_binding(&current, "tui.select.up") {
+                self.move_autocomplete_selection(-1);
+                return;
+            }
+
+            if self.matches_binding(&current, "tui.select.down") {
+                self.move_autocomplete_selection(1);
+                return;
+            }
+
+            if self.matches_binding(&current, "tui.input.tab")
+                || self.matches_binding(&current, "tui.select.confirm")
+                || self.matches_binding(&current, "tui.input.submit")
+                || current == "\r"
+            {
+                self.accept_autocomplete_selection();
+                return;
+            }
+        }
+
+        if self.matches_binding(&current, "tui.input.tab") {
+            self.handle_tab_completion();
             return;
         }
 
@@ -573,9 +646,11 @@ impl Editor {
 
         self.last_action = Some(EditorAction::TypeWord);
         self.insert_text_at_cursor_internal(character);
+        self.refresh_autocomplete_after_edit();
     }
 
     fn handle_paste(&mut self, pasted_text: &str) {
+        self.cancel_autocomplete();
         let filtered = normalize_text(pasted_text)
             .chars()
             .filter(|character| *character == '\n' || !character.is_control())
@@ -609,6 +684,7 @@ impl Editor {
     }
 
     fn add_new_line(&mut self) {
+        self.cancel_autocomplete();
         self.push_undo_snapshot();
 
         let current_line = self.current_line().to_owned();
@@ -625,6 +701,7 @@ impl Editor {
     }
 
     fn submit_value(&mut self) {
+        self.cancel_autocomplete();
         let result = self.get_expanded_text().trim().to_owned();
         self.lines = vec![String::new()];
         self.cursor_line = 0;
@@ -672,6 +749,7 @@ impl Editor {
 
         self.preferred_visual_col = None;
         self.emit_change();
+        self.refresh_autocomplete_after_edit();
     }
 
     fn handle_forward_delete(&mut self) {
@@ -700,21 +778,25 @@ impl Editor {
 
         self.preferred_visual_col = None;
         self.emit_change();
+        self.refresh_autocomplete_after_edit();
     }
 
     fn move_to_line_start(&mut self) {
+        self.cancel_autocomplete();
         self.cursor_col = 0;
         self.preferred_visual_col = None;
         self.last_action = None;
     }
 
     fn move_to_line_end(&mut self) {
+        self.cancel_autocomplete();
         self.cursor_col = self.current_line().len();
         self.preferred_visual_col = None;
         self.last_action = None;
     }
 
     fn move_cursor_horizontal(&mut self, delta: isize) {
+        self.cancel_autocomplete();
         self.preferred_visual_col = None;
         self.last_action = None;
 
@@ -749,6 +831,7 @@ impl Editor {
     }
 
     fn jump_to_char(&mut self, character: &str, direction: JumpMode) {
+        self.cancel_autocomplete();
         self.last_action = None;
 
         match direction {
@@ -798,6 +881,7 @@ impl Editor {
     }
 
     fn move_word_backward(&mut self) {
+        self.cancel_autocomplete();
         self.last_action = None;
         if self.cursor_col == 0 {
             if self.cursor_line > 0 {
@@ -852,6 +936,7 @@ impl Editor {
     }
 
     fn move_word_forward(&mut self) {
+        self.cancel_autocomplete();
         self.last_action = None;
         if self.cursor_col >= self.current_line().len() {
             if self.cursor_line + 1 < self.lines.len() {
@@ -910,6 +995,7 @@ impl Editor {
     }
 
     fn delete_word_backward(&mut self) {
+        self.cancel_autocomplete();
         self.history_index = None;
 
         if self.cursor_col == 0 {
@@ -947,6 +1033,7 @@ impl Editor {
     }
 
     fn delete_word_forward(&mut self) {
+        self.cancel_autocomplete();
         self.history_index = None;
 
         let start_line = self.cursor_line;
@@ -985,6 +1072,7 @@ impl Editor {
     }
 
     fn delete_to_line_start(&mut self) {
+        self.cancel_autocomplete();
         self.history_index = None;
 
         if self.cursor_col > 0 {
@@ -1015,6 +1103,7 @@ impl Editor {
     }
 
     fn delete_to_line_end(&mut self) {
+        self.cancel_autocomplete();
         self.history_index = None;
 
         if self.cursor_col < self.current_line().len() {
@@ -1041,6 +1130,7 @@ impl Editor {
     }
 
     fn navigate_history(&mut self, direction: isize) {
+        self.cancel_autocomplete();
         self.last_action = None;
         if self.history.is_empty() {
             return;
@@ -1083,6 +1173,7 @@ impl Editor {
     }
 
     fn move_cursor_vertical(&mut self, delta: isize) {
+        self.cancel_autocomplete();
         self.last_action = None;
         let visual_lines = self.build_visual_line_map();
         let current_visual_line = self.find_current_visual_line(&visual_lines);
@@ -1122,6 +1213,7 @@ impl Editor {
     }
 
     fn yank(&mut self) {
+        self.cancel_autocomplete();
         let Some(text) = self.kill_ring.peek().map(str::to_owned) else {
             return;
         };
@@ -1132,6 +1224,7 @@ impl Editor {
     }
 
     fn yank_pop(&mut self) {
+        self.cancel_autocomplete();
         if !matches!(self.last_action, Some(EditorAction::Yank)) || self.kill_ring.len() <= 1 {
             return;
         }
@@ -1337,6 +1430,7 @@ impl Editor {
     }
 
     fn undo(&mut self) {
+        self.cancel_autocomplete();
         let Some(snapshot) = self.undo_stack.pop() else {
             return;
         };
@@ -1348,6 +1442,175 @@ impl Editor {
         self.last_action = None;
         self.preferred_visual_col = None;
         self.emit_change();
+    }
+
+    fn is_in_slash_command_context(&self) -> bool {
+        self.cursor_line == 0
+            && self
+                .current_line_before_cursor()
+                .trim_start()
+                .starts_with('/')
+    }
+
+    fn handle_tab_completion(&mut self) {
+        if self.is_in_slash_command_context()
+            && !self.current_line_before_cursor().trim_start().contains(' ')
+        {
+            self.request_autocomplete(false, true);
+        } else {
+            self.request_autocomplete(true, true);
+        }
+    }
+
+    fn request_autocomplete(&mut self, force: bool, explicit_tab: bool) {
+        let Some(provider) = self.autocomplete_provider.clone() else {
+            return;
+        };
+
+        if force
+            && !provider.should_trigger_file_completion(
+                &self.lines,
+                self.cursor_line,
+                self.cursor_col,
+            )
+        {
+            return;
+        }
+
+        let suggestions =
+            provider.get_suggestions(&self.lines, self.cursor_line, self.cursor_col, force);
+        let Some(suggestions) = suggestions else {
+            self.cancel_autocomplete();
+            return;
+        };
+        if suggestions.items.is_empty() {
+            self.cancel_autocomplete();
+            return;
+        }
+
+        if force && explicit_tab && suggestions.items.len() == 1 {
+            self.apply_autocomplete_completion(suggestions.items[0].clone(), &suggestions.prefix);
+            return;
+        }
+
+        self.apply_autocomplete_suggestions(
+            suggestions,
+            if force {
+                AutocompleteMode::Force
+            } else {
+                AutocompleteMode::Regular
+            },
+        );
+    }
+
+    fn apply_autocomplete_suggestions(
+        &mut self,
+        suggestions: AutocompleteSuggestions,
+        mode: AutocompleteMode,
+    ) {
+        let selected = get_best_autocomplete_match_index(&suggestions.items, &suggestions.prefix)
+            .unwrap_or(0)
+            .min(suggestions.items.len().saturating_sub(1));
+        self.autocomplete_state = Some(AutocompleteState {
+            mode,
+            prefix: suggestions.prefix,
+            items: suggestions.items,
+            selected,
+        });
+    }
+
+    fn apply_autocomplete_completion(&mut self, item: AutocompleteItem, prefix: &str) {
+        let Some(provider) = self.autocomplete_provider.clone() else {
+            return;
+        };
+
+        self.push_undo_snapshot();
+        self.last_action = None;
+        let result = provider.apply_completion(
+            &self.lines,
+            self.cursor_line,
+            self.cursor_col,
+            &item,
+            prefix,
+        );
+        self.lines = result.lines;
+        self.cursor_line = result.cursor_line.min(self.lines.len().saturating_sub(1));
+        self.cursor_col = self
+            .lines
+            .get(self.cursor_line)
+            .map(|line| result.cursor_col.min(line.len()))
+            .unwrap_or(0);
+        self.preferred_visual_col = None;
+        self.cancel_autocomplete();
+        self.emit_change();
+    }
+
+    fn accept_autocomplete_selection(&mut self) {
+        let Some(state) = &self.autocomplete_state else {
+            return;
+        };
+        let Some(item) = state.items.get(state.selected).cloned() else {
+            self.cancel_autocomplete();
+            return;
+        };
+        let prefix = state.prefix.clone();
+        self.apply_autocomplete_completion(item, &prefix);
+    }
+
+    fn move_autocomplete_selection(&mut self, delta: isize) {
+        let Some(state) = &mut self.autocomplete_state else {
+            return;
+        };
+        let max_index = state.items.len().saturating_sub(1) as isize;
+        let next = (state.selected as isize + delta).clamp(0, max_index) as usize;
+        state.selected = next;
+    }
+
+    fn cancel_autocomplete(&mut self) {
+        self.autocomplete_state = None;
+    }
+
+    fn update_autocomplete(&mut self) {
+        let mode = self.autocomplete_state.as_ref().map(|state| state.mode);
+        match mode {
+            Some(AutocompleteMode::Regular) => self.request_autocomplete(false, false),
+            Some(AutocompleteMode::Force) => self.request_autocomplete(true, false),
+            None => {}
+        }
+    }
+
+    fn refresh_autocomplete_after_edit(&mut self) {
+        if self.is_showing_autocomplete() {
+            self.update_autocomplete();
+        }
+    }
+
+    fn render_autocomplete_lines(&self, width: usize) -> Vec<String> {
+        let Some(state) = &self.autocomplete_state else {
+            return Vec::new();
+        };
+
+        let max_visible = self.autocomplete_max_visible.max(1);
+        let start = state.selected.saturating_sub(max_visible.saturating_sub(1));
+
+        state
+            .items
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(max_visible)
+            .map(|(index, item)| {
+                let prefix = if index == state.selected { "> " } else { "  " };
+                let mut text = format!("{prefix}{}", item.label);
+                if let Some(description) = &item.description
+                    && !description.is_empty()
+                {
+                    text.push_str(" — ");
+                    text.push_str(description);
+                }
+                truncate_to_width(&text, width, "...", false)
+            })
+            .collect()
     }
 
     fn emit_change(&mut self) {
@@ -1402,6 +1665,7 @@ impl Component for Editor {
             .skip(scroll_offset)
             .take(max_visible_lines)
             .collect::<Vec<_>>();
+        let emit_cursor_marker = self.focused && !self.is_showing_autocomplete();
 
         let mut result = Vec::new();
         result.push("─".repeat(width));
@@ -1412,7 +1676,11 @@ impl Component for Editor {
                 let cursor_pos = layout_line.cursor_pos.min(display_text.len());
                 let before_cursor = &display_text[..cursor_pos];
                 let after_cursor = &display_text[cursor_pos..];
-                let marker = if self.focused { CURSOR_MARKER } else { "" };
+                let marker = if emit_cursor_marker {
+                    CURSOR_MARKER
+                } else {
+                    ""
+                };
                 if let Some(segment) = self.segment_text(after_cursor).first() {
                     let grapheme = &segment.text;
                     let rest = &after_cursor[grapheme.len()..];
@@ -1438,6 +1706,22 @@ impl Component for Editor {
         }
 
         result.push("─".repeat(width));
+        for mut line in self.render_autocomplete_lines(content_width) {
+            if padding_x > 0 {
+                line = format!("{}{}", " ".repeat(padding_x), line);
+            }
+            let line_width = visible_width(&line);
+            if line_width < width {
+                line.push_str(&" ".repeat(width - line_width));
+            } else if line_width > width {
+                line = truncate_to_width(&line, width, "", false);
+                let truncated_width = visible_width(&line);
+                if truncated_width < width {
+                    line.push_str(&" ".repeat(width - truncated_width));
+                }
+            }
+            result.push(line);
+        }
         result
     }
 
@@ -1560,6 +1844,24 @@ fn word_wrap_line_with_segments(
     });
 
     chunks
+}
+
+fn get_best_autocomplete_match_index(items: &[AutocompleteItem], prefix: &str) -> Option<usize> {
+    if prefix.is_empty() {
+        return None;
+    }
+
+    let mut first_prefix_index = None;
+    for (index, item) in items.iter().enumerate() {
+        if item.value == prefix {
+            return Some(index);
+        }
+        if first_prefix_index.is_none() && item.value.starts_with(prefix) {
+            first_prefix_index = Some(index);
+        }
+    }
+
+    first_prefix_index
 }
 
 fn segment_graphemes(text: &str) -> Vec<EditorSegment> {

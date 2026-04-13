@@ -1,6 +1,7 @@
 use crate::KeybindingsManager;
-use pi_tui::{Component, Editor, EditorCursor, EditorOptions, matches_key};
+use pi_tui::{AutocompleteProvider, Component, Editor, EditorCursor, EditorOptions, matches_key};
 use std::ops::Deref;
+use std::sync::Arc;
 
 type ActionCallback = Box<dyn FnMut() + Send + 'static>;
 type ShortcutCallback = Box<dyn FnMut(String) -> bool + Send + 'static>;
@@ -62,6 +63,22 @@ impl CustomEditor {
 
     pub fn set_padding_x(&mut self, padding_x: usize) {
         self.editor.set_padding_x(padding_x);
+    }
+
+    pub fn autocomplete_max_visible(&self) -> usize {
+        self.editor.autocomplete_max_visible()
+    }
+
+    pub fn set_autocomplete_max_visible(&mut self, max_visible: usize) {
+        self.editor.set_autocomplete_max_visible(max_visible);
+    }
+
+    pub fn set_autocomplete_provider(&mut self, provider: Arc<dyn AutocompleteProvider>) {
+        self.editor.set_autocomplete_provider(provider);
+    }
+
+    pub fn clear_autocomplete_provider(&mut self) {
+        self.editor.clear_autocomplete_provider();
     }
 
     pub fn is_showing_autocomplete(&self) -> bool {

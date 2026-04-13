@@ -7,7 +7,10 @@ use crate::{
 };
 use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
 use pi_events::{AssistantMessage, UserContent};
-use pi_tui::{Component, ComponentId, EditorCursor, RenderHandle, matches_key, truncate_to_width};
+use pi_tui::{
+    AutocompleteProvider, Component, ComponentId, EditorCursor, RenderHandle, matches_key,
+    truncate_to_width,
+};
 use serde_json::Value;
 use std::{
     cell::{Cell, RefCell},
@@ -685,6 +688,18 @@ impl StartupShellComponent {
         self.input.set_text("");
     }
 
+    pub fn set_autocomplete_max_visible(&mut self, max_visible: usize) {
+        self.input.set_autocomplete_max_visible(max_visible);
+    }
+
+    pub fn set_autocomplete_provider(&mut self, provider: Arc<dyn AutocompleteProvider>) {
+        self.input.set_autocomplete_provider(provider);
+    }
+
+    pub fn clear_autocomplete_provider(&mut self) {
+        self.input.clear_autocomplete_provider();
+    }
+
     pub fn show_extension_editor<F, G>(
         &mut self,
         title: impl Into<String>,
@@ -993,6 +1008,10 @@ impl Component for StartupShellComponent {
         }
 
         if self.matches_binding(data, "tui.input.submit") || data == "\n" {
+            if self.input.is_showing_autocomplete() {
+                self.input.handle_input(data);
+                return;
+            }
             self.submit_current_input();
             return;
         }

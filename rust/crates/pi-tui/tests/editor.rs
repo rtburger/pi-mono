@@ -1,5 +1,6 @@
 use pi_tui::{
-    CURSOR_MARKER, Component, Editor, EditorCursor, EditorOptions, visible_width, word_wrap_line,
+    AutocompleteProvider, AutocompleteSuggestions, CURSOR_MARKER, Component, Editor, EditorCursor,
+    EditorOptions, apply_completion, visible_width, word_wrap_line,
 };
 use regex::Regex;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -768,4 +769,120 @@ fn submit_expands_large_paste_markers() {
             .as_deref(),
         Some(pasted_text.as_str())
     );
+}
+
+#[test]
+fn force_tab_autocomplete_auto_applies_single_suggestion_and_undo_restores_prefix() {
+    struct SingleSuggestionProvider;
+
+    impl AutocompleteProvider for SingleSuggestionProvider {
+        fn get_suggestions(
+            &self,
+            lines: &[String],
+            _cursor_line: usize,
+            cursor_col: usize,
+            force: bool,
+        ) -> Option<AutocompleteSuggestions> {
+            if !force {
+                return None;
+            }
+            let text = lines.first().map(String::as_str).unwrap_or("");
+            let prefix = &text[..cursor_col.min(text.len())];
+            (prefix == "rea").then(|| AutocompleteSuggestions {
+                items: vec![pi_tui::AutocompleteItem {
+                    value: String::from("README.md"),
+                    label: String::from("README.md"),
+                    description: None,
+                }],
+                prefix: String::from("rea"),
+            })
+        }
+
+        fn apply_completion(
+            &self,
+            lines: &[String],
+            cursor_line: usize,
+            cursor_col: usize,
+            item: &pi_tui::AutocompleteItem,
+            prefix: &str,
+        ) -> pi_tui::CompletionResult {
+            apply_completion(lines, cursor_line, cursor_col, item, prefix)
+        }
+    }
+
+    let mut editor = Editor::new();
+    editor.set_autocomplete_provider(Arc::new(SingleSuggestionProvider));
+
+    type_text(&mut editor, "rea");
+    editor.handle_input("\t");
+
+    assert_eq!(editor.get_text(), "README.md");
+    assert!(!editor.is_showing_autocomplete());
+
+    undo(&mut editor);
+    assert_eq!(editor.get_text(), "rea");
+}
+
+#[test]
+fn autocomplete_menu_can_be_rendered_navigated_and_accepted() {
+    struct MultiSuggestionProvider;
+
+    impl AutocompleteProvider for MultiSuggestionProvider {
+        fn get_suggestions(
+            &self,
+            lines: &[String],
+            _cursor_line: usize,
+            cursor_col: usize,
+            force: bool,
+        ) -> Option<AutocompleteSuggestions> {
+            if !force {
+                return None;
+            }
+            let text = lines.first().map(String::as_str).unwrap_or("");
+            let prefix = &text[..cursor_col.min(text.len())];
+            (prefix == "src").then(|| AutocompleteSuggestions {
+                items: vec![
+                    pi_tui::AutocompleteItem {
+                        value: String::from("src/"),
+                        label: String::from("src/"),
+                        description: None,
+                    },
+                    pi_tui::AutocompleteItem {
+                        value: String::from("src.txt"),
+                        label: String::from("src.txt"),
+                        description: None,
+                    },
+                ],
+                prefix: String::from("src"),
+            })
+        }
+
+        fn apply_completion(
+            &self,
+            lines: &[String],
+            cursor_line: usize,
+            cursor_col: usize,
+            item: &pi_tui::AutocompleteItem,
+            prefix: &str,
+        ) -> pi_tui::CompletionResult {
+            apply_completion(lines, cursor_line, cursor_col, item, prefix)
+        }
+    }
+
+    let mut editor = Editor::new();
+    editor.set_autocomplete_provider(Arc::new(MultiSuggestionProvider));
+
+    type_text(&mut editor, "src");
+    editor.handle_input("\t");
+
+    assert!(editor.is_showing_autocomplete());
+    let lines = editor.render(20);
+    assert!(lines.iter().any(|line| line.contains("src/")));
+    assert!(lines.iter().any(|line| line.contains("src.txt")));
+
+    editor.handle_input("\x1b[B");
+    editor.handle_input("\t");
+
+    assert_eq!(editor.get_text(), "src.txt");
+    assert!(!editor.is_showing_autocomplete());
 }
