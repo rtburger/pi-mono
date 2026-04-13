@@ -688,6 +688,10 @@ impl StartupShellComponent {
         self.input.set_text("");
     }
 
+    pub fn set_input_padding_x(&mut self, padding_x: usize) {
+        self.input.set_padding_x(padding_x);
+    }
+
     pub fn set_autocomplete_max_visible(&mut self, max_visible: usize) {
         self.input.set_autocomplete_max_visible(max_visible);
     }

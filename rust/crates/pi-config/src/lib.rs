@@ -55,6 +55,7 @@ pub struct ThinkingBudgetsSettings {
 pub struct RuntimeSettings {
     pub images: ImageSettings,
     pub thinking_budgets: ThinkingBudgetsSettings,
+    pub editor_padding_x: usize,
     pub autocomplete_max_visible: usize,
 }
 
@@ -63,6 +64,7 @@ impl Default for RuntimeSettings {
         Self {
             images: ImageSettings::default(),
             thinking_budgets: ThinkingBudgetsSettings::default(),
+            editor_padding_x: 0,
             autocomplete_max_visible: 5,
         }
     }
@@ -81,6 +83,7 @@ struct RawSettings {
     images: RawImageSettings,
     #[serde(default)]
     thinking_budgets: RawThinkingBudgetsSettings,
+    editor_padding_x: Option<f64>,
     autocomplete_max_visible: Option<f64>,
 }
 
@@ -142,11 +145,17 @@ fn apply_settings_file(loaded: &mut LoadedRuntimeSettings, scope: SettingsScope,
         loaded.settings.thinking_budgets.high = Some(high);
     }
 
-    if let Some(autocomplete_max_visible) = parsed.autocomplete_max_visible {
-        if autocomplete_max_visible.is_finite() {
-            loaded.settings.autocomplete_max_visible =
-                autocomplete_max_visible.floor().clamp(3.0, 20.0) as usize;
-        }
+    if let Some(editor_padding_x) = parsed.editor_padding_x
+        && editor_padding_x.is_finite()
+    {
+        loaded.settings.editor_padding_x = editor_padding_x.floor().clamp(0.0, 3.0) as usize;
+    }
+
+    if let Some(autocomplete_max_visible) = parsed.autocomplete_max_visible
+        && autocomplete_max_visible.is_finite()
+    {
+        loaded.settings.autocomplete_max_visible =
+            autocomplete_max_visible.floor().clamp(3.0, 20.0) as usize;
     }
 }
 
