@@ -1093,6 +1093,75 @@ async fn run_interactive_command_renders_slash_command_autocomplete_for_supporte
 }
 
 #[tokio::test]
+async fn run_interactive_command_renders_model_argument_autocomplete_in_prompt() {
+    let initial_provider = unique_name("p1");
+    let suggestion_provider = unique_name("p2");
+    let initial_model_id = unique_name("a");
+    let suggestion_model_id = unique_name("b");
+    let (api, _recorded) = register_recording_provider("unused");
+    let partial_model_id = &suggestion_model_id[..suggestion_model_id.len().min(1)];
+    let mut script = format!("/model {partial_model_id}")
+        .chars()
+        .map(|character| {
+            (
+                Duration::from_millis(5),
+                TerminalAction::Input(character.to_string()),
+            )
+        })
+        .collect::<Vec<_>>();
+    script.extend([
+        (
+            Duration::from_millis(25),
+            TerminalAction::Input(String::from("\x03")),
+        ),
+        (
+            Duration::from_millis(40),
+            TerminalAction::Input(String::from("\x04")),
+        ),
+    ]);
+    let terminal = ScriptedTerminal::new(script);
+    let inspector = terminal.clone();
+
+    let exit_code = run_interactive_command_with_terminal(
+        RunCommandOptions {
+            args: vec![
+                String::from("--provider"),
+                initial_provider.clone(),
+                String::from("--model"),
+                initial_model_id.clone(),
+            ],
+            stdin_is_tty: true,
+            stdin_content: None,
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([
+                (initial_provider.as_str(), "token-a"),
+                (suggestion_provider.as_str(), "token-b"),
+            ])),
+            built_in_models: vec![
+                model(&api, &initial_provider, &initial_model_id),
+                model(&api, &suggestion_provider, &suggestion_model_id),
+            ],
+            models_json_path: None,
+            agent_dir: None,
+            cwd: unique_temp_dir("runner-interactive-model-autocomplete"),
+            default_system_prompt: String::new(),
+            version: String::from("0.1.0"),
+            stream_options: StreamOptions::default(),
+        },
+        Arc::new(move || Box::new(terminal.clone())),
+    )
+    .await;
+
+    assert_eq!(exit_code, 0);
+    let output = strip_terminal_control_sequences(&inspector.output());
+    assert!(
+        output.contains(&format!("{suggestion_model_id} — {suggestion_provider}")),
+        "output: {output}"
+    );
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
 async fn run_interactive_command_executes_quit_slash_command_without_prompting_model() {
     let provider = unique_name("interactive-provider");
     let model_id = unique_name("interactive-model");
