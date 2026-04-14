@@ -1180,3 +1180,70 @@ fn autocomplete_menu_can_be_rendered_navigated_and_accepted() {
     assert_eq!(editor.get_text(), "src.txt");
     assert!(!editor.is_showing_autocomplete());
 }
+
+#[test]
+fn horizontal_movement_resets_sticky_column_for_future_vertical_navigation() {
+    let mut editor = Editor::new();
+    editor.set_text("1234567890\n\n1234567890");
+
+    editor.handle_input("\x01");
+    move_right(&mut editor, 5);
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 2, col: 5 });
+
+    editor.handle_input("\x1b[A");
+    editor.handle_input("\x1b[A");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 5 });
+
+    editor.handle_input("\x1b[D");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 4 });
+
+    editor.handle_input("\x1b[B");
+    editor.handle_input("\x1b[B");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 2, col: 4 });
+}
+
+#[test]
+fn right_at_end_of_last_line_updates_sticky_column_for_later_vertical_moves() {
+    let mut editor = Editor::new();
+    editor.set_text("111111111x1111111111\n\n333333333_");
+
+    editor.handle_input("\x1b[A");
+    editor.handle_input("\x1b[A");
+    editor.handle_input("\x05");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 20 });
+
+    editor.handle_input("\x1b[B");
+    editor.handle_input("\x1b[B");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 2, col: 10 });
+
+    editor.handle_input("\x1b[C");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 2, col: 10 });
+
+    editor.handle_input("\x1b[A");
+    editor.handle_input("\x1b[A");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 10 });
+}
+
+#[test]
+fn sticky_column_survives_resize_when_preferred_column_is_on_another_line() {
+    let mut editor = Editor::new();
+    editor.set_text("short\n12345678901234567890");
+
+    editor.handle_input("\x01");
+    move_right(&mut editor, 15);
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 1, col: 15 });
+
+    editor.handle_input("\x1b[A");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 5 });
+
+    editor.render(10);
+    editor.handle_input("\x1b[B");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 1, col: 8 });
+
+    editor.handle_input("\x1b[A");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 5 });
+
+    editor.render(80);
+    editor.handle_input("\x1b[B");
+    assert_eq!(editor.get_cursor(), EditorCursor { line: 1, col: 15 });
+}

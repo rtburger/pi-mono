@@ -806,13 +806,13 @@ impl Editor {
 
     fn move_cursor_horizontal(&mut self, delta: isize) {
         self.cancel_autocomplete();
-        self.preferred_visual_col = None;
         self.last_action = None;
 
         let current_line = self.current_line().to_owned();
         let segments = self.segment_text(&current_line);
 
         if delta < 0 {
+            self.preferred_visual_col = None;
             if self.cursor_col > 0 {
                 self.cursor_col = segments
                     .iter()
@@ -828,14 +828,22 @@ impl Editor {
         }
 
         if self.cursor_col < current_line.len() {
+            self.preferred_visual_col = None;
             self.cursor_col = segments
                 .iter()
                 .find(|segment| segment.end > self.cursor_col)
                 .map(|segment| segment.end)
                 .unwrap_or(current_line.len());
         } else if self.cursor_line + 1 < self.lines.len() {
+            self.preferred_visual_col = None;
             self.cursor_line += 1;
             self.cursor_col = 0;
+        } else {
+            let visual_lines = self.build_visual_line_map();
+            let current_visual_line = self.find_current_visual_line(&visual_lines);
+            if let Some(current) = visual_lines.get(current_visual_line) {
+                self.preferred_visual_col = Some(self.cursor_col.saturating_sub(current.start_col));
+            }
         }
     }
 
@@ -1191,17 +1199,37 @@ impl Editor {
             return;
         }
 
+        let target_visual_line = target_visual_line as usize;
         let current = visual_lines[current_visual_line];
-        let desired_visual_col = self
-            .preferred_visual_col
-            .unwrap_or(self.cursor_col.saturating_sub(current.start_col));
-        let target = visual_lines[target_visual_line as usize];
-        self.cursor_line = target.logical_line;
+        let target = visual_lines[target_visual_line];
+        let current_visual_col = self.cursor_col.saturating_sub(current.start_col);
 
+        let is_last_source_segment = current_visual_line + 1 == visual_lines.len()
+            || visual_lines[current_visual_line + 1].logical_line != current.logical_line;
+        let source_max_visual_col = if is_last_source_segment {
+            current.length
+        } else {
+            current.length.saturating_sub(1)
+        };
+
+        let is_last_target_segment = target_visual_line + 1 == visual_lines.len()
+            || visual_lines[target_visual_line + 1].logical_line != target.logical_line;
+        let target_max_visual_col = if is_last_target_segment {
+            target.length
+        } else {
+            target.length.saturating_sub(1)
+        };
+
+        let target_visual_col = self.compute_vertical_move_column(
+            current_visual_col,
+            source_max_visual_col,
+            target_max_visual_col,
+        );
+
+        self.cursor_line = target.logical_line;
         let logical_line = self.lines[target.logical_line].clone();
         let logical_line_len = logical_line.len();
-        let mut target_col =
-            (target.start_col + desired_visual_col.min(target.length)).min(logical_line_len);
+        let mut target_col = (target.start_col + target_visual_col).min(logical_line_len);
 
         for segment in self.segment_text(&logical_line) {
             if !segment.is_paste_marker {
@@ -1218,7 +1246,36 @@ impl Editor {
         }
 
         self.cursor_col = target_col;
-        self.preferred_visual_col = Some(desired_visual_col);
+    }
+
+    fn compute_vertical_move_column(
+        &mut self,
+        current_visual_col: usize,
+        source_max_visual_col: usize,
+        target_max_visual_col: usize,
+    ) -> usize {
+        let has_preferred = self.preferred_visual_col.is_some();
+        let cursor_in_middle = current_visual_col < source_max_visual_col;
+        let target_too_short = target_max_visual_col < current_visual_col;
+
+        if !has_preferred || cursor_in_middle {
+            if target_too_short {
+                self.preferred_visual_col = Some(current_visual_col);
+                return target_max_visual_col;
+            }
+
+            self.preferred_visual_col = None;
+            return current_visual_col;
+        }
+
+        let preferred_visual_col = self.preferred_visual_col.unwrap_or(current_visual_col);
+        let target_cant_fit_preferred = target_max_visual_col < preferred_visual_col;
+        if target_too_short || target_cant_fit_preferred {
+            return target_max_visual_col;
+        }
+
+        self.preferred_visual_col = None;
+        preferred_visual_col
     }
 
     fn yank(&mut self) {

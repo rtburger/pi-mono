@@ -2206,3 +2206,70 @@ Still deferred for `pi-tui`:
 Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
 - continue with the next editor gap that has direct downstream value after paste markers, most likely autocomplete or another proven custom-editor/main-editor interaction gap
 - keep broader widget parity and the full theme/markdown/image stack deferred until the next real downstream consumer requires them
+
+## Milestone 26 update: multiline-editor sticky-column parity slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- targeted sticky-column / resize behavior sections from `packages/tui/src/components/editor.ts`
+- targeted sticky-column regressions from `packages/tui/test/editor.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-tui/src/editor.rs`
+- `rust/crates/pi-tui/tests/editor.rs`
+- `migration/packages/tui.md`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- `pi-tui::Editor` now ports a narrower but important sticky-column slice from the TypeScript multiline editor
+- horizontal cursor movement now resets sticky-column state for later vertical navigation in the same way as the current TS editor surface
+- pressing right at the end of the final logical line now updates the stored preferred visual column instead of silently dropping prior sticky-column state
+- vertical movement now follows the TS source/target visual-segment rules more closely:
+  - non-final wrapped segments clamp to `length - 1`
+  - clamped moves preserve preferred visual columns when the target line is too short
+  - unclamped moves clear stale preferred columns when the target can honor the current visual position again
+- resize-sensitive vertical navigation now preserves and restores preferred visual columns across reflow on the migrated Rust editor path, matching the TS sticky-column regressions for the currently ported scenarios
+
+Compatibility note for this slice:
+- this milestone intentionally targets the sticky-column decision logic and the visible regressions that fall directly out of it
+- Rust still does not port every remaining editor behavior from the TypeScript file (for example the TS page-scroll path and the broader async autocomplete/debounce path remain separate follow-up slices)
+
+### Rust design summary
+
+Expanded `pi-tui::Editor` with:
+- `compute_vertical_move_column(...)` mirroring the TS sticky-column decision table
+- vertical movement updated to distinguish source/target last-segment vs wrapped-segment bounds before applying sticky-column restoration or clamping
+- right-arrow handling at the end of the final logical line now records the current visual column for later up/down restoration instead of always clearing sticky-column state
+
+Design choices for this slice:
+- keep the sticky-column logic local to `pi-tui::Editor`, where the TypeScript source of truth already owns it
+- port the TS decision table directly instead of broadening the Rust editor into a larger cursor/state abstraction
+- freeze only the sticky-column cases that are clearly grounded by the current TS editor tests and already relevant to the migrated multiline editor surface
+
+### Validation summary
+
+New Rust coverage added for:
+- horizontal movement resetting sticky-column state before later vertical navigation
+- right-arrow at the end of the final logical line updating the preferred visual column used by later up/down movement
+- resize-sensitive restoration of preferred visual columns when reflow happens on a different logical line
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-tui --test editor` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for `pi-tui`:
+- full TypeScript main-editor parity remains incomplete (`autocomplete`, remaining sticky/page-scroll edge cases around the full TS surface)
+- no broader widget parity yet (`Box`, markdown, select/settings/image widgets)
+- differential rendering parity remains partial relative to TS `packages/tui/src/tui.ts`
+
+### Recommended next step
+
+Stay in `packages/tui`, `packages/coding-agent/src/modes/interactive`, `rust/crates/pi-tui`, and `rust/crates/pi-coding-agent-tui`:
+- continue with the next editor gap that is both TS-grounded and small enough to verify in isolation, most likely the remaining sticky/page-scroll editor edge cases or the next autocomplete parity slice
+- keep broader widget parity and the full theme/markdown/image stack deferred until the next real downstream consumer requires them
