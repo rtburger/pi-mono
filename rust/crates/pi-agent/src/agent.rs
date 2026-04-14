@@ -311,6 +311,23 @@ impl Agent {
         inner.steering_queue.has_items() || inner.follow_up_queue.has_items()
     }
 
+    pub fn signal(&self) -> Option<watch::Receiver<bool>> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .active_run
+            .as_ref()
+            .map(|run| run.abort_tx.subscribe())
+    }
+
+    pub fn reset(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.state.messages.clear();
+        inner.state.finish_run();
+        inner.state.error_message = None;
+        inner.steering_queue.clear();
+        inner.follow_up_queue.clear();
+    }
+
     pub fn abort(&self) {
         let abort_tx = {
             let inner = self.inner.lock().unwrap();
@@ -677,4 +694,156 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_stream::try_stream;
+    use pi_ai::AssistantEventStream;
+    use pi_events::{
+        AssistantContent, AssistantEvent, Message, Model, StopReason, Usage, UserContent,
+    };
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    fn model() -> Model {
+        Model {
+            id: "mock".into(),
+            name: "Mock".into(),
+            api: "faux:test".into(),
+            provider: "faux".into(),
+            base_url: "http://localhost".into(),
+            reasoning: false,
+            input: vec!["text".into()],
+            context_window: 8192,
+            max_tokens: 2048,
+        }
+    }
+
+    fn assistant_message(text: &str, stop_reason: StopReason, timestamp: u64) -> Message {
+        Message::Assistant {
+            content: vec![AssistantContent::Text {
+                text: text.to_string(),
+                text_signature: None,
+            }],
+            api: "faux:test".into(),
+            provider: "faux".into(),
+            model: "mock".into(),
+            response_id: None,
+            usage: Usage::default(),
+            stop_reason,
+            error_message: None,
+            timestamp,
+        }
+    }
+
+    fn user_message(text: &str, timestamp: u64) -> Message {
+        Message::User {
+            content: vec![UserContent::Text {
+                text: text.to_string(),
+            }],
+            timestamp,
+        }
+    }
+
+    #[tokio::test]
+    async fn signal_exposes_active_abort_receiver() {
+        let stream_entered = Arc::new(Notify::new());
+        let streamer = Arc::new({
+            let stream_entered = stream_entered.clone();
+            move |_model: Model,
+                  _context: pi_events::Context,
+                  options: StreamOptions|
+                  -> Result<AssistantEventStream, AiError> {
+                let mut signal = options.signal.expect("agent should inject an abort signal");
+                let stream_entered = stream_entered.clone();
+                Ok(Box::pin(try_stream! {
+                    stream_entered.notify_waiters();
+                    yield AssistantEvent::Start {
+                        partial: pi_events::AssistantMessage {
+                            role: "assistant".into(),
+                            content: vec![AssistantContent::Text {
+                                text: String::new(),
+                                text_signature: None,
+                            }],
+                            api: "faux:test".into(),
+                            provider: "faux".into(),
+                            model: "mock".into(),
+                            response_id: None,
+                            usage: Usage::default(),
+                            stop_reason: StopReason::Stop,
+                            error_message: None,
+                            timestamp: 20,
+                        },
+                    };
+
+                    while !*signal.borrow() {
+                        signal.changed().await.expect("abort signal sender should stay alive");
+                    }
+
+                    let mut aborted = pi_events::AssistantMessage::empty("faux:test", "faux", "mock");
+                    aborted.stop_reason = StopReason::Aborted;
+                    aborted.error_message = Some("Request was aborted".into());
+                    aborted.timestamp = 21;
+                    yield AssistantEvent::Error {
+                        reason: StopReason::Aborted,
+                        error: aborted,
+                    };
+                }))
+            }
+        });
+
+        let agent = Agent::with_parts(AgentState::new(model()), streamer, StreamOptions::default());
+        let prompt_agent = agent.clone();
+        let prompt_task = tokio::spawn(async move { prompt_agent.prompt_text("hello").await });
+
+        stream_entered.notified().await;
+        let mut signal = agent
+            .signal()
+            .expect("running agent should expose a signal");
+        assert!(!*signal.borrow());
+
+        agent.abort();
+        while !*signal.borrow() {
+            signal
+                .changed()
+                .await
+                .expect("abort signal receiver should stay connected until the run ends");
+        }
+
+        assert!(prompt_task.await.unwrap().is_ok());
+        assert!(agent.signal().is_none());
+    }
+
+    #[test]
+    fn reset_clears_transcript_runtime_state_and_queues() {
+        let agent = Agent::new(AgentState::new(model()));
+        agent.update_state(|state| {
+            state.system_prompt = "system".into();
+            state.thinking_level = crate::ThinkingLevel::High;
+            state
+                .messages
+                .push(user_message("kept only until reset", 10).into());
+            state.begin_run();
+            state.streaming_message =
+                Some(assistant_message("partial", StopReason::Stop, 11).into());
+            state.pending_tool_calls.insert("tool-1".into());
+            state.error_message = Some("boom".into());
+        });
+        agent.steer(user_message("steering", 12));
+        agent.follow_up(user_message("follow-up", 13));
+
+        agent.reset();
+
+        let state = agent.state();
+        assert_eq!(state.system_prompt, "system");
+        assert_eq!(state.thinking_level, crate::ThinkingLevel::High);
+        assert!(state.messages.is_empty());
+        assert!(!state.is_streaming);
+        assert!(state.streaming_message.is_none());
+        assert!(state.pending_tool_calls.is_empty());
+        assert!(state.error_message.is_none());
+        assert!(!agent.has_queued_messages());
+    }
 }
