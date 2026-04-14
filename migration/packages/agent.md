@@ -1,6 +1,6 @@
 # packages/agent migration inventory
 
-Status: milestone 13 adds configurable sequential/parallel tool-execution parity across the low-level loop and Rust `Agent` wrapper on top of the existing loop/state/wrapper/tool/queue slices
+Status: milestone 14 adds deeper proxy/tool partial-JSON reconstruction parity on top of the existing loop/state/wrapper/tool/queue slices
 Target crate: `rust/crates/pi-agent`
 
 ## 1. Files analyzed
@@ -645,3 +645,61 @@ Still deferred in `pi-agent`:
 - additional TS top-level simple-stream knobs beyond the current default-streamer slices
 - fuller intermediate partial-JSON reconstruction parity in the proxy/tool path
 - downstream coding-agent parity still needs its own runtime streamer update so selected thinking levels and budgets affect the non-interactive app end-to-end
+
+## Milestone 14 update: deeper proxy/tool partial-JSON reconstruction slice
+
+### Files analyzed
+
+Additional TypeScript grounding used for this slice:
+- `packages/agent/src/proxy.ts`
+- `packages/ai/src/utils/json-parse.ts`
+- `packages/ai/test/stream.test.ts`
+- `packages/ai/test/faux-provider.test.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-agent/src/lib.rs`
+- `rust/crates/pi-agent/src/proxy.rs`
+- `rust/crates/pi-agent/tests/proxy.rs`
+
+### Behavior summary
+
+New TS-grounded behaviors now covered in Rust:
+- proxy-side tool-call argument reconstruction now matches the TypeScript `parseStreamingJson(...)` shape more closely instead of only accepting fully valid JSON objects
+- Rust proxy reconstruction now preserves best-effort partial arguments during streamed `toolcall_delta` events for high-value incomplete JSON prefixes such as:
+  - incomplete strings
+  - nested objects
+  - nested arrays
+  - partial booleans / nulls
+  - incomplete exponents and trailing commas
+- nested partial values now survive through `toolcall_end` even when the final buffered JSON is still incomplete, matching the current TS proxy behavior of keeping the last successfully reconstructed partial object
+- Rust proxy handling now matches the TS `toolcall_end` guard behavior more closely:
+  - missing/non-tool-call content on `toolcall_end` is ignored instead of surfaced as a terminal stream error
+
+Compatibility note for this slice:
+- this milestone intentionally ports the high-value proxy/object reconstruction behavior used by streamed tool-call arguments; it is not a full Rust port of every edge case from the JS `partial-json` package
+- Unicode-surrogate edge handling inside partial JSON strings remains narrower in Rust than JavaScript because Rust `String` cannot represent lone UTF-16 surrogate code units directly
+
+### Rust design summary
+
+New internal Rust module added:
+- `rust/crates/pi-agent/src/partial_json.rs`
+
+Implementation changes:
+- `pi-agent::partial_json`
+  - permissive recursive partial parser for JSON object prefixes used by proxy tool-call reconstruction
+- `rust/crates/pi-agent/src/proxy.rs`
+  - now uses the new partial parser for streamed `toolcall_delta` updates
+  - now ignores orphan `toolcall_end` events instead of failing the stream
+- `rust/crates/pi-agent/src/lib.rs`
+  - registers the new internal module
+
+### Validation summary
+
+New Rust coverage added for:
+- TS-shaped partial JSON reconstruction for nested strings/objects/arrays, partial booleans, trailing commas, and incomplete exponents
+- proxy unit coverage proving nested partial tool arguments appear during `toolcall_delta` and persist through `toolcall_end`
+- proxy unit coverage proving orphan `toolcall_end` is ignored
+- proxy integration coverage proving the HTTP/SSE path reconstructs nested partial tool arguments from an incomplete JSON prefix
+
+Validation run results:
+- `cd rust && cargo test -p pi-agent` passed

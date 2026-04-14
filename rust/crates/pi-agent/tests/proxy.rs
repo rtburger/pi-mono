@@ -263,6 +263,70 @@ async fn proxy_stream_posts_camel_case_request_and_reconstructs_events() {
 }
 
 #[tokio::test]
+async fn proxy_stream_reconstructs_nested_partial_tool_arguments_from_incomplete_json_prefix() {
+    let request_body = Arc::new(Mutex::new(None));
+    let sse = concat!(
+        "data: {\"type\":\"start\"}\n\n",
+        "data: {\"type\":\"toolcall_start\",\"contentIndex\":0,\"id\":\"tool-1\",\"toolName\":\"echo\"}\n\n",
+        "data: {\"type\":\"toolcall_delta\",\"contentIndex\":0,\"delta\":\"{\\\"args\\\":{\\\"path\\\":\\\"/tmp/fi\\\",\\\"flags\\\":[1,2],\\\"recursive\\\":tr\"}\n\n",
+        "data: {\"type\":\"toolcall_end\",\"contentIndex\":0}\n\n",
+        "data: {\"type\":\"done\",\"reason\":\"toolUse\",\"usage\":{\"input\":1,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":1,\"cost\":{\"input\":0.0,\"output\":0.0,\"cacheRead\":0.0,\"cacheWrite\":0.0,\"total\":0.0}}}\n\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        sse.len(),
+        sse,
+    );
+    let server = start_server(response, request_body);
+
+    let events = stream_proxy(
+        model(),
+        context(),
+        StreamOptions::default(),
+        ProxyStreamConfig::new("token-123", server),
+    )
+    .collect::<Vec<_>>()
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+
+    match &events[2] {
+        AssistantEvent::ToolCallDelta { partial, .. } => match &partial.content[0] {
+            AssistantContent::ToolCall { arguments, .. } => {
+                assert_eq!(
+                    arguments.get("args"),
+                    Some(&json!({
+                        "path": "/tmp/fi",
+                        "flags": [1, 2],
+                        "recursive": true,
+                    }))
+                );
+            }
+            other => panic!("expected tool call content, got {other:?}"),
+        },
+        other => panic!("expected toolcall delta event, got {other:?}"),
+    }
+
+    match &events[3] {
+        AssistantEvent::ToolCallEnd { tool_call, .. } => match tool_call {
+            AssistantContent::ToolCall { arguments, .. } => {
+                assert_eq!(
+                    arguments.get("args"),
+                    Some(&json!({
+                        "path": "/tmp/fi",
+                        "flags": [1, 2],
+                        "recursive": true,
+                    }))
+                );
+            }
+            other => panic!("expected tool call content, got {other:?}"),
+        },
+        other => panic!("expected toolcall end event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn proxy_stream_surfaces_non_ok_json_errors() {
     let request_body = Arc::new(Mutex::new(None));
     let body = "{\"error\":\"denied\"}";

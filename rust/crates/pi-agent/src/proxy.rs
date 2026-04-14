@@ -1,4 +1,4 @@
-use crate::r#loop::AssistantStreamer;
+use crate::{r#loop::AssistantStreamer, partial_json::parse_partial_object};
 use async_stream::stream;
 use pi_ai::{AiError, AssistantEventStream, StreamOptions};
 use pi_events::{
@@ -627,32 +627,19 @@ fn process_proxy_event(
             let content_index = usize_field(proxy_event, "contentIndex")?;
             if let Some(partial_json) = state.tool_call_json.remove(&content_index)
                 && let Some(arguments) = parse_complete_object(&partial_json)
+                && let Some(AssistantContent::ToolCall {
+                    arguments: tool_arguments,
+                    ..
+                }) = state.partial.content.get_mut(content_index)
             {
-                match state.partial.content.get_mut(content_index) {
-                    Some(AssistantContent::ToolCall {
-                        arguments: tool_arguments,
-                        ..
-                    }) => {
-                        *tool_arguments = arguments;
-                    }
-                    _ => {
-                        return Err(String::from(
-                            "Received toolcall_end for non-toolCall content",
-                        ));
-                    }
-                }
+                *tool_arguments = arguments;
             }
 
-            let tool_call = state
-                .partial
-                .content
-                .get(content_index)
-                .cloned()
-                .ok_or_else(|| String::from("Received toolcall_end for missing content"))?;
+            let Some(tool_call) = state.partial.content.get(content_index).cloned() else {
+                return Ok(None);
+            };
             if !matches!(tool_call, AssistantContent::ToolCall { .. }) {
-                return Err(String::from(
-                    "Received toolcall_end for non-toolCall content",
-                ));
+                return Ok(None);
             }
             Ok(Some(AssistantEvent::ToolCallEnd {
                 content_index,
@@ -777,10 +764,6 @@ fn float_field(object: &Map<String, Value>, key: &str) -> Result<f64, String> {
         .get(key)
         .and_then(Value::as_f64)
         .ok_or_else(|| format!("Missing float field: {key}"))
-}
-
-fn parse_partial_object(partial_json: &str) -> Option<BTreeMap<String, Value>> {
-    parse_complete_object(partial_json)
 }
 
 fn parse_complete_object(json_text: &str) -> Option<BTreeMap<String, Value>> {
@@ -992,6 +975,74 @@ mod tests {
                 thought_signature: None,
             }]
         );
+    }
+
+    #[test]
+    fn process_proxy_event_reconstructs_nested_partial_tool_call_arguments() {
+        let mut state = ProxyPartialState::new(&model());
+
+        process_proxy_event(
+            &json!({ "type": "toolcall_start", "contentIndex": 0, "id": "tool-1", "toolName": "echo" }),
+            &mut state,
+        )
+        .unwrap();
+        process_proxy_event(
+            &json!({
+                "type": "toolcall_delta",
+                "contentIndex": 0,
+                "delta": "{\"args\":{\"path\":\"/tmp/fi\",\"flags\":[1,2],\"recursive\":tr"
+            }),
+            &mut state,
+        )
+        .unwrap();
+
+        match &state.partial.content[0] {
+            pi_events::AssistantContent::ToolCall { arguments, .. } => {
+                assert_eq!(
+                    arguments.get("args"),
+                    Some(&json!({
+                        "path": "/tmp/fi",
+                        "flags": [1, 2],
+                        "recursive": true,
+                    }))
+                );
+            }
+            other => panic!("expected tool call content, got {other:?}"),
+        }
+
+        let tool_end = process_proxy_event(
+            &json!({ "type": "toolcall_end", "contentIndex": 0 }),
+            &mut state,
+        )
+        .unwrap()
+        .unwrap();
+        match tool_end {
+            pi_events::AssistantEvent::ToolCallEnd { tool_call, .. } => match tool_call {
+                pi_events::AssistantContent::ToolCall { arguments, .. } => {
+                    assert_eq!(
+                        arguments.get("args"),
+                        Some(&json!({
+                            "path": "/tmp/fi",
+                            "flags": [1, 2],
+                            "recursive": true,
+                        }))
+                    );
+                }
+                other => panic!("expected tool call content, got {other:?}"),
+            },
+            other => panic!("expected tool call end event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn process_proxy_event_ignores_orphan_toolcall_end() {
+        let mut state = ProxyPartialState::new(&model());
+        let event = process_proxy_event(
+            &json!({ "type": "toolcall_end", "contentIndex": 0 }),
+            &mut state,
+        )
+        .unwrap();
+        assert!(event.is_none());
     }
 
     #[test]

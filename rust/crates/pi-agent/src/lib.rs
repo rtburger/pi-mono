@@ -2,6 +2,7 @@ mod agent;
 mod error;
 mod r#loop;
 mod message;
+mod partial_json;
 mod proxy;
 mod state;
 mod tool;
