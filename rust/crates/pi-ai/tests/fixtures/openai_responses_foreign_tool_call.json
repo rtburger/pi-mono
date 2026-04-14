@@ -1,5 +1,6 @@
 {
   "type": "function_call",
-  "id_prefix": "fc_",
-  "call_id": "call_4VnzVawQXPB9MgYib7CiQFEY"
+  "call_id": "call_4VnzVawQXPB9MgYib7CiQFEY",
+  "item_id": "fc_ifd2c719fz6a9",
+  "normalized_id": "call_4VnzVawQXPB9MgYib7CiQFEY|fc_ifd2c719fz6a9"
 }

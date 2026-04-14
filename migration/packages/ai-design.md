@@ -1,0 +1,157 @@
+# packages/ai Rust target design
+
+Date: 2026-04-14
+Status: Step 2 complete
+
+## Crate name
+
+- Rust crate: `pi-ai`
+
+## Scope for this migration phase
+
+In scope for Rust parity now:
+- Anthropic Messages
+- OpenAI Responses
+- OpenAI Chat Completions
+- OpenAI Codex Responses
+- faux provider for tests
+- shared model lookup, env API key lookup, normalized assistant event streaming
+
+Out of scope for this phase:
+- Azure
+- Google / Gemini / Vertex / Gemini CLI
+- Bedrock
+- Mistral
+- OpenRouter / Groq / xAI / z.ai / other OpenAI-compatible providers beyond what current OpenAI paths require
+
+## Module layout
+
+### Public modules
+- `anthropic_messages`
+- `models`
+- `openai_codex_responses`
+- `openai_completions`
+- `openai_responses`
+- `overflow`
+
+### Private/shared modules
+- `unicode`
+- provider registration and faux-provider support in `src/lib.rs`
+
+## Public API target
+
+Keep the crate surface centered on normalized streaming and completion helpers:
+- model helpers
+  - `built_in_models()`
+  - `get_model()`
+  - `get_models()`
+  - `get_providers()`
+  - `models_are_equal()`
+  - `supports_xhigh()`
+- request dispatch
+  - `stream_response()`
+  - `complete()`
+  - `stream_simple()`
+  - `complete_simple()`
+- provider registration
+  - `register_provider()`
+  - `unregister_provider()`
+  - `register_builtin_providers()`
+- env/auth helpers
+  - `get_env_api_key()`
+- focused provider-specific helpers where tests need them
+  - e.g. Codex/OpenAI request param builders and SSE parsers
+
+## Key types / enums / traits
+
+- `AiProvider`
+  - trait boundary for provider implementations
+- `AssistantEventStream`
+  - `Stream<Item = Result<AssistantEvent, AiError>>`
+- `AiError`
+  - typed crate error enum
+- `StreamOptions`
+  - low-level provider options
+- `SimpleStreamOptions`
+  - simplified reasoning-focused options mapped to provider-native requests
+- `Transport`
+  - `Sse | WebSocket | Auto`
+- `CacheRetention`
+  - `None | Short | Long`
+- provider request/response structs per API module
+  - explicit serde-backed request payloads
+  - explicit SSE/WebSocket event envelopes where practical
+
+Shared event/message model stays in `pi-events`, not `pi-ai`.
+
+## Dependencies
+
+Runtime:
+- `tokio`
+- `reqwest`
+- `serde`
+- `serde_json`
+- `futures`
+- `tokio-tungstenite`
+- `async-stream`
+- `regex`
+- `thiserror`
+
+Dev/test:
+- `httpmock`
+- fixture files under `rust/crates/pi-ai/tests/fixtures/`
+
+## Compatibility goals
+
+1. Preserve the TypeScript observable contract, not its implementation structure.
+2. Keep one normalized assistant event stream across all in-scope providers.
+3. Match TypeScript request semantics for:
+   - reasoning effort mapping
+   - session/cache headers and payload fields
+   - tool call normalization
+   - image tool-result routing
+   - Unicode sanitization
+4. Match TypeScript terminal-stream behavior:
+   - terminate on provider completion events
+   - propagate usage and stop reasons
+   - preserve partial content on abort/error where TS does
+5. Keep model data sourced from the TypeScript-generated catalog, filtered to in-scope providers.
+
+## Known risks
+
+1. OAuth placement is still unresolved.
+   - TypeScript exposes runtime OAuth helpers from `packages/ai/oauth`.
+   - Rust currently lacks full equivalent surface.
+2. Cross-provider replay behavior is broad in TypeScript.
+   - Rust must validate only the in-scope Anthropic/OpenAI/Codex cases first.
+3. OpenAI-compatible edge cases can leak into nominal OpenAI behavior.
+   - especially tool-call IDs, reasoning replay, and tool-result image routing.
+4. Codex transport has two code paths.
+   - SSE and WebSocket parity must be kept aligned.
+5. `pi-test-harness` is still underbuilt.
+   - short term tests stay local to `pi-ai` until a shared harness exists.
+
+## Validation plan
+
+Near-term validation order:
+1. Freeze TypeScript-derived fixtures for Codex SSE terminal behavior. Done.
+2. Validate Codex SSE parser and HTTP transport against those fixtures. Done.
+3. Freeze exact TypeScript `shortHash()` parity for foreign OpenAI Responses tool-call item IDs. Done.
+4. Keep existing Rust provider tests green for:
+   - OpenAI Responses
+   - OpenAI Completions
+   - OpenAI Codex Responses
+   - Anthropic Messages
+5. Expand fixture-driven tests next for:
+   - Anthropic tool-name normalization / OAuth path behavior
+   - orphaned tool-call synthetic tool results
+   - tool-result image routing
+   - Unicode surrogate sanitization
+
+## Current milestone decision
+
+Use Anthropic Claude Code OAuth tool-name round trips as the next vertical slice because:
+- the user-requested Rust scope explicitly includes Claude Code OAuth behavior on the Anthropic path
+- the TypeScript suite already specifies outbound and inbound casing semantics
+- the behavior is observable in request payloads and emitted tool call names
+- it is small enough to validate without broad package churn

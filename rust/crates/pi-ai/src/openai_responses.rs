@@ -698,14 +698,32 @@ fn build_foreign_responses_item_id(item_id: &str) -> String {
 fn short_hash(input: &str) -> String {
     let mut h1: u32 = 0xdeadbeef;
     let mut h2: u32 = 0x41c6ce57;
-    for character in input.chars() {
-        let ch = character as u32;
+    for code_unit in input.encode_utf16() {
+        let ch = u32::from(code_unit);
         h1 = (h1 ^ ch).wrapping_mul(2654435761);
         h2 = (h2 ^ ch).wrapping_mul(1597334677);
     }
     h1 = (h1 ^ (h1 >> 16)).wrapping_mul(2246822507) ^ (h2 ^ (h2 >> 13)).wrapping_mul(3266489909);
     h2 = (h2 ^ (h2 >> 16)).wrapping_mul(2246822507) ^ (h1 ^ (h1 >> 13)).wrapping_mul(3266489909);
-    format!("{:x}{:x}", h2, h1)
+    format!("{}{}", to_base36(h2), to_base36(h1))
+}
+
+fn to_base36(mut value: u32) -> String {
+    if value == 0 {
+        return "0".into();
+    }
+
+    let mut digits = Vec::new();
+    while value > 0 {
+        let digit = (value % 36) as u8;
+        digits.push(match digit {
+            0..=9 => (b'0' + digit) as char,
+            _ => (b'a' + (digit - 10)) as char,
+        });
+        value /= 36;
+    }
+
+    digits.into_iter().rev().collect()
 }
 
 fn sanitize_surrogates(text: &str) -> String {

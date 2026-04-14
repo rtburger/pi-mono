@@ -42,8 +42,9 @@ fn normalizes_foreign_tool_call_ids_for_openai_responses() {
     let normalized = normalize_tool_call_id(RAW_TOOL_CALL_ID, true, true);
     let (call_id, item_id) = normalized.split_once('|').unwrap();
 
+    assert_eq!(normalized, expected["normalized_id"].as_str().unwrap());
     assert_eq!(call_id, expected["call_id"].as_str().unwrap());
-    assert!(item_id.starts_with(expected["id_prefix"].as_str().unwrap()));
+    assert_eq!(item_id, expected["item_id"].as_str().unwrap());
     assert!(item_id.len() <= 64);
     assert!(
         item_id
@@ -105,9 +106,7 @@ fn converts_foreign_assistant_tool_call_to_function_call() {
             assert_eq!(call_id, "call_4VnzVawQXPB9MgYib7CiQFEY");
             assert_eq!(name, "edit");
             assert_eq!(arguments, r#"{"path":"src/styles/app.css"}"#);
-            let id = id.as_ref().unwrap();
-            assert!(id.starts_with("fc_"));
-            assert!(id.len() <= 64);
+            assert_eq!(id.as_deref(), Some("fc_ifd2c719fz6a9"));
         }
         _ => unreachable!(),
     }
