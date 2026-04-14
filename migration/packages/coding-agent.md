@@ -4500,3 +4500,101 @@ Still deferred for the coding-agent interactive/runtime path:
 Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
 - keep pushing on the live interactive shell/runtime bridge, most likely the next queue/control slice or the next multiline/custom-editor gap that now blocks the upgraded interactive path
 - keep the broader session-manager/resource-loader wiring and full theme/markdown/image stack deferred until those higher-value interaction/runtime gaps are closed first
+
+## Milestone 59 update: interactive steering-queue + dequeue/interrupt restore slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`
+  - `setupEditorSubmitHandler()` streaming `steer` path
+  - `handleFollowUp()`
+  - `handleDequeue()`
+  - `getAllQueuedMessages()`
+  - `clearAllQueues()`
+  - `updatePendingMessagesDisplay()`
+  - `restoreQueuedMessagesToEditor()`
+- previously grounded interactive editor/keybinding files kept in scope:
+  - `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+  - `packages/coding-agent/src/core/keybindings.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/interactive_binding.rs`
+- `rust/crates/pi-coding-agent-tui/tests/interactive_binding.rs`
+- related runtime/queue grounding kept in scope:
+  - `rust/crates/pi-agent/src/agent.rs`
+  - `rust/crates/pi-coding-agent-core/src/runtime.rs`
+  - `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- the live Rust `InteractiveCoreBinding` now ports the regular-submit streaming queue behavior from TypeScript interactive mode instead of treating Enter as an immediate prompt submit in all cases
+- when the bound runtime is already streaming, regular shell submit now preserves the current high-value TS behavior for the migrated subset:
+  - current prompt text is queued as a steering message
+  - prompt input is cleared immediately
+  - the pending-message strip shows `Steering: ...`
+- Rust interactive dequeue/interrupt behavior now restores the full queued interactive input set, not only follow-up messages:
+  - queued steering messages
+  - queued follow-up messages
+- `app.message.dequeue` now restores queued steering + follow-up text back into the prompt in TS order (`steering` first, then `followUp`) with blank-line separation and clears both bound agent queues
+- interrupt behavior now matches the current TS queued-message escape path more closely for the migrated subset:
+  - if steering/follow-up messages are queued while a request is running
+  - interrupt restores all queued text into the prompt first, clears the pending strip, then aborts the active run
+- pending-message rendering is now updated when queued messages are actually consumed during the running turn:
+  - when a queued user message starts
+  - the next pending steering/follow-up entry is removed from the strip immediately instead of lingering until `agent_end`
+
+Compatibility note for this slice:
+- this milestone ports the live shell/runtime queue behavior for the current Rust interactive path only; it still does not port the broader TypeScript compaction/session-manager queue ownership split
+- queued-message display remains the current startup-shell subset; richer queue/status UX remains a later interactive/runtime milestone
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::interactive_binding` with:
+- internal `PendingMessageState` tracking both:
+  - steering queue text
+  - follow-up queue text
+- shell submit callback now branching between:
+  - immediate `prompt_text(...)` when idle
+  - steering-queue insertion when already streaming
+- shared queue helpers for:
+  - steering enqueue
+  - follow-up enqueue
+  - pending-strip snapshot updates
+  - dequeue/interrupt restoration of all queued text
+  - queue consumption on `AgentEvent::MessageStart` for queued user turns
+
+Design choices for this slice:
+- keep the steering/follow-up queue behavior in `pi-coding-agent-tui::InteractiveCoreBinding`, where the existing Rust shell/runtime bridge already owns interactive queue UI behavior, instead of widening `pi-agent` with a higher-level interactive queue model first
+- reuse the existing queued shell-update/render-handle path so pending-message strip updates stay thread-safe and consistent with the current Rust TUI event model
+- preserve the current TS queue ordering on restore by storing steering/follow-up messages separately and merging them only at restore time
+
+### Validation summary
+
+New Rust coverage added for:
+- regular submit while streaming queuing a steering message and showing it in the pending strip
+- pending-strip updates when a queued steering message is consumed and only remaining follow-up messages should still be visible
+- dequeue restoring queued steering + follow-up messages back into the prompt without sending additional runtime turns
+- interrupt restoring queued steering + follow-up messages back into the prompt before aborting the active run
+- existing follow-up-only interactive binding regressions continuing to pass on top of the widened queue logic
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test interactive_binding` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive/runtime path:
+- no session-manager/resource-loader-backed steering/compaction queue parity yet beyond the shell-local agent queue slice
+- no multiline editor / broader custom-editor parity yet beyond the existing migrated subset
+- no broader theme/markdown/image parity yet for the full interactive presentation stack
+- no richer queue/status UX yet beyond the pending steering/follow-up strip and restore actions migrated so far
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- keep pushing on the live interactive shell/runtime bridge, most likely the next queue/control slice above the now-migrated steering/follow-up behavior or the next multiline/custom-editor gap that blocks the upgraded interactive path
+- keep the broader session-manager/resource-loader wiring and full theme/markdown/image stack deferred until those higher-value interaction/runtime gaps are closed first
