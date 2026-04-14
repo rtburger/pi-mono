@@ -359,6 +359,69 @@ async fn continue_uses_existing_state_and_updates_transcript() {
 }
 
 #[tokio::test]
+async fn prompt_text_with_images_preserves_text_then_images() {
+    let seen_context_messages = Arc::new(Mutex::new(Vec::new()));
+    let streamer = Arc::new({
+        let seen_context_messages = seen_context_messages.clone();
+        move |_model: Model,
+              context: Context,
+              _options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            seen_context_messages
+                .lock()
+                .unwrap()
+                .push(context.messages.clone());
+
+            let message = assistant_message("ok", StopReason::Stop, 20);
+            Ok(Box::pin(try_stream! {
+                yield AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                };
+            }))
+        }
+    });
+
+    let agent = Agent::with_parts(AgentState::new(model()), streamer, StreamOptions::default());
+
+    agent
+        .prompt_text_with_images(
+            "look",
+            vec![
+                UserContent::Image {
+                    data: "aGVsbG8=".into(),
+                    mime_type: "image/png".into(),
+                },
+                UserContent::Image {
+                    data: "aW1hZ2U=".into(),
+                    mime_type: "image/jpeg".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let messages = seen_context_messages.lock().unwrap().clone();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].len(), 1);
+    assert!(matches!(
+        &messages[0][0],
+        Message::User { content, .. }
+            if content == &vec![
+                UserContent::Text { text: String::from("look") },
+                UserContent::Image {
+                    data: String::from("aGVsbG8="),
+                    mime_type: String::from("image/png"),
+                },
+                UserContent::Image {
+                    data: String::from("aW1hZ2U="),
+                    mime_type: String::from("image/jpeg"),
+                },
+            ]
+    ));
+}
+
+#[tokio::test]
 async fn queue_helpers_do_not_touch_transcript_until_drained() {
     let agent = Agent::new(AgentState::new(model()));
 
@@ -759,17 +822,31 @@ async fn rejects_prompt_and_continue_while_active() {
     let running_prompt = tokio::spawn(async move { running_agent.prompt_text("first").await });
 
     sleep(Duration::from_millis(10)).await;
+    let prompt_error = agent.prompt_text("second").await.unwrap_err();
+    assert!(matches!(prompt_error, AgentError::AlreadyProcessingPrompt));
     assert_eq!(
-        agent.prompt_text("second").await.unwrap_err(),
-        AgentError::AlreadyProcessingPrompt
+        prompt_error.to_string(),
+        "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
     );
+
+    let continue_error = agent.r#continue().await.unwrap_err();
+    assert!(matches!(continue_error, AgentError::AlreadyProcessingContinue));
     assert_eq!(
-        agent.r#continue().await.unwrap_err(),
-        AgentError::AlreadyProcessingContinue
+        continue_error.to_string(),
+        "Agent is already processing. Wait for completion before continuing."
     );
 
     blocker.notify_waiters();
     assert!(running_prompt.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn continue_reports_empty_context_like_typescript() {
+    let agent = Agent::new(AgentState::new(model()));
+
+    let error = agent.r#continue().await.unwrap_err();
+    assert!(matches!(error, AgentError::NoMessagesToContinue));
+    assert_eq!(error.to_string(), "No messages to continue from");
 }
 
 #[tokio::test]
@@ -842,6 +919,97 @@ async fn wrapper_runs_tool_flow_and_tracks_pending_tool_calls() {
     assert!(is_standard_assistant_message(&state.messages[1]));
     assert!(is_standard_tool_result_message(&state.messages[2]));
     assert!(is_standard_assistant_message(&state.messages[3]));
+}
+
+#[tokio::test]
+async fn wrapper_preserves_pending_tool_call_iteration_order_like_typescript_set() {
+    let calls = Arc::new(Mutex::new(VecDeque::from([
+        AssistantMessage {
+            role: "assistant".into(),
+            content: vec![
+                AssistantContent::ToolCall {
+                    id: "tool-b".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::Map::from_iter([(
+                        String::from("value"),
+                        Value::String("first".into()),
+                    )])
+                    .into_iter()
+                    .collect(),
+                    thought_signature: None,
+                },
+                AssistantContent::ToolCall {
+                    id: "tool-a".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::Map::from_iter([(
+                        String::from("value"),
+                        Value::String("second".into()),
+                    )])
+                    .into_iter()
+                    .collect(),
+                    thought_signature: None,
+                },
+            ],
+            api: "faux:test".into(),
+            provider: "faux".into(),
+            model: "mock".into(),
+            response_id: None,
+            usage: usage(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 20,
+        },
+        assistant_message("done", StopReason::Stop, 30),
+    ])));
+
+    let streamer = Arc::new({
+        let calls = calls.clone();
+        move |_model: Model,
+              _context: Context,
+              _options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            let message = calls
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("expected scripted assistant message");
+            let reason = message.stop_reason.clone();
+            Ok(Box::pin(try_stream! {
+                yield AssistantEvent::Done { reason, message };
+            }))
+        }
+    });
+
+    let mut initial_state = AgentState::new(model());
+    initial_state.tools.push(echo_tool());
+    let agent = Agent::with_parts(initial_state, streamer, StreamOptions::default());
+
+    let pending_snapshots = Arc::new(Mutex::new(Vec::new()));
+    let pending_agent = agent.clone();
+    let pending_snapshots_listener = pending_snapshots.clone();
+    agent.subscribe(move |event, _signal| {
+        let pending_agent = pending_agent.clone();
+        let pending_snapshots_listener = pending_snapshots_listener.clone();
+        async move {
+            if matches!(event, AgentEvent::ToolExecutionStart { .. }) {
+                pending_snapshots_listener.lock().unwrap().push(
+                    pending_agent
+                        .state()
+                        .pending_tool_calls
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+    });
+
+    agent.prompt_text("run tool").await.unwrap();
+
+    assert_eq!(
+        pending_snapshots.lock().unwrap().clone(),
+        vec![vec![String::from("tool-b")], vec![String::from("tool-b"), String::from("tool-a")],]
+    );
 }
 
 #[tokio::test]

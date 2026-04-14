@@ -1,6 +1,6 @@
 use crate::{AgentEvent, AgentMessage, AgentTool};
+use indexmap::IndexSet;
 use pi_events::Model;
-use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThinkingLevel {
@@ -39,7 +39,7 @@ pub struct AgentState {
     pub messages: Vec<AgentMessage>,
     pub is_streaming: bool,
     pub streaming_message: Option<AgentMessage>,
-    pub pending_tool_calls: BTreeSet<String>,
+    pub pending_tool_calls: IndexSet<String>,
     pub error_message: Option<String>,
 }
 
@@ -53,7 +53,7 @@ impl AgentState {
             messages: Vec::new(),
             is_streaming: false,
             streaming_message: None,
-            pending_tool_calls: BTreeSet::new(),
+            pending_tool_calls: IndexSet::new(),
             error_message: None,
         }
     }
@@ -93,7 +93,7 @@ impl AgentState {
             }
             AgentEvent::ToolExecutionUpdate { .. } => {}
             AgentEvent::ToolExecutionEnd { tool_call_id, .. } => {
-                self.pending_tool_calls.remove(tool_call_id);
+                self.pending_tool_calls.shift_remove(tool_call_id);
             }
         }
     }

@@ -426,8 +426,19 @@ impl Agent {
     }
 
     pub async fn prompt_text(&self, text: impl Into<String>) -> Result<(), AgentError> {
+        self.prompt_text_with_images(text, Vec::new()).await
+    }
+
+    pub async fn prompt_text_with_images(
+        &self,
+        text: impl Into<String>,
+        images: Vec<UserContent>,
+    ) -> Result<(), AgentError> {
+        let mut content = Vec::with_capacity(images.len() + 1);
+        content.push(UserContent::Text { text: text.into() });
+        content.extend(images);
         self.prompt(Message::User {
-            content: vec![UserContent::Text { text: text.into() }],
+            content,
             timestamp: now_ms(),
         })
         .await
@@ -475,7 +486,7 @@ impl Agent {
                 }
                 RunRequest::Continue => {
                     let Some(last_message) = inner.state.messages.last() else {
-                        return Err(AgentError::EmptyContext);
+                        return Err(AgentError::NoMessagesToContinue);
                     };
 
                     if last_message.is_assistant() {

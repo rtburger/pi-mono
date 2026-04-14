@@ -139,6 +139,12 @@ The Rust workspace already has a non-empty `pi-agent` crate with the intended mo
   - an empty-string API key from `getApiKey` now falls back to `stream_options.api_key`
   - an empty blocked-tool reason now falls back to `"Tool execution was blocked"`
 - Regression tests now cover both cases in `pi-agent`.
+- High-level `Agent::prompt()` / `Agent::continue()` error strings now match the TS wrapper behavior:
+  - prompt while active uses the queueing guidance message
+  - empty `continue()` uses `No messages to continue from`
+  - low-level `agent_loop_continue()` keeps the TS low-level `Cannot continue: no messages in context` message
+- `pendingToolCalls` iteration now preserves insertion order via `IndexSet`, matching TS `Set` iteration order when listeners snapshot pending tool IDs.
+- `Agent::prompt_text_with_images()` now mirrors the TS string-plus-images prompt shape by preserving the text block first and then appending image content blocks in order.
 
 ## Recommended next step
 
