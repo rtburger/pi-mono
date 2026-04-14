@@ -175,6 +175,14 @@ Validation landed in:
 - `rust/crates/pi-ai/src/partial_json.rs`
 - `rust/crates/pi-ai/tests/openai_responses_stream.rs`
 
+OpenAI Responses request replay is now pinned at the HTTP boundary as well.
+Coverage now exists for:
+- skipping aborted reasoning-only assistant turns from the outgoing request body
+- same-provider different-model handoff with tool calls, including dropping `fc_` item IDs on replayed function calls
+- successful mocked round-trips while those request-shape guarantees hold
+
+Validation landed in:
+- `rust/crates/pi-ai/tests/openai_responses_reasoning_replay.rs`
+
 ## Suggested fixture candidates for the next slice
-- OpenAI Responses reasoning replay after an aborted turn
-- same-provider different-model handoff with tool calls
+- Begin `packages/agent` inventory and behavior validation against the now-pinned `pi-ai` request shapes.
