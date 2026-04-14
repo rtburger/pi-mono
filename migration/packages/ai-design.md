@@ -167,16 +167,14 @@ Partial JSON tool-call streaming is now also validated in Rust.
 Coverage now exists for:
 - partial string fragments inside tool call arguments
 - missing-value tails at the end of nested objects and arrays
+- partial literals (`true`, `false`, `null`)
+- numeric fragments, including exponent salvage (`1e`) and incomplete decimals (`1.`)
 - a provider-level OpenAI Responses stream regression that exercises the shared partial JSON parser
 
 Validation landed in:
 - `rust/crates/pi-ai/src/partial_json.rs`
 - `rust/crates/pi-ai/tests/openai_responses_stream.rs`
 
-Open question:
-- numeric fragments like `1e` and `1.` are not yet explicitly covered by tests and may need a later compatibility pass.
-
 ## Suggested fixture candidates for the next slice
 - OpenAI Responses reasoning replay after an aborted turn
 - same-provider different-model handoff with tool calls
-- numeric partial tool-argument fragments (`1e`, `1.`)

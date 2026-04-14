@@ -314,6 +314,129 @@ async fn streams_partial_tool_call_json_events() {
 }
 
 #[tokio::test]
+async fn streams_partial_numeric_tool_call_json_events() {
+    let events = vec![
+        OpenAiResponsesStreamEnvelope {
+            event_type: "response.output_item.added".into(),
+            data: serde_json::from_value(json!({
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_2",
+                    "call_id": "call_2",
+                    "name": "edit",
+                    "arguments": ""
+                }
+            }))
+            .unwrap(),
+        },
+        OpenAiResponsesStreamEnvelope {
+            event_type: "response.function_call_arguments.delta".into(),
+            data: serde_json::from_value(json!({
+                "delta": "{\"path\":1e"
+            }))
+            .unwrap(),
+        },
+        OpenAiResponsesStreamEnvelope {
+            event_type: "response.function_call_arguments.delta".into(),
+            data: serde_json::from_value(json!({
+                "delta": "2}"
+            }))
+            .unwrap(),
+        },
+        OpenAiResponsesStreamEnvelope {
+            event_type: "response.output_item.done".into(),
+            data: serde_json::from_value(json!({
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_2",
+                    "call_id": "call_2",
+                    "name": "edit",
+                    "arguments": "{\"path\":100}"
+                }
+            }))
+            .unwrap(),
+        },
+        OpenAiResponsesStreamEnvelope {
+            event_type: "response.completed".into(),
+            data: serde_json::from_value(json!({
+                "response": {
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 5,
+                        "output_tokens": 3,
+                        "total_tokens": 8,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }
+            }))
+            .unwrap(),
+        },
+    ];
+
+    let collected = stream_openai_responses_sse_events(model(), events)
+        .collect::<Vec<_>>()
+        .await;
+
+    let names = collected
+        .iter()
+        .map(|event| match event.as_ref().unwrap() {
+            AssistantEvent::Start { .. } => "start".to_string(),
+            AssistantEvent::ToolCallStart { .. } => "tool_call_start".to_string(),
+            AssistantEvent::ToolCallDelta { .. } => "tool_call_delta".to_string(),
+            AssistantEvent::ToolCallEnd { .. } => "tool_call_end".to_string(),
+            AssistantEvent::Done { .. } => "done".to_string(),
+            other => panic!("unexpected event: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        names,
+        vec![
+            "start",
+            "tool_call_start",
+            "tool_call_delta",
+            "tool_call_delta",
+            "tool_call_end",
+            "done"
+        ]
+    );
+
+    let tool_call_deltas = collected
+        .iter()
+        .filter_map(|event| match event.as_ref().unwrap() {
+            AssistantEvent::ToolCallDelta { partial, .. } => Some(partial.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(tool_call_deltas.len(), 2);
+
+    match &tool_call_deltas[0].content[0] {
+        AssistantContent::ToolCall { arguments, .. } => {
+            assert_eq!(arguments, &BTreeMap::from([("path".into(), json!(1))]));
+        }
+        other => panic!("expected partial tool call after first delta, got {other:?}"),
+    }
+
+    match &tool_call_deltas[1].content[0] {
+        AssistantContent::ToolCall { arguments, .. } => {
+            assert_eq!(arguments, &BTreeMap::from([("path".into(), json!(100))]));
+        }
+        other => panic!("expected partial tool call after second delta, got {other:?}"),
+    }
+
+    match collected.last().unwrap().as_ref().unwrap() {
+        AssistantEvent::Done { message, .. } => match &message.content[0] {
+            AssistantContent::ToolCall { arguments, .. } => {
+                assert_eq!(arguments, &BTreeMap::from([("path".into(), json!(100))]));
+            }
+            other => panic!("expected completed tool call, got {other:?}"),
+        },
+        other => panic!("expected done event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn streams_reasoning_summary_response_events() {
     let events = vec![
         OpenAiResponsesStreamEnvelope {
