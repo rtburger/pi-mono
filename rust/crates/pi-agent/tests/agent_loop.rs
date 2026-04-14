@@ -411,6 +411,20 @@ async fn continue_loop_validates_context_and_skips_existing_user_events() {
 }
 
 #[tokio::test]
+async fn continue_loop_rejects_custom_assistant_tail_like_typescript() {
+    let mut context = AgentContext::new("Test");
+    context.messages.push(
+        CustomAgentMessage::new("assistant", json!({ "note": "custom assistant" }), 1).into(),
+    );
+
+    let error = match agent_loop_continue(context, AgentLoopConfig::new(model())) {
+        Ok(_) => panic!("expected assistant-tail error"),
+        Err(error) => error,
+    };
+    assert_eq!(error.to_string(), "Cannot continue from message role: assistant");
+}
+
+#[tokio::test]
 async fn agent_state_reduces_loop_events() {
     let final_assistant = assistant_message("Hello", StopReason::Stop, 21);
     let streamer = Arc::new(ScriptedStreamer::new(vec![vec![
@@ -924,6 +938,7 @@ async fn validation_failures_become_error_tool_results() {
         .expect("expected tool execution end event");
 
     assert!(tool_end.1);
+    assert_eq!(tool_end.0.details, json!({}));
     let error_text = tool_end
         .0
         .content

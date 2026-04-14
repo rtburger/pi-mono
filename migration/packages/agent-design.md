@@ -145,6 +145,8 @@ The Rust workspace already has a non-empty `pi-agent` crate with the intended mo
   - low-level `agent_loop_continue()` keeps the TS low-level `Cannot continue: no messages in context` message
 - `pendingToolCalls` iteration now preserves insertion order via `IndexSet`, matching TS `Set` iteration order when listeners snapshot pending tool IDs.
 - `Agent::prompt_text_with_images()` now mirrors the TS string-plus-images prompt shape by preserving the text block first and then appending image content blocks in order.
+- `AgentMessage::is_assistant()` now follows the message role string, so custom messages with role `assistant` are treated the same way as standard assistant messages during continue validation.
+- Error tool results now use empty-object details (`{}`) instead of null, matching the TS blocked/validation-failure tool result shape.
 
 ## Recommended next step
 
@@ -153,3 +155,4 @@ Validate the existing Rust `pi-agent` crate against the TS edge cases that are e
 - `continue()` from assistant tails with queued messages
 - async listener barrier timing
 - parallel tool ordering
+- decide whether transcript tool-result details should be preserved across the shared message schema before expanding this slice

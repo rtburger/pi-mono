@@ -850,6 +850,21 @@ async fn continue_reports_empty_context_like_typescript() {
 }
 
 #[tokio::test]
+async fn continue_rejects_custom_assistant_tail_like_typescript() {
+    let agent = Agent::new(AgentState::new(model()));
+    agent.update_state(|state| {
+        state.messages.push(
+            CustomAgentMessage::new("assistant", json!({ "note": "custom assistant" }), 10)
+                .into(),
+        );
+    });
+
+    let error = agent.r#continue().await.unwrap_err();
+    assert!(matches!(error, AgentError::CannotContinueFromAssistant));
+    assert_eq!(error.to_string(), "Cannot continue from message role: assistant");
+}
+
+#[tokio::test]
 async fn wrapper_runs_tool_flow_and_tracks_pending_tool_calls() {
     let calls = Arc::new(Mutex::new(VecDeque::from([
         assistant_tool_call_message(

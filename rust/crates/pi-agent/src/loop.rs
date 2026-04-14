@@ -1205,7 +1205,7 @@ fn tool_error_message(error: &AgentToolError) -> String {
 fn error_tool_result(message: String) -> AgentToolResult {
     AgentToolResult {
         content: vec![UserContent::Text { text: message }],
-        details: Value::Null,
+        details: Value::Object(JsonMap::new()),
     }
 }
 

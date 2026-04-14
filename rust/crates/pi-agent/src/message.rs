@@ -48,7 +48,7 @@ impl AgentMessage {
     }
 
     pub fn is_assistant(&self) -> bool {
-        matches!(self, Self::Standard(Message::Assistant { .. }))
+        self.role() == "assistant"
     }
 
     pub fn as_standard_message(&self) -> Option<&Message> {
