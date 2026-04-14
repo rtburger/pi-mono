@@ -190,5 +190,13 @@ Coverage now exists for:
 Validation landed in:
 - `rust/crates/pi-ai/tests/openai_responses_reasoning_replay.rs`
 
+Faux-provider total token accounting is now also pinned in Rust.
+Coverage now exists for:
+- `total_tokens = input + output + cache_read + cache_write` on uncached responses
+- the same equality on cached second turns, with cache_read remaining non-zero
+
+Validation landed in:
+- `rust/crates/pi-ai/tests/faux_provider.rs`
+
 ## Suggested fixture candidates for the next slice
 - Begin `packages/agent` inventory and behavior validation against the now-pinned `pi-ai` request shapes.

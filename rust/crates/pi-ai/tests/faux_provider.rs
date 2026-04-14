@@ -3,7 +3,7 @@ use pi_ai::{
     CacheRetention, FauxContentBlock, FauxResponse, RegisterFauxProviderOptions, StreamOptions,
     complete, register_faux_provider, stream_response,
 };
-use pi_events::{AssistantContent, AssistantEvent, Context, Message, StopReason, UserContent};
+use pi_events::{AssistantContent, AssistantEvent, Context, Message, StopReason, Usage, UserContent};
 use serde_json::json;
 use std::{collections::BTreeMap, fs, path::PathBuf};
 use tokio::sync::watch;
@@ -18,6 +18,13 @@ fn user_context(text: &str) -> Context {
         }],
         tools: vec![],
     }
+}
+
+fn assert_usage_total_tokens_match_components(usage: &Usage) {
+    assert_eq!(
+        usage.total_tokens,
+        usage.input + usage.output + usage.cache_read + usage.cache_write
+    );
 }
 
 #[tokio::test]
@@ -42,10 +49,7 @@ async fn completes_with_estimated_usage() {
     );
     assert!(response.usage.input > 0);
     assert!(response.usage.output > 0);
-    assert_eq!(
-        response.usage.total_tokens,
-        response.usage.input + response.usage.output
-    );
+    assert_usage_total_tokens_match_components(&response.usage);
     assert_eq!(registration.call_count(), 1);
 
     registration.unregister();
@@ -203,6 +207,9 @@ async fn simulates_prompt_caching_per_session() {
     .await
     .unwrap();
 
+    assert_usage_total_tokens_match_components(&first.usage);
+    assert!(first.usage.cache_read == 0);
+    assert_usage_total_tokens_match_components(&second.usage);
     assert!(second.usage.cache_read > 0);
     registration.unregister();
 }
