@@ -200,12 +200,13 @@ The TypeScript `packages/coding-agent` split already exists in Rust:
 
 `cargo test --workspace` is green.
 
-Recent `pi-ai` fixture coverage added on top of the existing suite:
+Recent `pi-ai` validation added on top of the existing suite:
 
 - `rust/crates/pi-ai/tests/openai_codex_fixture_compat.rs`
 - `rust/crates/pi-ai/tests/fixtures/openai_codex_sse_completed_terminal.sse`
+- `rust/crates/pi-ai/tests/cross_provider_handoff.rs` validating Anthropic -> OpenAI Codex and OpenAI Responses -> Anthropic request-shape replay
 
-Those lock in the TypeScript Codex behavior that the Rust stream must terminate on `response.completed` even if `[DONE]` is delayed.
+Those lock in the TypeScript Codex behavior that the Rust stream must terminate on `response.completed` even if `[DONE]` is delayed, and the cross-provider request-shape replay used by the handoff regression.
 
 ## Immediate compatibility observations
 

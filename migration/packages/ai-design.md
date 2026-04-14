@@ -159,6 +159,9 @@ Coverage now exists for:
 Validation landed in:
 - `rust/crates/pi-ai/tests/anthropic_messages_params.rs`
 - `rust/crates/pi-ai/tests/anthropic_messages_stream.rs`
+- `rust/crates/pi-ai/tests/cross_provider_handoff.rs`
+
+This keeps the Anthropic-to-OpenAI Codex replay path frozen at the request-shape level: Anthropic thinking is downgraded to plain text, tool results remain paired, and no OpenAI reasoning replay items are emitted across the provider boundary. The same regression file also covers the reverse OpenAI Responses-to-Anthropic request shape.
 
 ## Suggested fixture candidates for the next slice
 - OpenAI Codex SSE stream that must terminate on `response.completed` even if body stays open
