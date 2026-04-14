@@ -250,6 +250,7 @@ fn map_stream_options_to_simple_options(
         headers: options.headers,
         metadata: options.metadata,
         on_payload: options.on_payload,
+        max_retry_delay_ms: options.max_retry_delay_ms,
         temperature: options.temperature,
         max_tokens: options.max_tokens,
         reasoning,

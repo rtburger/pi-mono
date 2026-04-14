@@ -13,11 +13,11 @@ pub use error::AgentError;
 pub use r#loop::{
     AfterToolCallContext, AfterToolCallHook, AfterToolCallResult, AgentEvent, AgentEventStream,
     AgentLoopConfig, AssistantStreamer, BeforeToolCallContext, BeforeToolCallHook,
-    BeforeToolCallResult, ConvertToLlmHook, DefaultAssistantStreamer, SharedToolArgs,
-    ToolExecutionMode, TransformContextHook, agent_loop, agent_loop_continue,
+    BeforeToolCallResult, ConvertToLlmHook, DefaultAssistantStreamer, GetApiKeyHook,
+    SharedToolArgs, ToolExecutionMode, TransformContextHook, agent_loop, agent_loop_continue,
 };
 pub use message::{AgentMessage, CustomAgentMessage};
-pub use pi_ai::ThinkingBudgets;
+pub use pi_ai::{PayloadHook, ThinkingBudgets, Transport};
 pub use proxy::{ProxyStreamConfig, ProxyStreamer, stream_proxy};
 pub use state::{AgentContext, AgentState, ThinkingLevel};
 pub use tool::{AgentTool, AgentToolError, AgentToolResult, AgentToolUpdateCallback};

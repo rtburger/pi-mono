@@ -2,11 +2,11 @@ use crate::{
     AfterToolCallContext, AfterToolCallHook, AfterToolCallResult, AgentContext, AgentError,
     AgentEvent, AgentEventStream, AgentLoopConfig, AgentMessage, AgentState, AssistantStreamer,
     BeforeToolCallContext, BeforeToolCallHook, BeforeToolCallResult, ConvertToLlmHook,
-    DefaultAssistantStreamer, ToolExecutionMode, TransformContextHook, agent_loop,
+    DefaultAssistantStreamer, GetApiKeyHook, ToolExecutionMode, TransformContextHook, agent_loop,
     agent_loop_continue,
 };
 use futures::StreamExt;
-use pi_ai::{AiError, StreamOptions, ThinkingBudgets};
+use pi_ai::{AiError, PayloadHook, StreamOptions, ThinkingBudgets, Transport};
 use pi_events::{AssistantContent, Message, Model, StopReason, Usage, UserContent};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -81,6 +81,7 @@ struct PreparedRun {
     thinking_budgets: ThinkingBudgets,
     tool_execution: ToolExecutionMode,
     convert_to_llm: Option<ConvertToLlmHook>,
+    get_api_key: Option<GetApiKeyHook>,
     transform_context: Option<TransformContextHook>,
     before_tool_call: Option<BeforeToolCallHook>,
     after_tool_call: Option<AfterToolCallHook>,
@@ -99,6 +100,7 @@ struct AgentInner {
     thinking_budgets: ThinkingBudgets,
     listeners: BTreeMap<usize, Listener>,
     convert_to_llm: Option<ConvertToLlmHook>,
+    get_api_key: Option<GetApiKeyHook>,
     transform_context: Option<TransformContextHook>,
     before_tool_call: Option<BeforeToolCallHook>,
     after_tool_call: Option<AfterToolCallHook>,
@@ -135,9 +137,13 @@ impl Agent {
     fn with_parts_internal(
         initial_state: AgentState,
         streamer: Arc<dyn AssistantStreamer>,
-        stream_options: StreamOptions,
+        mut stream_options: StreamOptions,
         uses_default_streamer: bool,
     ) -> Self {
+        if stream_options.transport.is_none() {
+            stream_options.transport = Some(Transport::Sse);
+        }
+
         Self {
             inner: Arc::new(Mutex::new(AgentInner {
                 state: initial_state,
@@ -147,6 +153,7 @@ impl Agent {
                 thinking_budgets: ThinkingBudgets::default(),
                 listeners: BTreeMap::new(),
                 convert_to_llm: None,
+                get_api_key: None,
                 transform_context: None,
                 before_tool_call: None,
                 after_tool_call: None,
@@ -194,6 +201,33 @@ impl Agent {
 
     pub fn clear_convert_to_llm(&self) {
         self.inner.lock().unwrap().convert_to_llm = None;
+    }
+
+    pub fn set_get_api_key<F, Fut>(&self, hook: F)
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<String>> + Send + 'static,
+    {
+        let hook: GetApiKeyHook = Arc::new(move |provider| Box::pin(hook(provider)));
+        self.inner.lock().unwrap().get_api_key = Some(hook);
+    }
+
+    pub fn clear_get_api_key(&self) {
+        self.inner.lock().unwrap().get_api_key = None;
+    }
+
+    pub fn set_streamer(&self, streamer: Arc<dyn AssistantStreamer>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.streamer = streamer;
+        inner.uses_default_streamer = false;
+    }
+
+    pub fn clear_streamer(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.streamer = Arc::new(DefaultAssistantStreamer::new(
+            inner.thinking_budgets.clone(),
+        ));
+        inner.uses_default_streamer = true;
     }
 
     pub fn set_transform_context<F, Fut>(&self, hook: F)
@@ -309,6 +343,38 @@ impl Agent {
     pub fn has_queued_messages(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.steering_queue.has_items() || inner.follow_up_queue.has_items()
+    }
+
+    pub fn session_id(&self) -> Option<String> {
+        self.inner.lock().unwrap().stream_options.session_id.clone()
+    }
+
+    pub fn set_session_id(&self, session_id: Option<String>) {
+        self.inner.lock().unwrap().stream_options.session_id = session_id;
+    }
+
+    pub fn transport(&self) -> Option<Transport> {
+        self.inner.lock().unwrap().stream_options.transport
+    }
+
+    pub fn set_transport(&self, transport: Option<Transport>) {
+        self.inner.lock().unwrap().stream_options.transport = transport;
+    }
+
+    pub fn on_payload(&self) -> Option<PayloadHook> {
+        self.inner.lock().unwrap().stream_options.on_payload.clone()
+    }
+
+    pub fn set_on_payload(&self, on_payload: Option<PayloadHook>) {
+        self.inner.lock().unwrap().stream_options.on_payload = on_payload;
+    }
+
+    pub fn max_retry_delay_ms(&self) -> Option<u64> {
+        self.inner.lock().unwrap().stream_options.max_retry_delay_ms
+    }
+
+    pub fn set_max_retry_delay_ms(&self, max_retry_delay_ms: Option<u64>) {
+        self.inner.lock().unwrap().stream_options.max_retry_delay_ms = max_retry_delay_ms;
     }
 
     pub fn signal(&self) -> Option<watch::Receiver<bool>> {
@@ -450,6 +516,7 @@ impl Agent {
                 thinking_budgets: inner.thinking_budgets.clone(),
                 tool_execution: inner.tool_execution,
                 convert_to_llm: inner.convert_to_llm.clone(),
+                get_api_key: inner.get_api_key.clone(),
                 transform_context: inner.transform_context.clone(),
                 before_tool_call: inner.before_tool_call.clone(),
                 after_tool_call: inner.after_tool_call.clone(),
@@ -467,6 +534,9 @@ impl Agent {
         );
         if let Some(convert_to_llm) = prepared.convert_to_llm {
             config = config.with_convert_to_llm_hook(convert_to_llm);
+        }
+        if let Some(get_api_key) = prepared.get_api_key {
+            config = config.with_get_api_key_hook(get_api_key);
         }
         if let Some(transform_context) = prepared.transform_context {
             config = config.with_transform_context_hook(transform_context);
@@ -700,10 +770,13 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use async_stream::try_stream;
-    use pi_ai::AssistantEventStream;
+    use pi_ai::{
+        AssistantEventStream, FauxResponse, RegisterFauxProviderOptions, register_faux_provider,
+    };
     use pi_events::{
         AssistantContent, AssistantEvent, Message, Model, StopReason, Usage, UserContent,
     };
+    use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::Notify;
 
@@ -745,6 +818,435 @@ mod tests {
             }],
             timestamp,
         }
+    }
+
+    #[tokio::test]
+    async fn streamer_can_be_swapped_between_turns_and_cleared_back_to_default() {
+        let registration = register_faux_provider(RegisterFauxProviderOptions::default());
+        registration.set_responses(vec![FauxResponse::text("from default")]);
+        let model = registration.get_model(None).expect("faux model");
+
+        let custom_1_calls = Arc::new(AtomicUsize::new(0));
+        let custom_streamer_1 = Arc::new({
+            let custom_1_calls = custom_1_calls.clone();
+            move |model: Model,
+                  _context: pi_events::Context,
+                  _options: StreamOptions|
+                  -> Result<AssistantEventStream, AiError> {
+                custom_1_calls.fetch_add(1, Ordering::Relaxed);
+
+                let mut message = pi_events::AssistantMessage::empty(
+                    model.api.clone(),
+                    model.provider.clone(),
+                    model.id.clone(),
+                );
+                message.content = vec![AssistantContent::Text {
+                    text: "from custom 1".into(),
+                    text_signature: None,
+                }];
+                message.stop_reason = StopReason::Stop;
+                message.timestamp = 20;
+
+                Ok(Box::pin(try_stream! {
+                    yield AssistantEvent::Done {
+                        reason: StopReason::Stop,
+                        message,
+                    };
+                }))
+            }
+        });
+
+        let custom_2_calls = Arc::new(AtomicUsize::new(0));
+        let custom_streamer_2 = Arc::new({
+            let custom_2_calls = custom_2_calls.clone();
+            move |model: Model,
+                  _context: pi_events::Context,
+                  _options: StreamOptions|
+                  -> Result<AssistantEventStream, AiError> {
+                custom_2_calls.fetch_add(1, Ordering::Relaxed);
+
+                let mut message = pi_events::AssistantMessage::empty(
+                    model.api.clone(),
+                    model.provider.clone(),
+                    model.id.clone(),
+                );
+                message.content = vec![AssistantContent::Text {
+                    text: "from custom 2".into(),
+                    text_signature: None,
+                }];
+                message.stop_reason = StopReason::Stop;
+                message.timestamp = 21;
+
+                Ok(Box::pin(try_stream! {
+                    yield AssistantEvent::Done {
+                        reason: StopReason::Stop,
+                        message,
+                    };
+                }))
+            }
+        });
+
+        let agent = Agent::new(AgentState::new(model));
+        agent.set_streamer(custom_streamer_1);
+        agent.prompt_text("hello").await.unwrap();
+        assert_eq!(custom_1_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(registration.call_count(), 0);
+        assert!(matches!(
+            agent.state().messages.last().and_then(AgentMessage::as_standard_message),
+            Some(Message::Assistant { content, .. })
+                if matches!(content.as_slice(), [AssistantContent::Text { text, .. }] if text == "from custom 1")
+        ));
+
+        agent.set_streamer(custom_streamer_2);
+        agent.prompt_text("hello again").await.unwrap();
+        assert_eq!(custom_2_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(registration.call_count(), 0);
+        assert!(matches!(
+            agent.state().messages.last().and_then(AgentMessage::as_standard_message),
+            Some(Message::Assistant { content, .. })
+                if matches!(content.as_slice(), [AssistantContent::Text { text, .. }] if text == "from custom 2")
+        ));
+
+        agent.clear_streamer();
+        agent.prompt_text("hello from default").await.unwrap();
+        assert_eq!(registration.call_count(), 1);
+        assert!(matches!(
+            agent.state().messages.last().and_then(AgentMessage::as_standard_message),
+            Some(Message::Assistant { content, .. })
+                if matches!(content.as_slice(), [AssistantContent::Text { text, .. }] if text == "from default")
+        ));
+
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn transport_defaults_to_sse_round_trips_and_is_forwarded_to_streamer() {
+        let received_transports = Arc::new(Mutex::new(Vec::new()));
+        let streamer = Arc::new({
+            let received_transports = received_transports.clone();
+            move |_model: Model,
+                  _context: pi_events::Context,
+                  options: StreamOptions|
+                  -> Result<AssistantEventStream, AiError> {
+                received_transports.lock().unwrap().push(options.transport);
+
+                let mut message = pi_events::AssistantMessage::empty("faux:test", "faux", "mock");
+                message.content = vec![AssistantContent::Text {
+                    text: "ok".into(),
+                    text_signature: None,
+                }];
+                message.stop_reason = StopReason::Stop;
+                message.timestamp = 20;
+
+                Ok(Box::pin(try_stream! {
+                    yield AssistantEvent::Done {
+                        reason: StopReason::Stop,
+                        message,
+                    };
+                }))
+            }
+        });
+
+        let agent = Agent::with_parts(AgentState::new(model()), streamer, StreamOptions::default());
+        assert_eq!(agent.transport(), Some(Transport::Sse));
+
+        agent.prompt_text("hello").await.unwrap();
+
+        agent.set_transport(Some(Transport::WebSocket));
+        assert_eq!(agent.transport(), Some(Transport::WebSocket));
+
+        agent.prompt_text("hello over websocket").await.unwrap();
+
+        agent.set_transport(None);
+        assert_eq!(agent.transport(), None);
+
+        agent
+            .prompt_text("hello without transport override")
+            .await
+            .unwrap();
+
+        let received = received_transports.lock().unwrap().clone();
+        assert_eq!(
+            received,
+            vec![Some(Transport::Sse), Some(Transport::WebSocket), None,]
+        );
+    }
+
+    #[tokio::test]
+    async fn on_payload_round_trips_and_is_forwarded_to_streamer() {
+        let observed_payloads = Arc::new(Mutex::new(Vec::new()));
+        let streamer = Arc::new({
+            let observed_payloads = observed_payloads.clone();
+            move |model: Model,
+                  _context: pi_events::Context,
+                  options: StreamOptions|
+                  -> Result<AssistantEventStream, AiError> {
+                let observed_payloads = observed_payloads.clone();
+                Ok(Box::pin(try_stream! {
+                    let payload = options
+                        .on_payload
+                        .expect("agent should forward on_payload hook")
+                        .call(json!({ "source": "streamer" }), model.clone())
+                        .await
+                        .map_err(AiError::Message)?;
+                    observed_payloads.lock().unwrap().push(payload);
+
+                    let mut message = pi_events::AssistantMessage::empty("faux:test", "faux", "mock");
+                    message.content = vec![AssistantContent::Text {
+                        text: "ok".into(),
+                        text_signature: None,
+                    }];
+                    message.stop_reason = StopReason::Stop;
+                    message.timestamp = 20;
+
+                    yield AssistantEvent::Done {
+                        reason: StopReason::Stop,
+                        message,
+                    };
+                }))
+            }
+        });
+
+        let agent = Agent::with_parts(AgentState::new(model()), streamer, StreamOptions::default());
+        assert!(agent.on_payload().is_none());
+
+        agent.set_on_payload(Some(PayloadHook::new(|payload, model| async move {
+            Ok(Some(json!({
+                "payload": payload,
+                "model": model.id,
+            })))
+        })));
+        assert!(agent.on_payload().is_some());
+
+        agent.prompt_text("hello").await.unwrap();
+
+        agent.set_on_payload(Some(PayloadHook::new(|payload, model| async move {
+            Ok(Some(json!({
+                "kind": "updated",
+                "payload": payload,
+                "provider": model.provider,
+            })))
+        })));
+        assert!(agent.on_payload().is_some());
+
+        agent.prompt_text("hello again").await.unwrap();
+
+        agent.set_on_payload(None);
+        assert!(agent.on_payload().is_none());
+
+        let observed = observed_payloads.lock().unwrap().clone();
+        assert_eq!(
+            observed,
+            vec![
+                Some(json!({
+                    "payload": { "source": "streamer" },
+                    "model": "mock",
+                })),
+                Some(json!({
+                    "kind": "updated",
+                    "payload": { "source": "streamer" },
+                    "provider": "faux",
+                })),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_api_key_resolves_per_turn_and_falls_back_to_stream_options_api_key() {
+        let received_api_keys = Arc::new(Mutex::new(Vec::new()));
+        let requested_providers = Arc::new(Mutex::new(Vec::new()));
+        let streamer = Arc::new({
+            let received_api_keys = received_api_keys.clone();
+            move |_model: Model,
+                  _context: pi_events::Context,
+                  options: StreamOptions|
+                  -> Result<AssistantEventStream, AiError> {
+                received_api_keys
+                    .lock()
+                    .unwrap()
+                    .push(options.api_key.clone());
+
+                let mut message = pi_events::AssistantMessage::empty("faux:test", "faux", "mock");
+                message.content = vec![AssistantContent::Text {
+                    text: "ok".into(),
+                    text_signature: None,
+                }];
+                message.stop_reason = StopReason::Stop;
+                message.timestamp = 20;
+
+                Ok(Box::pin(try_stream! {
+                    yield AssistantEvent::Done {
+                        reason: StopReason::Stop,
+                        message,
+                    };
+                }))
+            }
+        });
+
+        let mut stream_options = StreamOptions::default();
+        stream_options.api_key = Some("fallback-key".into());
+
+        let agent = Agent::with_parts(AgentState::new(model()), streamer, stream_options);
+        let next_api_key = Arc::new(AtomicUsize::new(1));
+        agent.set_get_api_key({
+            let requested_providers = requested_providers.clone();
+            let next_api_key = next_api_key.clone();
+            move |provider| {
+                requested_providers.lock().unwrap().push(provider);
+                let suffix = next_api_key.fetch_add(1, Ordering::Relaxed);
+                async move { Some(format!("resolved-{suffix}")) }
+            }
+        });
+
+        agent.prompt_text("hello").await.unwrap();
+        agent.prompt_text("hello again").await.unwrap();
+
+        agent.set_get_api_key(|_provider| async move { None });
+        agent.prompt_text("hello with fallback").await.unwrap();
+
+        agent.clear_get_api_key();
+        agent
+            .prompt_text("hello after clearing hook")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            requested_providers.lock().unwrap().clone(),
+            vec!["faux".to_string(), "faux".to_string()]
+        );
+        assert_eq!(
+            received_api_keys.lock().unwrap().clone(),
+            vec![
+                Some("resolved-1".to_string()),
+                Some("resolved-2".to_string()),
+                Some("fallback-key".to_string()),
+                Some("fallback-key".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn max_retry_delay_ms_round_trips_and_is_forwarded_to_streamer() {
+        let received_max_retry_delays = Arc::new(Mutex::new(Vec::new()));
+        let streamer = Arc::new({
+            let received_max_retry_delays = received_max_retry_delays.clone();
+            move |_model: Model,
+                  _context: pi_events::Context,
+                  options: StreamOptions|
+                  -> Result<AssistantEventStream, AiError> {
+                received_max_retry_delays
+                    .lock()
+                    .unwrap()
+                    .push(options.max_retry_delay_ms);
+
+                let mut message = pi_events::AssistantMessage::empty("faux:test", "faux", "mock");
+                message.content = vec![AssistantContent::Text {
+                    text: "ok".into(),
+                    text_signature: None,
+                }];
+                message.stop_reason = StopReason::Stop;
+                message.timestamp = 20;
+
+                Ok(Box::pin(try_stream! {
+                    yield AssistantEvent::Done {
+                        reason: StopReason::Stop,
+                        message,
+                    };
+                }))
+            }
+        });
+
+        let agent = Agent::with_parts(AgentState::new(model()), streamer, StreamOptions::default());
+        assert_eq!(agent.max_retry_delay_ms(), None);
+
+        agent.prompt_text("hello").await.unwrap();
+
+        agent.set_max_retry_delay_ms(Some(1_200));
+        assert_eq!(agent.max_retry_delay_ms(), Some(1_200));
+
+        agent
+            .prompt_text("hello with max retry delay")
+            .await
+            .unwrap();
+
+        agent.set_max_retry_delay_ms(Some(2_400));
+        assert_eq!(agent.max_retry_delay_ms(), Some(2_400));
+
+        agent
+            .prompt_text("hello with updated max retry delay")
+            .await
+            .unwrap();
+
+        agent.set_max_retry_delay_ms(None);
+        assert_eq!(agent.max_retry_delay_ms(), None);
+
+        agent
+            .prompt_text("hello without max retry delay")
+            .await
+            .unwrap();
+
+        let received = received_max_retry_delays.lock().unwrap().clone();
+        assert_eq!(received, vec![None, Some(1_200), Some(2_400), None]);
+    }
+
+    #[tokio::test]
+    async fn session_id_round_trips_and_is_forwarded_to_streamer() {
+        let received_session_ids = Arc::new(Mutex::new(Vec::new()));
+        let streamer = Arc::new({
+            let received_session_ids = received_session_ids.clone();
+            move |_model: Model,
+                  _context: pi_events::Context,
+                  options: StreamOptions|
+                  -> Result<AssistantEventStream, AiError> {
+                received_session_ids
+                    .lock()
+                    .unwrap()
+                    .push(options.session_id.clone());
+
+                let mut message = pi_events::AssistantMessage::empty("faux:test", "faux", "mock");
+                message.content = vec![AssistantContent::Text {
+                    text: "ok".into(),
+                    text_signature: None,
+                }];
+                message.stop_reason = StopReason::Stop;
+                message.timestamp = 20;
+
+                Ok(Box::pin(try_stream! {
+                    yield AssistantEvent::Done {
+                        reason: StopReason::Stop,
+                        message,
+                    };
+                }))
+            }
+        });
+
+        let mut stream_options = StreamOptions::default();
+        stream_options.session_id = Some("session-abc".into());
+
+        let agent = Agent::with_parts(AgentState::new(model()), streamer, stream_options);
+        assert_eq!(agent.session_id().as_deref(), Some("session-abc"));
+
+        agent.prompt_text("hello").await.unwrap();
+
+        agent.set_session_id(Some("session-def".into()));
+        assert_eq!(agent.session_id().as_deref(), Some("session-def"));
+
+        agent.prompt_text("hello again").await.unwrap();
+
+        agent.set_session_id(None);
+        assert_eq!(agent.session_id(), None);
+
+        agent.prompt_text("hello without session").await.unwrap();
+
+        let received = received_session_ids.lock().unwrap().clone();
+        assert_eq!(
+            received,
+            vec![
+                Some("session-abc".to_string()),
+                Some("session-def".to_string()),
+                None,
+            ]
+        );
     }
 
     #[tokio::test]

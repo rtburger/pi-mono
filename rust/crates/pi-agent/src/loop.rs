@@ -28,6 +28,7 @@ pub type AfterToolCallFuture =
     Pin<Box<dyn Future<Output = Option<AfterToolCallResult>> + Send + 'static>>;
 pub type TransformContextFuture = Pin<Box<dyn Future<Output = Vec<AgentMessage>> + Send + 'static>>;
 pub type ConvertToLlmFuture = Pin<Box<dyn Future<Output = Vec<Message>> + Send + 'static>>;
+pub type GetApiKeyFuture = Pin<Box<dyn Future<Output = Option<String>> + Send + 'static>>;
 type MessageQueueFuture = Pin<Box<dyn Future<Output = Vec<AgentMessage>> + Send + 'static>>;
 type MessageQueueHook = Arc<dyn Fn() -> MessageQueueFuture + Send + Sync>;
 pub type TransformContextHook = Arc<
@@ -36,6 +37,7 @@ pub type TransformContextHook = Arc<
         + Sync,
 >;
 pub type ConvertToLlmHook = Arc<dyn Fn(Vec<AgentMessage>) -> ConvertToLlmFuture + Send + Sync>;
+pub type GetApiKeyHook = Arc<dyn Fn(String) -> GetApiKeyFuture + Send + Sync>;
 pub type BeforeToolCallHook = Arc<
     dyn Fn(BeforeToolCallContext, Option<watch::Receiver<bool>>) -> BeforeToolCallFuture
         + Send
@@ -203,6 +205,7 @@ fn map_stream_options_to_simple_options(
         headers: options.headers,
         metadata: options.metadata,
         on_payload: options.on_payload,
+        max_retry_delay_ms: options.max_retry_delay_ms,
         temperature: options.temperature,
         max_tokens: options.max_tokens,
         reasoning,
@@ -231,6 +234,7 @@ pub struct AgentLoopConfig {
     thinking_budgets: ThinkingBudgets,
     uses_default_streamer: bool,
     convert_to_llm: Option<ConvertToLlmHook>,
+    get_api_key: Option<GetApiKeyHook>,
     transform_context: Option<TransformContextHook>,
     before_tool_call: Option<BeforeToolCallHook>,
     after_tool_call: Option<AfterToolCallHook>,
@@ -249,6 +253,7 @@ impl AgentLoopConfig {
             thinking_budgets,
             uses_default_streamer: true,
             convert_to_llm: None,
+            get_api_key: None,
             transform_context: None,
             before_tool_call: None,
             after_tool_call: None,
@@ -286,6 +291,11 @@ impl AgentLoopConfig {
         self
     }
 
+    pub fn with_get_api_key_hook(mut self, hook: GetApiKeyHook) -> Self {
+        self.get_api_key = Some(hook);
+        self
+    }
+
     pub fn with_before_tool_call_hook(mut self, hook: BeforeToolCallHook) -> Self {
         self.before_tool_call = Some(hook);
         self
@@ -318,6 +328,15 @@ impl AgentLoopConfig {
         self.transform_context = Some(Arc::new(move |messages, signal| {
             Box::pin(hook(messages, signal))
         }));
+        self
+    }
+
+    pub fn with_get_api_key<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<String>> + Send + 'static,
+    {
+        self.get_api_key = Some(Arc::new(move |provider| Box::pin(hook(provider))));
         self
     }
 
@@ -448,10 +467,18 @@ fn run_loop(
                     tools: tool_definitions.clone(),
                 };
 
+                let mut request_stream_options = config.stream_options.clone();
+                request_stream_options.api_key = resolve_api_key(
+                    &config.get_api_key,
+                    &config.model.provider,
+                    request_stream_options.api_key,
+                )
+                .await;
+
                 let mut assistant_stream = config.streamer.stream(
                     config.model.clone(),
                     llm_context,
-                    config.stream_options.clone(),
+                    request_stream_options,
                 )?;
 
                 let mut inserted_partial = false;
@@ -803,6 +830,17 @@ async fn convert_to_llm(
     match hook {
         Some(hook) => hook(messages).await,
         None => default_convert_to_llm(messages),
+    }
+}
+
+async fn resolve_api_key(
+    hook: &Option<GetApiKeyHook>,
+    provider: &str,
+    fallback_api_key: Option<String>,
+) -> Option<String> {
+    match hook {
+        Some(hook) => hook(provider.to_string()).await.or(fallback_api_key),
+        None => fallback_api_key,
     }
 }
 
