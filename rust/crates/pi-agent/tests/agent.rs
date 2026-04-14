@@ -1026,6 +1026,41 @@ async fn wrapper_forwards_custom_thinking_budgets_through_default_streamer() {
 }
 
 #[tokio::test]
+async fn wrapper_falls_back_to_stream_options_api_key_when_hook_returns_empty_string() {
+    let received_api_keys = Arc::new(Mutex::new(Vec::new()));
+    let streamer = Arc::new({
+        let received_api_keys = received_api_keys.clone();
+        move |_model: Model,
+              _context: Context,
+              options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            received_api_keys.lock().unwrap().push(options.api_key.clone());
+
+            let message = assistant_message("ok", StopReason::Stop, 20);
+            Ok(Box::pin(try_stream! {
+                yield AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                };
+            }))
+        }
+    });
+
+    let mut stream_options = StreamOptions::default();
+    stream_options.api_key = Some("fallback-key".into());
+
+    let agent = Agent::with_parts(AgentState::new(model()), streamer, stream_options);
+    agent.set_get_api_key(|_provider| async move { Some(String::new()) });
+
+    agent.prompt_text("hello").await.unwrap();
+
+    assert_eq!(
+        received_api_keys.lock().unwrap().clone(),
+        vec![Some(String::from("fallback-key"))]
+    );
+}
+
+#[tokio::test]
 async fn wrapper_can_switch_to_sequential_tool_execution() {
     let first_resolved = Arc::new(AtomicBool::new(false));
     let parallel_observed = Arc::new(AtomicBool::new(false));

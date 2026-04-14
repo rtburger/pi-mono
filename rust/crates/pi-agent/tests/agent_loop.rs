@@ -1174,6 +1174,62 @@ async fn before_hook_can_block_tool_execution_with_reason() {
 }
 
 #[tokio::test]
+async fn before_hook_block_reason_falls_back_to_default_when_empty() {
+    let mut context = AgentContext::new("You are helpful.");
+    context.tools.push(echo_tool());
+
+    let streamer = Arc::new(ScriptedStreamer::new(vec![
+        vec![Ok(AssistantEvent::Done {
+            reason: StopReason::ToolUse,
+            message: assistant_tool_call_message(
+                "tool-1",
+                "echo",
+                serde_json::Map::from_iter([(
+                    String::from("value"),
+                    Value::String("hello".into()),
+                )]),
+                20,
+            ),
+        })],
+        vec![Ok(AssistantEvent::Done {
+            reason: StopReason::Stop,
+            message: assistant_message("done", StopReason::Stop, 30),
+        })],
+    ])) as Arc<dyn AssistantStreamer>;
+
+    let stream = agent_loop(
+        vec![user_message("run tool", 10).into()],
+        context,
+        AgentLoopConfig::new(model())
+            .with_streamer(streamer)
+            .with_before_tool_call(|_before, _signal| async move {
+                Some(BeforeToolCallResult {
+                    block: true,
+                    reason: Some(String::new()),
+                })
+            }),
+    );
+
+    let events = collect_events(stream).await.unwrap();
+    let tool_end = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolExecutionEnd {
+                result, is_error, ..
+            } => Some((result.clone(), *is_error)),
+            _ => None,
+        })
+        .expect("expected tool execution end event");
+    assert!(tool_end.1);
+    assert_eq!(
+        tool_end.0.content,
+        vec![UserContent::Text {
+            text: "Tool execution was blocked".into(),
+        }]
+    );
+}
+
+#[tokio::test]
 async fn steering_messages_are_injected_after_all_tool_results() {
     let mut context = AgentContext::new("You are helpful.");
     context.tools.push(echo_tool());

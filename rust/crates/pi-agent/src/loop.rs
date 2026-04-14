@@ -839,7 +839,10 @@ async fn resolve_api_key(
     fallback_api_key: Option<String>,
 ) -> Option<String> {
     match hook {
-        Some(hook) => hook(provider.to_string()).await.or(fallback_api_key),
+        Some(hook) => match hook(provider.to_string()).await {
+            Some(api_key) if !api_key.is_empty() => Some(api_key),
+            _ => fallback_api_key,
+        },
         None => fallback_api_key,
     }
 }
@@ -1080,9 +1083,10 @@ async fn run_before_tool_call(
         Some(BeforeToolCallResult {
             block: true,
             reason,
-        }) => Some(error_tool_result(
-            reason.unwrap_or_else(|| "Tool execution was blocked".into()),
-        )),
+        }) => Some(error_tool_result(match reason {
+            Some(reason) if !reason.is_empty() => reason,
+            _ => "Tool execution was blocked".into(),
+        })),
         _ => None,
     }
 }

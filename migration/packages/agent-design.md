@@ -133,6 +133,13 @@ Internal support:
 
 The Rust workspace already has a non-empty `pi-agent` crate with the intended module split. This target design should be read as a parity and refinement plan, not a proposal for a new crate layout.
 
+## Validation findings
+
+- Confirmed two TS-style falsy fallback behaviors and ported them into Rust:
+  - an empty-string API key from `getApiKey` now falls back to `stream_options.api_key`
+  - an empty blocked-tool reason now falls back to `"Tool execution was blocked"`
+- Regression tests now cover both cases in `pi-agent`.
+
 ## Recommended next step
 
 Validate the existing Rust `pi-agent` crate against the TS edge cases that are easiest to freeze into fixtures first:
