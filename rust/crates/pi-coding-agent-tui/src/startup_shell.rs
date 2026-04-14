@@ -2,9 +2,9 @@ use crate::{
     AssistantMessageComponent, BuiltInHeaderComponent, ClipboardImageSource, CustomEditor,
     DEFAULT_HIDDEN_THINKING_LABEL, ExtensionEditorComponent, ExternalEditorCommandRunner,
     ExternalEditorHost, FooterComponent, FooterState, FooterStateHandle, KeyHintStyler,
-    KeybindingsManager, ModelSelectorComponent, PendingMessagesComponent, StartupHeaderStyler,
-    ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult, TranscriptComponent,
-    UserMessageComponent, paste_clipboard_image_into_shell,
+    KeybindingsManager, ModelSelectorComponent, PendingMessagesComponent, PlainKeyHintStyler,
+    StartupHeaderStyler, ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult,
+    TranscriptComponent, UserMessageComponent, paste_clipboard_image_into_shell,
 };
 use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
 use pi_events::{AssistantMessage, Model, UserContent};
@@ -121,6 +121,11 @@ enum ShellUpdate {
         result: ToolExecutionResult,
         is_partial: bool,
     },
+    SetPendingMessages {
+        steering: Vec<String>,
+        follow_up: Vec<String>,
+    },
+    ClearPendingMessages,
 }
 
 enum ExtensionEditorEvent {
@@ -214,12 +219,23 @@ impl ShellUpdateHandle {
             is_partial,
         });
     }
+
+    pub fn set_pending_messages(&self, steering: Vec<String>, follow_up: Vec<String>) {
+        self.push(ShellUpdate::SetPendingMessages {
+            steering,
+            follow_up,
+        });
+    }
+
+    pub fn clear_pending_messages(&self) {
+        self.push(ShellUpdate::ClearPendingMessages);
+    }
 }
 
 pub struct StartupShellComponent {
     header: BuiltInHeaderComponent,
     transcript: RefCell<TranscriptComponent>,
-    pending_messages: PendingMessagesComponent,
+    pending_messages: RefCell<PendingMessagesComponent>,
     input: CustomEditor,
     footer: FooterComponent,
     keybindings: KeybindingsManager,
@@ -304,7 +320,7 @@ impl StartupShellComponent {
                 show_condensed_changelog,
             ),
             transcript: RefCell::new(TranscriptComponent::new()),
-            pending_messages: PendingMessagesComponent::new(keybindings),
+            pending_messages: RefCell::new(PendingMessagesComponent::new(keybindings)),
             input: CustomEditor::new(keybindings),
             footer: FooterComponent::default(),
             keybindings: keybindings.clone(),
@@ -350,7 +366,7 @@ impl StartupShellComponent {
     fn transcript_viewport_height_for_width(&self, width: usize) -> Option<usize> {
         let (_, total_height) = self.viewport_size.get()?;
         let occupied_height = self.header.render(width).len()
-            + self.pending_messages.render(width).len()
+            + self.pending_messages.borrow().render(width).len()
             + self.render_status(width).len()
             + self.active_prompt_component_height_for_width(width)
             + self.footer.render(width).len();
@@ -448,7 +464,7 @@ impl StartupShellComponent {
         self.restore_prompt_from_extension_editor = true;
     }
 
-    fn submit_current_input(&mut self) {
+    pub(crate) fn submit_current_input(&mut self) {
         let value = self.input_value();
         let mut on_submit = self.on_submit.take();
         if let Some(callback) = &mut on_submit {
@@ -591,6 +607,19 @@ impl StartupShellComponent {
                 if let Some(component) = self.tool_components.borrow().get(&tool_call_id).cloned() {
                     component.with_mut(|component| component.update_result(result, is_partial));
                 }
+            }
+            ShellUpdate::SetPendingMessages {
+                steering,
+                follow_up,
+            } => {
+                self.pending_messages.borrow_mut().set_messages(
+                    &PlainKeyHintStyler,
+                    steering,
+                    follow_up,
+                );
+            }
+            ShellUpdate::ClearPendingMessages => {
+                self.pending_messages.borrow_mut().clear_messages();
             }
         }
     }
@@ -997,15 +1026,16 @@ impl StartupShellComponent {
         T: AsRef<str>,
     {
         self.pending_messages
+            .borrow_mut()
             .set_messages(styler, steering, follow_up);
     }
 
     pub fn clear_pending_messages(&mut self) {
-        self.pending_messages.clear_messages();
+        self.pending_messages.borrow_mut().clear_messages();
     }
 
     pub fn has_pending_messages(&self) -> bool {
-        self.pending_messages.has_messages()
+        self.pending_messages.borrow().has_messages()
     }
 
     pub fn set_status_message(&mut self, message: impl Into<String>) {
@@ -1086,7 +1116,7 @@ impl Component for StartupShellComponent {
     fn render(&self, width: usize) -> Vec<String> {
         self.drain_pending_updates();
         let header_lines = self.header.render(width);
-        let pending_lines = self.pending_messages.render(width);
+        let pending_lines = self.pending_messages.borrow().render(width);
         let input_lines = if let Some(model_selector) = &self.model_selector {
             model_selector.render(width)
         } else if let Some(extension_editor) = &self.extension_editor {
@@ -1115,7 +1145,7 @@ impl Component for StartupShellComponent {
         self.drain_pending_updates();
         self.header.invalidate();
         self.transcript.borrow_mut().invalidate();
-        self.pending_messages.invalidate();
+        self.pending_messages.borrow_mut().invalidate();
         if let Some(model_selector) = &mut self.model_selector {
             model_selector.invalidate();
         } else if let Some(extension_editor) = &mut self.extension_editor {
@@ -1264,7 +1294,9 @@ impl Component for StartupShellComponent {
         self.viewport_size.set(Some((width, height)));
         self.header.set_viewport_size(width, height);
         self.transcript.borrow().set_viewport_size(width, height);
-        self.pending_messages.set_viewport_size(width, height);
+        self.pending_messages
+            .borrow()
+            .set_viewport_size(width, height);
         self.input.set_viewport_size(width, height);
         if let Some(model_selector) = &self.model_selector {
             model_selector.set_viewport_size(width, height);

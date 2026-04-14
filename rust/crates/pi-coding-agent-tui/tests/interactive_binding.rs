@@ -6,7 +6,7 @@ use pi_coding_agent_core::{
     CodingAgentCoreOptions, MemoryAuthStorage, SessionBootstrapOptions, create_coding_agent_core,
 };
 use pi_coding_agent_tui::{
-    InteractiveCoreBinding, KeybindingsManager, PlainKeyHintStyler, StartupShellComponent,
+    InteractiveCoreBinding, KeyId, KeybindingsManager, PlainKeyHintStyler, StartupShellComponent,
 };
 use pi_events::StopReason;
 use pi_tui::{Terminal, Tui, TuiError};
@@ -18,6 +18,30 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+fn keybindings(entries: &[(&str, &str)]) -> KeybindingsManager {
+    KeybindingsManager::new(
+        entries
+            .iter()
+            .map(|(action, key)| ((*action).to_owned(), vec![KeyId::from(*key)]))
+            .collect::<BTreeMap<_, _>>(),
+        None,
+    )
+}
+
+fn wait_until_streaming(
+    core: &pi_coding_agent_core::CodingAgentCore,
+) -> impl std::future::Future<Output = ()> + '_ {
+    async move {
+        for _ in 0..20 {
+            if core.state().is_streaming {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(core.state().is_streaming, "runtime should be streaming");
+    }
+}
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let unique = SystemTime::now()
@@ -276,6 +300,272 @@ async fn interactive_shell_external_editor_action_mounts_extension_editor_and_re
             .iter()
             .any(|line| line.contains("Edited prompt received"))
     );
+
+    drop(binding);
+    tui.stop().expect("stop should succeed");
+    faux.unregister();
+}
+
+#[tokio::test]
+async fn interactive_binding_queues_follow_up_messages_during_streaming_and_clears_pending_strip_when_run_finishes()
+ {
+    let faux = register_faux_provider(RegisterFauxProviderOptions {
+        provider: "interactive-follow-up-faux".into(),
+        models: vec![FauxModelDefinition {
+            id: "interactive-follow-up-faux-1".into(),
+            name: Some("Interactive Follow-up Faux".into()),
+            reasoning: false,
+        }],
+        token_chunk_chars: 2,
+        chunk_delay: Duration::from_millis(10),
+        ..RegisterFauxProviderOptions::default()
+    });
+    faux.set_responses(vec![
+        FauxResponse::text("first answer"),
+        FauxResponse::text("queued answer"),
+    ]);
+    let model = faux
+        .get_model(Some("interactive-follow-up-faux-1"))
+        .unwrap();
+
+    let created = create_coding_agent_core(CodingAgentCoreOptions {
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            model.provider.clone(),
+            "test-token",
+        )])),
+        built_in_models: vec![model],
+        models_json_path: None,
+        cwd: Some(unique_temp_dir("interactive-follow-up-cwd")),
+        tools: None,
+        system_prompt: String::new(),
+        bootstrap: SessionBootstrapOptions::default(),
+        stream_options: StreamOptions::default(),
+    })
+    .unwrap();
+
+    let keybindings = keybindings(&[("app.message.followUp", "ctrl+x")]);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+
+    let terminal = RecordingTerminal::new();
+    let mut tui = Tui::new(terminal);
+    let binding =
+        InteractiveCoreBinding::bind(created.core.clone(), &mut shell, tui.render_handle());
+    let shell_id = tui.add_child(Box::new(shell));
+    assert!(tui.set_focus_child(shell_id));
+    tui.start().expect("start should succeed");
+
+    tui.handle_input("h").expect("input should be handled");
+    tui.handle_input("i").expect("input should be handled");
+    tui.handle_input("\r").expect("submit should be handled");
+
+    wait_until_streaming(&created.core).await;
+
+    for key in ["n", "e", "x", "t"] {
+        tui.handle_input(key)
+            .expect("follow-up input should be handled");
+    }
+    tui.handle_input("\x18")
+        .expect("follow-up binding should be handled");
+
+    let queued_lines = tui.render_current();
+    assert!(created.core.agent().has_queued_messages());
+    assert!(
+        queued_lines
+            .iter()
+            .any(|line| line.contains("Follow-up: next"))
+    );
+
+    created.core.wait_for_idle().await;
+    tui.drain_terminal_events()
+        .expect("queued interactive updates should drain successfully");
+
+    let lines = tui.render_current();
+    assert!(lines.iter().any(|line| line.contains("next")));
+    assert!(lines.iter().any(|line| line.contains("queued answer")));
+    assert!(!lines.iter().any(|line| line.contains("Follow-up: next")));
+    assert!(!created.core.agent().has_queued_messages());
+
+    drop(binding);
+    tui.stop().expect("stop should succeed");
+    faux.unregister();
+}
+
+#[tokio::test]
+async fn interactive_binding_dequeue_restores_queued_follow_up_to_the_prompt() {
+    let faux = register_faux_provider(RegisterFauxProviderOptions {
+        provider: "interactive-dequeue-faux".into(),
+        models: vec![FauxModelDefinition {
+            id: "interactive-dequeue-faux-1".into(),
+            name: Some("Interactive Dequeue Faux".into()),
+            reasoning: false,
+        }],
+        token_chunk_chars: 2,
+        chunk_delay: Duration::from_millis(10),
+        ..RegisterFauxProviderOptions::default()
+    });
+    faux.set_responses(vec![FauxResponse::text("first answer")]);
+    let model = faux.get_model(Some("interactive-dequeue-faux-1")).unwrap();
+
+    let created = create_coding_agent_core(CodingAgentCoreOptions {
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            model.provider.clone(),
+            "test-token",
+        )])),
+        built_in_models: vec![model],
+        models_json_path: None,
+        cwd: Some(unique_temp_dir("interactive-dequeue-cwd")),
+        tools: None,
+        system_prompt: String::new(),
+        bootstrap: SessionBootstrapOptions::default(),
+        stream_options: StreamOptions::default(),
+    })
+    .unwrap();
+
+    let keybindings = keybindings(&[
+        ("app.message.followUp", "ctrl+x"),
+        ("app.message.dequeue", "ctrl+u"),
+    ]);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+
+    let terminal = RecordingTerminal::new();
+    let mut tui = Tui::new(terminal);
+    let binding =
+        InteractiveCoreBinding::bind(created.core.clone(), &mut shell, tui.render_handle());
+    let shell_id = tui.add_child(Box::new(shell));
+    assert!(tui.set_focus_child(shell_id));
+    tui.start().expect("start should succeed");
+
+    tui.handle_input("h").expect("input should be handled");
+    tui.handle_input("i").expect("input should be handled");
+    tui.handle_input("\r").expect("submit should be handled");
+
+    wait_until_streaming(&created.core).await;
+
+    for key in ["n", "e", "x", "t"] {
+        tui.handle_input(key)
+            .expect("follow-up input should be handled");
+    }
+    tui.handle_input("\x18")
+        .expect("follow-up binding should be handled");
+    tui.handle_input("\x15")
+        .expect("dequeue binding should be handled");
+
+    let lines = tui.render_current();
+    assert_eq!(created.core.state().messages.len(), 1);
+    assert!(!created.core.agent().has_queued_messages());
+    assert!(lines.iter().any(|line| line.contains("next")));
+    assert!(!lines.iter().any(|line| line.contains("Follow-up: next")));
+
+    created.core.wait_for_idle().await;
+    tui.drain_terminal_events()
+        .expect("queued interactive updates should drain successfully");
+
+    assert_eq!(created.core.state().messages.len(), 2);
+    let final_lines = tui.render_current();
+    assert!(final_lines.iter().any(|line| line.contains("next")));
+    assert!(final_lines.iter().any(|line| line.contains("first answer")));
+
+    drop(binding);
+    tui.stop().expect("stop should succeed");
+    faux.unregister();
+}
+
+#[tokio::test]
+async fn interactive_binding_interrupt_restores_queued_follow_up_and_aborts_the_run() {
+    let faux = register_faux_provider(RegisterFauxProviderOptions {
+        provider: "interactive-interrupt-faux".into(),
+        models: vec![FauxModelDefinition {
+            id: "interactive-interrupt-faux-1".into(),
+            name: Some("Interactive Interrupt Faux".into()),
+            reasoning: false,
+        }],
+        token_chunk_chars: 2,
+        chunk_delay: Duration::from_millis(10),
+        ..RegisterFauxProviderOptions::default()
+    });
+    faux.set_responses(vec![FauxResponse::text("first answer")]);
+    let model = faux
+        .get_model(Some("interactive-interrupt-faux-1"))
+        .unwrap();
+
+    let created = create_coding_agent_core(CodingAgentCoreOptions {
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            model.provider.clone(),
+            "test-token",
+        )])),
+        built_in_models: vec![model],
+        models_json_path: None,
+        cwd: Some(unique_temp_dir("interactive-interrupt-cwd")),
+        tools: None,
+        system_prompt: String::new(),
+        bootstrap: SessionBootstrapOptions::default(),
+        stream_options: StreamOptions::default(),
+    })
+    .unwrap();
+
+    let keybindings = keybindings(&[
+        ("app.message.followUp", "ctrl+x"),
+        ("app.interrupt", "ctrl+o"),
+    ]);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+
+    let terminal = RecordingTerminal::new();
+    let mut tui = Tui::new(terminal);
+    let binding =
+        InteractiveCoreBinding::bind(created.core.clone(), &mut shell, tui.render_handle());
+    let shell_id = tui.add_child(Box::new(shell));
+    assert!(tui.set_focus_child(shell_id));
+    tui.start().expect("start should succeed");
+
+    tui.handle_input("h").expect("input should be handled");
+    tui.handle_input("i").expect("input should be handled");
+    tui.handle_input("\r").expect("submit should be handled");
+
+    wait_until_streaming(&created.core).await;
+
+    for key in ["n", "e", "x", "t"] {
+        tui.handle_input(key)
+            .expect("follow-up input should be handled");
+    }
+    tui.handle_input("\x18")
+        .expect("follow-up binding should be handled");
+    tui.handle_input("\x0f")
+        .expect("interrupt binding should be handled");
+
+    created.core.wait_for_idle().await;
+    tui.drain_terminal_events()
+        .expect("queued interactive updates should drain successfully");
+
+    let lines = tui.render_current();
+    assert_eq!(created.core.state().messages.len(), 2);
+    assert!(!created.core.agent().has_queued_messages());
+    assert!(lines.iter().any(|line| line.contains("next")));
+    assert!(lines.iter().any(|line| line.contains("Operation aborted")));
+    assert!(!lines.iter().any(|line| line.contains("Follow-up: next")));
 
     drop(binding);
     tui.stop().expect("stop should succeed");

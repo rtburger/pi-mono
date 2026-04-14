@@ -4401,3 +4401,102 @@ Still deferred for the coding-agent interactive/editor surface:
 Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
 - either wire the now-complete Rust extension-editor component into a real interactive flow that can summon it, or continue closing the next highest-value multiline/custom-editor parity gaps that the downstream consumer now proves are still missing
 - keep the broader session-manager/resource-loader wiring and full theme/markdown/image stack deferred until those higher-value interaction/runtime gaps are closed first
+
+## Milestone 58 update: interactive follow-up queue + dequeue/interrupt restore slice
+
+### Files analyzed
+
+Additional TypeScript files read for this slice:
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`
+  - `handleFollowUp()`
+  - `handleDequeue()`
+  - `clearAllQueues()`
+  - `restoreQueuedMessagesToEditor()`
+  - `updatePendingMessagesDisplay()`
+  - interrupt-path grounding from `setupKeyHandlers()` / `defaultEditor.onEscape`
+- previously grounded interactive editor/keybinding files kept in scope:
+  - `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+  - `packages/coding-agent/src/core/keybindings.ts`
+
+Additional Rust files read for this slice:
+- `rust/crates/pi-coding-agent-tui/src/startup_shell.rs`
+- `rust/crates/pi-coding-agent-tui/src/interactive_binding.rs`
+- `rust/crates/pi-coding-agent-tui/tests/interactive_binding.rs`
+- related agent/runtime grounding kept in scope:
+  - `rust/crates/pi-agent/src/agent.rs`
+  - `rust/crates/pi-coding-agent-core/src/runtime.rs`
+
+### Behavior summary
+
+New TS-compatible behavior now covered in Rust:
+- the live Rust `InteractiveCoreBinding` now ports the first streaming follow-up/dequeue queue behavior from TypeScript interactive mode instead of treating `app.message.followUp` as a plain submit in all cases
+- when the bound runtime is already streaming, the Rust shell now preserves the current high-value TS follow-up behavior for the migrated subset:
+  - current prompt text is queued as an agent follow-up message
+  - prompt input is cleared immediately
+  - the pending-message strip shows the queued follow-up text
+- `app.message.dequeue` now has the first live Rust default action for the migrated shell/runtime path:
+  - queued follow-up messages are removed from the bound agent queue
+  - queued text is restored back into the prompt editor, combined with any current prompt text using blank-line separation
+  - the pending-message strip is cleared
+  - status text mirrors the TS wording shape (`No queued messages to restore` / `Restored N queued message(s) to editor`)
+- interrupt behavior now matches the current TS queued-message escape path more closely for the migrated subset:
+  - if follow-up messages are queued while a request is running
+  - interrupt restores them to the prompt first, clears the pending strip, then aborts the active run
+- queued follow-up strip cleanup now happens automatically when the bound run ends, so the live Rust shell no longer leaves stale follow-up rows visible after the queued turn has been processed
+
+Compatibility note for this slice:
+- this milestone ports the current shell/runtime follow-up queue behavior for the migrated Rust interactive path only; it does not yet port the broader TS queue ownership split involving session-manager-backed steering queues or compaction queues
+- queued follow-up display is still intentionally the current startup-shell subset; broader queue/status UX parity remains a later interactive/runtime milestone
+
+### Rust design summary
+
+Expanded `pi-coding-agent-tui::startup_shell` with queue-update support on the existing queued shell-update path:
+- `ShellUpdate::{SetPendingMessages, ClearPendingMessages}`
+- `ShellUpdateHandle::{set_pending_messages(...), clear_pending_messages()}`
+- `submit_current_input()` is now crate-visible so the binding layer can delegate non-streaming follow-up back into the normal shell submit path instead of bypassing slash-command/runtime submit handling
+
+Expanded `pi-coding-agent-tui::interactive_binding` with:
+- shared shell-local follow-up queue state for the bound runtime path
+- shell-level default handlers for:
+  - `app.message.followUp`
+  - `app.message.dequeue`
+  - `app.interrupt`
+- restore helpers that:
+  - clear the bound agent follow-up queue
+  - merge queued text back into the prompt
+  - update the pending-message strip through the queued shell-update path
+- agent-event handling that clears pending follow-up display on `agent_end`
+
+Design choices for this slice:
+- keep the queue/dequeue behavior in `pi-coding-agent-tui::InteractiveCoreBinding`, where the current Rust interactive shell/runtime bridge already lives, instead of widening `pi-agent` or introducing a partial session-manager port first
+- reuse the existing queued shell-update/render-handle path so pending-message strip updates stay thread-safe and consistent with the current Rust TUI event model
+- delegate non-streaming follow-up back into the shell submit path so slash-command/runtime submit behavior is preserved when the binding is mounted under the interactive CLI runner
+
+### Validation summary
+
+New Rust coverage added for:
+- queuing a follow-up message while a bound runtime is streaming, showing it in the pending strip, then clearing the strip after the queued run completes
+- dequeueing a queued follow-up back into the prompt without sending a second runtime turn
+- interrupting a bound streaming run with queued follow-ups, restoring the queued text into the prompt and rendering the aborted terminal state
+- existing interactive binding prompt/tool/external-editor tests continue to pass on top of the new queue behavior
+
+Validation run results:
+- `cd rust && cargo fmt --all` passed
+- `cd rust && cargo test -p pi-coding-agent-tui --test interactive_binding` passed
+- `cd rust && cargo test -p pi-coding-agent-tui` passed
+- `cd rust && cargo test -q --workspace` passed
+- `npm run check` passed
+
+### Remaining gaps after this milestone
+
+Still deferred for the coding-agent interactive/runtime path:
+- no session-manager/resource-loader-backed steering/compaction queue parity yet
+- no multiline editor / broader custom-editor parity yet beyond the existing migrated subset
+- no broader theme/markdown/image parity yet for the full interactive presentation stack
+- no richer queue/status UX yet beyond the pending follow-up strip and restore actions migrated here
+
+### Recommended next step
+
+Stay in `packages/coding-agent/src/modes/interactive`, `packages/tui`, `rust/crates/pi-coding-agent-tui`, and `rust/crates/pi-tui`:
+- keep pushing on the live interactive shell/runtime bridge, most likely the next queue/control slice or the next multiline/custom-editor gap that now blocks the upgraded interactive path
+- keep the broader session-manager/resource-loader wiring and full theme/markdown/image stack deferred until those higher-value interaction/runtime gaps are closed first

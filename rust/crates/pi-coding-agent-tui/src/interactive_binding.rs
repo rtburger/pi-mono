@@ -2,8 +2,12 @@ use crate::startup_shell::{ShellUpdateHandle, tool_result_from_user_content, use
 use crate::{FooterState, StartupShellComponent, StatusHandle};
 use pi_agent::{Agent, AgentEvent, ThinkingLevel};
 use pi_coding_agent_core::CodingAgentCore;
-use pi_events::{AssistantMessage, Message};
+use pi_events::{AssistantMessage, Message, UserContent};
 use pi_tui::RenderHandle;
+use std::{
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub struct InteractiveCoreBinding {
     agent: Agent,
@@ -27,15 +31,24 @@ impl InteractiveCoreBinding {
             ..FooterState::default()
         });
 
-        install_shell_callbacks(core.clone(), shell, status_handle.clone());
+        let pending_follow_ups = Arc::new(Mutex::new(Vec::new()));
+
+        install_shell_callbacks(
+            core.clone(),
+            shell,
+            status_handle.clone(),
+            update_handle.clone(),
+            pending_follow_ups.clone(),
+        );
         sync_existing_state(&core, &update_handle, &status_handle);
 
         let agent = core.agent();
         let listener_id = agent.subscribe(move |event, _signal| {
             let update_handle = update_handle.clone();
             let status_handle = status_handle.clone();
+            let pending_follow_ups = pending_follow_ups.clone();
             Box::pin(async move {
-                apply_agent_event(event, &update_handle, &status_handle);
+                apply_agent_event(event, &update_handle, &status_handle, &pending_follow_ups);
             })
         });
 
@@ -53,26 +66,72 @@ fn install_shell_callbacks(
     core: CodingAgentCore,
     shell: &mut StartupShellComponent,
     status_handle: StatusHandle,
+    update_handle: ShellUpdateHandle,
+    pending_follow_ups: Arc<Mutex<Vec<String>>>,
 ) {
     let submit_core = core.clone();
     let submit_status_handle = status_handle.clone();
     shell.set_on_submit(move |value| {
+        submit_prompt(submit_core.clone(), submit_status_handle.clone(), value);
+    });
+
+    let follow_up_core = core.clone();
+    let follow_up_update_handle = update_handle.clone();
+    let follow_up_messages = pending_follow_ups.clone();
+    shell.on_action_with_shell("app.message.followUp", move |shell| {
+        let value = shell.input_value();
         if value.trim().is_empty() {
             return;
         }
 
-        submit_status_handle.set_message("Working...");
-        let core = submit_core.clone();
-        let status_handle = submit_status_handle.clone();
-        tokio::spawn(async move {
-            if let Err(error) = core.prompt_text(value).await {
-                status_handle.set_message(format!("Error: {error}"));
-            }
-        });
+        if follow_up_core.state().is_streaming {
+            shell.clear_input();
+            queue_follow_up_message(
+                &follow_up_core,
+                &follow_up_update_handle,
+                &follow_up_messages,
+                value,
+            );
+        } else {
+            shell.submit_current_input();
+        }
     });
 
-    shell.set_on_escape(move || {
-        core.abort();
+    let dequeue_core = core.clone();
+    let dequeue_status_handle = status_handle.clone();
+    let dequeue_update_handle = update_handle.clone();
+    let dequeue_messages = pending_follow_ups.clone();
+    shell.on_action_with_shell("app.message.dequeue", move |shell| {
+        let restored = restore_pending_follow_ups_to_shell(
+            shell,
+            &dequeue_core,
+            &dequeue_update_handle,
+            &dequeue_messages,
+        );
+        if restored == 0 {
+            dequeue_status_handle.set_message("No queued messages to restore");
+        } else {
+            let suffix = if restored == 1 { "" } else { "s" };
+            dequeue_status_handle.set_message(format!(
+                "Restored {restored} queued message{suffix} to editor"
+            ));
+        }
+    });
+
+    let interrupt_core = core.clone();
+    let interrupt_update_handle = update_handle;
+    let interrupt_messages = pending_follow_ups;
+    shell.clear_on_escape();
+    shell.on_action_with_shell("app.interrupt", move |shell| {
+        if interrupt_core.state().is_streaming && has_pending_follow_ups(&interrupt_messages) {
+            restore_pending_follow_ups_to_shell(
+                shell,
+                &interrupt_core,
+                &interrupt_update_handle,
+                &interrupt_messages,
+            );
+        }
+        interrupt_core.abort();
     });
 }
 
@@ -134,12 +193,18 @@ fn apply_agent_event(
     event: AgentEvent,
     update_handle: &ShellUpdateHandle,
     status_handle: &StatusHandle,
+    pending_follow_ups: &Arc<Mutex<Vec<String>>>,
 ) {
     match event {
         AgentEvent::AgentStart => {
             status_handle.set_message("Working...");
         }
         AgentEvent::AgentEnd { .. } => {
+            pending_follow_ups
+                .lock()
+                .expect("pending follow-up mutex poisoned")
+                .clear();
+            update_handle.clear_pending_messages();
             status_handle.clear();
         }
         AgentEvent::MessageStart { message } => {
@@ -218,6 +283,78 @@ fn apply_agent_event(
     }
 }
 
+fn submit_prompt(core: CodingAgentCore, status_handle: StatusHandle, value: String) {
+    if value.trim().is_empty() {
+        return;
+    }
+
+    status_handle.set_message("Working...");
+    tokio::spawn(async move {
+        if let Err(error) = core.prompt_text(value).await {
+            status_handle.set_message(format!("Error: {error}"));
+        }
+    });
+}
+
+fn queue_follow_up_message(
+    core: &CodingAgentCore,
+    update_handle: &ShellUpdateHandle,
+    pending_follow_ups: &Arc<Mutex<Vec<String>>>,
+    text: String,
+) {
+    core.agent().follow_up(Message::User {
+        content: vec![UserContent::Text { text: text.clone() }],
+        timestamp: now_ms(),
+    });
+
+    let follow_up = {
+        let mut pending_follow_ups = pending_follow_ups
+            .lock()
+            .expect("pending follow-up mutex poisoned");
+        pending_follow_ups.push(text);
+        pending_follow_ups.clone()
+    };
+    update_handle.set_pending_messages(Vec::new(), follow_up);
+}
+
+fn restore_pending_follow_ups_to_shell(
+    shell: &mut StartupShellComponent,
+    core: &CodingAgentCore,
+    update_handle: &ShellUpdateHandle,
+    pending_follow_ups: &Arc<Mutex<Vec<String>>>,
+) -> usize {
+    let follow_up = {
+        let mut pending_follow_ups = pending_follow_ups
+            .lock()
+            .expect("pending follow-up mutex poisoned");
+        if pending_follow_ups.is_empty() {
+            return 0;
+        }
+        std::mem::take(&mut *pending_follow_ups)
+    };
+
+    core.agent().clear_follow_up_queue();
+
+    let queued_text = follow_up.join("\n\n");
+    let current_text = shell.input_value();
+    let combined = [queued_text, current_text]
+        .into_iter()
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    shell.set_input_value(combined.clone());
+    shell.set_input_cursor(combined.len());
+    update_handle.clear_pending_messages();
+    follow_up.len()
+}
+
+fn has_pending_follow_ups(pending_follow_ups: &Arc<Mutex<Vec<String>>>) -> bool {
+    !pending_follow_ups
+        .lock()
+        .expect("pending follow-up mutex poisoned")
+        .is_empty()
+}
+
 fn assistant_message(message: &Message) -> Option<AssistantMessage> {
     match message {
         Message::Assistant {
@@ -244,6 +381,13 @@ fn assistant_message(message: &Message) -> Option<AssistantMessage> {
         }),
         _ => None,
     }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn thinking_level_label(level: ThinkingLevel) -> &'static str {
