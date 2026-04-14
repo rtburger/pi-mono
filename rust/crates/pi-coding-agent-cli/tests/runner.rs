@@ -1550,6 +1550,96 @@ async fn run_interactive_command_opens_model_selector_from_app_model_select_keyb
 }
 
 #[tokio::test]
+async fn run_interactive_command_cycles_scoped_models_from_app_model_cycle_forward_keybinding() {
+    let provider = unique_name("interactive-provider");
+    let initial_model_id = unique_name("alpha-model");
+    let cycled_model_id = unique_name("beta-scoped-model");
+    let (api, recorded) = register_recording_provider("interactive-cycle-forward");
+    let mut initial_model = model(&api, &provider, &initial_model_id);
+    initial_model.reasoning = true;
+    let mut cycled_model = model(&api, &provider, &cycled_model_id);
+    cycled_model.reasoning = true;
+    let terminal = ScriptedTerminal::new(vec![
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("\x10")),
+        ),
+        (
+            Duration::from_millis(40),
+            TerminalAction::Input(String::from("h")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("i")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("\r")),
+        ),
+        (
+            Duration::from_millis(80),
+            TerminalAction::Input(String::from("\x04")),
+        ),
+    ]);
+    let inspector = terminal.clone();
+
+    let exit_code = run_interactive_command_with_terminal(
+        RunCommandOptions {
+            args: vec![
+                String::from("--models"),
+                format!("{initial_model_id},{cycled_model_id}:high"),
+            ],
+            stdin_is_tty: true,
+            stdin_content: None,
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![initial_model, cycled_model],
+            models_json_path: None,
+            agent_dir: None,
+            cwd: unique_temp_dir("runner-interactive-model-cycle-forward"),
+            default_system_prompt: String::new(),
+            version: String::from("0.1.0"),
+            stream_options: StreamOptions::default(),
+        },
+        Arc::new(move || Box::new(terminal.clone())),
+    )
+    .await;
+
+    assert_eq!(exit_code, 0);
+    let output = strip_terminal_control_sequences(&inspector.output());
+    assert!(
+        output.contains(&format!("Switched to {cycled_model_id} (thinking: high)")),
+        "output: {output}"
+    );
+    assert!(
+        output.contains("interactive-cycle-forward"),
+        "output: {output}"
+    );
+
+    let request = recorded.lock().unwrap().clone();
+    assert_eq!(
+        request.model.as_ref().map(|model| model.id.as_str()),
+        Some(cycled_model_id.as_str())
+    );
+    let context = request.context.expect("expected recorded context");
+    match context.messages.first() {
+        Some(pi_events::Message::User { content, .. }) => {
+            assert_eq!(
+                content,
+                &vec![UserContent::Text {
+                    text: String::from("hi"),
+                }]
+            );
+        }
+        other => panic!("expected user message, got {other:?}"),
+    }
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
 async fn run_interactive_command_switches_models_via_model_slash_command() {
     let provider = unique_name("interactive-provider");
     let initial_model_id = unique_name("alpha-model");

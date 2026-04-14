@@ -4,7 +4,7 @@ use crate::{
     process_file_arguments, resolve_app_mode, run_print_mode, to_print_output_mode,
 };
 use pi_agent::ThinkingLevel;
-use pi_ai::{StreamOptions, ThinkingBudgets, supports_xhigh};
+use pi_ai::{StreamOptions, ThinkingBudgets, models_are_equal, supports_xhigh};
 use pi_coding_agent_core::{
     AuthSource, BootstrapDiagnosticLevel, CodingAgentCore, CodingAgentCoreError,
     CodingAgentCoreOptions, FooterDataProvider, ModelRegistry, ScopedModel,
@@ -1047,6 +1047,12 @@ fn current_interactive_model_candidates(
     model_registry.get_available()
 }
 
+#[derive(Debug, Clone)]
+struct InteractiveModelCycleResult {
+    model: Model,
+    thinking_level: ThinkingLevel,
+}
+
 fn install_interactive_submit_handler(
     shell: &mut StartupShellComponent,
     core: CodingAgentCore,
@@ -1056,6 +1062,38 @@ fn install_interactive_submit_handler(
     footer_state_handle: FooterStateHandle,
     exit_requested: Arc<AtomicBool>,
 ) {
+    let cycle_forward_core = core.clone();
+    let cycle_forward_model_registry = Arc::clone(&model_registry);
+    let cycle_forward_scoped_models = scoped_models.clone();
+    let cycle_forward_status_handle = status_handle.clone();
+    let cycle_forward_footer_state_handle = footer_state_handle.clone();
+    shell.on_action("app.model.cycleForward", move || {
+        handle_interactive_model_cycle(
+            "forward",
+            &cycle_forward_core,
+            cycle_forward_model_registry.as_ref(),
+            &cycle_forward_scoped_models,
+            &cycle_forward_status_handle,
+            &cycle_forward_footer_state_handle,
+        );
+    });
+
+    let cycle_backward_core = core.clone();
+    let cycle_backward_model_registry = Arc::clone(&model_registry);
+    let cycle_backward_scoped_models = scoped_models.clone();
+    let cycle_backward_status_handle = status_handle.clone();
+    let cycle_backward_footer_state_handle = footer_state_handle.clone();
+    shell.on_action("app.model.cycleBackward", move || {
+        handle_interactive_model_cycle(
+            "backward",
+            &cycle_backward_core,
+            cycle_backward_model_registry.as_ref(),
+            &cycle_backward_scoped_models,
+            &cycle_backward_status_handle,
+            &cycle_backward_footer_state_handle,
+        );
+    });
+
     let action_core = core.clone();
     let action_model_registry = Arc::clone(&model_registry);
     let action_scoped_models = scoped_models.clone();
@@ -1110,6 +1148,52 @@ fn install_interactive_submit_handler(
     });
 }
 
+fn handle_interactive_model_cycle(
+    direction: &str,
+    core: &CodingAgentCore,
+    model_registry: &ModelRegistry,
+    scoped_models: &[ScopedModel],
+    status_handle: &StatusHandle,
+    footer_state_handle: &FooterStateHandle,
+) {
+    if core.state().is_streaming {
+        status_handle.set_message(
+            "Model switching while a request is running is not supported in the Rust interactive CLI yet.",
+        );
+        return;
+    }
+
+    match cycle_interactive_model(core, model_registry, scoped_models, direction) {
+        Ok(Some(result)) => {
+            update_interactive_footer_state(footer_state_handle, core);
+            let model_name = if result.model.name.is_empty() {
+                result.model.id.as_str()
+            } else {
+                result.model.name.as_str()
+            };
+            let thinking_suffix =
+                if result.model.reasoning && result.thinking_level != ThinkingLevel::Off {
+                    format!(
+                        " (thinking: {})",
+                        thinking_level_label(result.thinking_level)
+                    )
+                } else {
+                    String::new()
+                };
+            status_handle.set_message(format!("Switched to {model_name}{thinking_suffix}"));
+        }
+        Ok(None) => {
+            let message = if scoped_models.is_empty() {
+                "Only one model available"
+            } else {
+                "Only one model in scope"
+            };
+            status_handle.set_message(message);
+        }
+        Err(error) => status_handle.set_message(format!("Error: {error}")),
+    }
+}
+
 fn handle_interactive_slash_command(
     shell: &mut StartupShellComponent,
     text: &str,
@@ -1145,13 +1229,8 @@ fn handle_interactive_slash_command(
                 return true;
             }
 
-            let state = core.state();
-            footer_state_handle.update(|footer_state| {
-                footer_state.model = Some(state.model.clone());
-                footer_state.context_window = state.model.context_window;
-                footer_state.thinking_level = thinking_level_label(state.thinking_level).to_owned();
-            });
-            status_handle.set_message(format!("Model: {}", state.model.id));
+            update_interactive_footer_state(footer_state_handle, core);
+            status_handle.set_message(format!("Model: {}", core.state().model.id));
             return true;
         }
 
@@ -1195,29 +1274,105 @@ fn show_interactive_model_selector(
                 return;
             }
 
-            let state = core.state();
-            footer_state_handle_for_select.update(|footer_state| {
-                footer_state.model = Some(state.model.clone());
-                footer_state.context_window = state.model.context_window;
-                footer_state.thinking_level = thinking_level_label(state.thinking_level).to_owned();
-            });
-            status_handle_for_select.set_message(format!("Model: {}", state.model.id));
+            update_interactive_footer_state(&footer_state_handle_for_select, &core);
+            status_handle_for_select.set_message(format!("Model: {}", core.state().model.id));
         },
         || {},
     );
 }
 
-fn switch_interactive_model(core: &CodingAgentCore, model: &Model) -> Result<(), String> {
+fn cycle_interactive_model(
+    core: &CodingAgentCore,
+    model_registry: &ModelRegistry,
+    scoped_models: &[ScopedModel],
+    direction: &str,
+) -> Result<Option<InteractiveModelCycleResult>, String> {
+    if !scoped_models.is_empty() {
+        let scoped_candidates = scoped_models
+            .iter()
+            .filter(|scoped_model| model_registry.has_configured_auth(&scoped_model.model))
+            .collect::<Vec<_>>();
+        if scoped_candidates.len() <= 1 {
+            return Ok(None);
+        }
+
+        let current_model = core.state().model;
+        let current_index = scoped_candidates
+            .iter()
+            .position(|scoped_model| {
+                models_are_equal(Some(&scoped_model.model), Some(&current_model))
+            })
+            .unwrap_or(0);
+        let next_index = match direction {
+            "backward" => (current_index + scoped_candidates.len() - 1) % scoped_candidates.len(),
+            _ => (current_index + 1) % scoped_candidates.len(),
+        };
+        let next = scoped_candidates[next_index];
+        apply_interactive_model_state(core, &next.model, next.thinking_level)?;
+
+        let state = core.state();
+        return Ok(Some(InteractiveModelCycleResult {
+            model: state.model.clone(),
+            thinking_level: state.thinking_level,
+        }));
+    }
+
+    let available_models = model_registry.get_available();
+    if available_models.len() <= 1 {
+        return Ok(None);
+    }
+
+    let current_model = core.state().model;
+    let current_index = available_models
+        .iter()
+        .position(|model| models_are_equal(Some(model), Some(&current_model)))
+        .unwrap_or(0);
+    let next_index = match direction {
+        "backward" => (current_index + available_models.len() - 1) % available_models.len(),
+        _ => (current_index + 1) % available_models.len(),
+    };
+    let next_model = available_models[next_index].clone();
+    apply_interactive_model_state(core, &next_model, None)?;
+
+    let state = core.state();
+    Ok(Some(InteractiveModelCycleResult {
+        model: state.model.clone(),
+        thinking_level: state.thinking_level,
+    }))
+}
+
+fn update_interactive_footer_state(
+    footer_state_handle: &FooterStateHandle,
+    core: &CodingAgentCore,
+) {
+    let state = core.state();
+    footer_state_handle.update(|footer_state| {
+        footer_state.model = Some(state.model.clone());
+        footer_state.context_window = state.model.context_window;
+        footer_state.thinking_level = thinking_level_label(state.thinking_level).to_owned();
+    });
+}
+
+fn apply_interactive_model_state(
+    core: &CodingAgentCore,
+    model: &Model,
+    thinking_level_override: Option<ThinkingLevel>,
+) -> Result<(), String> {
     if !core.model_registry().has_configured_auth(model) {
         return Err(format!("No API key for {}/{}", model.provider, model.id));
     }
 
     let next_model = model.clone();
     core.agent().update_state(move |state| {
-        state.model = next_model;
-        state.thinking_level = clamp_interactive_thinking_level(state.thinking_level, &state.model);
+        let thinking_level = thinking_level_override.unwrap_or(state.thinking_level);
+        state.model = next_model.clone();
+        state.thinking_level = clamp_interactive_thinking_level(thinking_level, &state.model);
     });
     Ok(())
+}
+
+fn switch_interactive_model(core: &CodingAgentCore, model: &Model) -> Result<(), String> {
+    apply_interactive_model_state(core, model, None)
 }
 
 fn clamp_interactive_thinking_level(level: ThinkingLevel, model: &Model) -> ThinkingLevel {
