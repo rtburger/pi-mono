@@ -739,10 +739,6 @@ Proceed with the next unresolved Step 3 compatibility slice for `packages/ai`:
 - pick the smallest remaining in-scope fixture target before moving to `packages/agent`
 
 ## Suggested fixture candidates for Step 3
-- OpenAI Codex SSE stream that must terminate on `response.completed` even if body stays open
-- OpenAI Responses foreign tool-call ID normalization
-- orphaned tool-call synthetic tool-result insertion
-- OpenAI Responses tool result image routing
-- OpenAI Completions tool-result image rerouting
-- partial JSON tool-call streaming examples
-- Unicode surrogate sanitization examples
+- OpenAI Responses reasoning replay after an aborted turn
+- same-provider different-model handoff with tool calls
+- numeric partial tool-argument fragments (`1e`, `1.`)

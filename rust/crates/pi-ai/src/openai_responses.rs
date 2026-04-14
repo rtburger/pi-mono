@@ -1546,7 +1546,7 @@ fn flush_sse_event(
 }
 
 fn parse_streaming_json_map(input: &str) -> BTreeMap<String, Value> {
-    serde_json::from_str::<BTreeMap<String, Value>>(input).unwrap_or_default()
+    crate::partial_json::parse_partial_json_map(input)
 }
 
 fn apply_usage_from_response(

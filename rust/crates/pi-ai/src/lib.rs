@@ -5,6 +5,7 @@ pub mod openai_completions;
 pub mod openai_responses;
 pub mod overflow;
 mod unicode;
+mod partial_json;
 
 pub use models::{
     built_in_models, get_model, get_models, get_providers, models_are_equal, supports_xhigh,

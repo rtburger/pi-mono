@@ -163,11 +163,20 @@ Validation landed in:
 
 This keeps the Anthropic-to-OpenAI Codex replay path frozen at the request-shape level: Anthropic thinking is downgraded to plain text, tool results remain paired, and no OpenAI reasoning replay items are emitted across the provider boundary. The same regression file also covers the reverse OpenAI Responses-to-Anthropic request shape.
 
+Partial JSON tool-call streaming is now also validated in Rust.
+Coverage now exists for:
+- partial string fragments inside tool call arguments
+- missing-value tails at the end of nested objects and arrays
+- a provider-level OpenAI Responses stream regression that exercises the shared partial JSON parser
+
+Validation landed in:
+- `rust/crates/pi-ai/src/partial_json.rs`
+- `rust/crates/pi-ai/tests/openai_responses_stream.rs`
+
+Open question:
+- numeric fragments like `1e` and `1.` are not yet explicitly covered by tests and may need a later compatibility pass.
+
 ## Suggested fixture candidates for the next slice
-- OpenAI Codex SSE stream that must terminate on `response.completed` even if body stays open
-- OpenAI Responses foreign tool-call ID normalization
-- orphaned tool-call synthetic tool-result insertion
-- OpenAI Responses tool result image routing
-- OpenAI Completions tool-result image rerouting
-- partial JSON tool-call streaming examples
-- Unicode surrogate sanitization examples
+- OpenAI Responses reasoning replay after an aborted turn
+- same-provider different-model handoff with tool calls
+- numeric partial tool-argument fragments (`1e`, `1.`)

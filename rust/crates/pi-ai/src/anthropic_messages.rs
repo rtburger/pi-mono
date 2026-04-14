@@ -1739,7 +1739,7 @@ fn sanitize_text(text: &str) -> String {
 }
 
 fn parse_tool_arguments_best_effort(partial_json: &str) -> BTreeMap<String, Value> {
-    serde_json::from_str(partial_json).unwrap_or_default()
+    crate::partial_json::parse_partial_json_map(partial_json)
 }
 
 fn value_object_to_btree(object: &serde_json::Map<String, Value>) -> BTreeMap<String, Value> {
