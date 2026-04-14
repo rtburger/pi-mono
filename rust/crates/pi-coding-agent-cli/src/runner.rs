@@ -12,21 +12,21 @@ use pi_coding_agent_core::{
     resolve_cli_model, resolve_model_scope,
 };
 use pi_coding_agent_tui::{
-    FooterStateHandle, InteractiveCoreBinding, KeybindingsManager, PlainKeyHintStyler,
-    StartupShellComponent, StatusHandle,
+    ExternalEditorCommandRunner, ExternalEditorHost, FooterStateHandle, InteractiveCoreBinding,
+    KeybindingsManager, PlainKeyHintStyler, StartupShellComponent, StatusHandle,
 };
 use pi_config::{ThinkingBudgetsSettings, load_runtime_settings};
 use pi_events::{Message, Model, UserContent};
 use pi_tui::{
-    AutocompleteItem, CombinedAutocompleteProvider, ProcessTerminal, SlashCommand, Terminal, Tui,
-    fuzzy_filter,
+    AutocompleteItem, CombinedAutocompleteProvider, ProcessTerminal, RenderHandle, SlashCommand,
+    Terminal, Tui, TuiError, fuzzy_filter,
 };
 use std::{
     borrow::Cow,
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -57,7 +57,262 @@ pub struct RunCommandResult {
     pub stderr: String,
 }
 
-type InteractiveTerminalFactory = Arc<dyn Fn() -> Box<dyn Terminal> + Send + Sync>;
+type InteractiveTerminalFactory = Arc<dyn Fn() -> Box<dyn Terminal + Send> + Send + Sync>;
+type SharedInputHandler = Arc<Mutex<Box<dyn FnMut(String) + Send>>>;
+type SharedResizeHandler = Arc<Mutex<Box<dyn FnMut() + Send>>>;
+
+struct InteractiveRuntime {
+    terminal_factory: InteractiveTerminalFactory,
+    extension_editor_command: Option<String>,
+    extension_editor_runner: Option<Arc<dyn ExternalEditorCommandRunner>>,
+}
+
+impl InteractiveRuntime {
+    fn new(terminal_factory: InteractiveTerminalFactory) -> Self {
+        Self {
+            terminal_factory,
+            extension_editor_command: None,
+            extension_editor_runner: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LiveInteractiveTerminal {
+    state: Arc<Mutex<LiveInteractiveTerminalState>>,
+}
+
+struct LiveInteractiveTerminalState {
+    terminal: Box<dyn Terminal + Send>,
+    input_handler: Option<SharedInputHandler>,
+    resize_handler: Option<SharedResizeHandler>,
+    started: bool,
+}
+
+impl LiveInteractiveTerminal {
+    fn new(terminal: Box<dyn Terminal + Send>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(LiveInteractiveTerminalState {
+                terminal,
+                input_handler: None,
+                resize_handler: None,
+                started: false,
+            })),
+        }
+    }
+
+    fn external_editor_host(&self, render_handle: RenderHandle) -> LiveExternalEditorHost {
+        LiveExternalEditorHost {
+            terminal: self.clone(),
+            render_handle,
+        }
+    }
+
+    fn start_inner(state: &mut LiveInteractiveTerminalState) -> Result<(), TuiError> {
+        if state.started {
+            return Ok(());
+        }
+
+        let Some(input_handler) = state.input_handler.as_ref().cloned() else {
+            return Ok(());
+        };
+        let Some(resize_handler) = state.resize_handler.as_ref().cloned() else {
+            return Ok(());
+        };
+
+        state.terminal.start(
+            Box::new(move |data| {
+                let mut callback = input_handler
+                    .lock()
+                    .expect("interactive terminal input handler mutex poisoned");
+                (callback)(data);
+            }),
+            Box::new(move || {
+                let mut callback = resize_handler
+                    .lock()
+                    .expect("interactive terminal resize handler mutex poisoned");
+                (callback)();
+            }),
+        )?;
+        state.started = true;
+        Ok(())
+    }
+
+    fn suspend_for_external_editor(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("live interactive terminal mutex poisoned");
+        if !state.started {
+            return;
+        }
+
+        let _ = state.terminal.show_cursor();
+        if state.terminal.stop().is_ok() {
+            state.started = false;
+        }
+    }
+
+    fn resume_after_external_editor(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("live interactive terminal mutex poisoned");
+        if state.started {
+            return;
+        }
+
+        if Self::start_inner(&mut state).is_ok() && state.started {
+            let _ = state.terminal.hide_cursor();
+        }
+    }
+}
+
+impl Terminal for LiveInteractiveTerminal {
+    fn start(
+        &mut self,
+        on_input: Box<dyn FnMut(String) + Send>,
+        on_resize: Box<dyn FnMut() + Send>,
+    ) -> Result<(), TuiError> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("live interactive terminal mutex poisoned");
+        state.input_handler = Some(Arc::new(Mutex::new(on_input)));
+        state.resize_handler = Some(Arc::new(Mutex::new(on_resize)));
+        Self::start_inner(&mut state)
+    }
+
+    fn stop(&mut self) -> Result<(), TuiError> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("live interactive terminal mutex poisoned");
+        if !state.started {
+            return Ok(());
+        }
+
+        state.terminal.stop()?;
+        state.started = false;
+        Ok(())
+    }
+
+    fn drain_input(&mut self, max: Duration, idle: Duration) -> Result<(), TuiError> {
+        self.state
+            .lock()
+            .expect("live interactive terminal mutex poisoned")
+            .terminal
+            .drain_input(max, idle)
+    }
+
+    fn write(&mut self, data: &str) -> Result<(), TuiError> {
+        self.state
+            .lock()
+            .expect("live interactive terminal mutex poisoned")
+            .terminal
+            .write(data)
+    }
+
+    fn columns(&self) -> u16 {
+        self.state
+            .lock()
+            .expect("live interactive terminal mutex poisoned")
+            .terminal
+            .columns()
+    }
+
+    fn rows(&self) -> u16 {
+        self.state
+            .lock()
+            .expect("live interactive terminal mutex poisoned")
+            .terminal
+            .rows()
+    }
+
+    fn kitty_protocol_active(&self) -> bool {
+        self.state
+            .lock()
+            .expect("live interactive terminal mutex poisoned")
+            .terminal
+            .kitty_protocol_active()
+    }
+
+    fn move_by(&mut self, lines: i32) -> Result<(), TuiError> {
+        self.state
+            .lock()
+            .expect("live interactive terminal mutex poisoned")
+            .terminal
+            .move_by(lines)
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), TuiError> {
+        self.state
+            .lock()
+            .expect("live interactive terminal mutex poisoned")
+            .terminal
+            .hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> Result<(), TuiError> {
+        self.state
+            .lock()
+            .expect("live interactive terminal mutex poisoned")
+            .terminal
+            .show_cursor()
+    }
+
+    fn clear_line(&mut self) -> Result<(), TuiError> {
+        self.state
+            .lock()
+            .expect("live interactive terminal mutex poisoned")
+            .terminal
+            .clear_line()
+    }
+
+    fn clear_from_cursor(&mut self) -> Result<(), TuiError> {
+        self.state
+            .lock()
+            .expect("live interactive terminal mutex poisoned")
+            .terminal
+            .clear_from_cursor()
+    }
+
+    fn clear_screen(&mut self) -> Result<(), TuiError> {
+        self.state
+            .lock()
+            .expect("live interactive terminal mutex poisoned")
+            .terminal
+            .clear_screen()
+    }
+
+    fn set_title(&mut self, title: &str) -> Result<(), TuiError> {
+        self.state
+            .lock()
+            .expect("live interactive terminal mutex poisoned")
+            .terminal
+            .set_title(title)
+    }
+}
+
+#[derive(Clone)]
+struct LiveExternalEditorHost {
+    terminal: LiveInteractiveTerminal,
+    render_handle: RenderHandle,
+}
+
+impl ExternalEditorHost for LiveExternalEditorHost {
+    fn stop(&self) {
+        self.terminal.suspend_for_external_editor();
+    }
+
+    fn start(&self) {
+        self.terminal.resume_after_external_editor();
+    }
+
+    fn request_render(&self) {
+        self.render_handle.request_render();
+    }
+}
 
 pub async fn run_interactive_command(options: RunCommandOptions) -> i32 {
     run_interactive_command_with_terminal(options, Arc::new(|| Box::new(ProcessTerminal::new())))
@@ -67,6 +322,17 @@ pub async fn run_interactive_command(options: RunCommandOptions) -> i32 {
 pub async fn run_interactive_command_with_terminal(
     options: RunCommandOptions,
     interactive_terminal_factory: InteractiveTerminalFactory,
+) -> i32 {
+    run_interactive_command_with_runtime(
+        options,
+        InteractiveRuntime::new(interactive_terminal_factory),
+    )
+    .await
+}
+
+async fn run_interactive_command_with_runtime(
+    options: RunCommandOptions,
+    runtime: InteractiveRuntime,
 ) -> i32 {
     let RunCommandOptions {
         args,
@@ -291,8 +557,16 @@ pub async fn run_interactive_command_with_terminal(
     });
 
     let footer_provider = FooterDataProvider::new(&cwd);
-    let mut tui = Tui::new(interactive_terminal_factory());
+    let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
+    let mut tui = Tui::new(terminal.clone());
     let render_handle = tui.render_handle();
+    if let Some(command) = runtime.extension_editor_command {
+        shell.set_extension_editor_command(command);
+    }
+    if let Some(runner) = runtime.extension_editor_runner {
+        shell.set_extension_editor_command_runner_arc(runner);
+    }
+    shell.set_extension_editor_host(terminal.external_editor_host(render_handle.clone()));
     shell.bind_footer_data_provider_with_render_handle(&footer_provider, render_handle.clone());
     let binding =
         InteractiveCoreBinding::bind(created.core.clone(), &mut shell, render_handle.clone());
@@ -1101,4 +1375,344 @@ fn render_help() -> String {
 fn push_line(buffer: &mut String, line: &str) {
     buffer.push_str(line);
     buffer.push('\n');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pi_ai::{
+        FauxModelDefinition, FauxResponse, RegisterFauxProviderOptions, register_faux_provider,
+    };
+    use pi_coding_agent_core::MemoryAuthStorage;
+    use std::{
+        fs, io,
+        path::{Path, PathBuf},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+    use tokio::time::timeout;
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "pi-coding-agent-cli-{prefix}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn strip_terminal_control_sequences(output: &str) -> String {
+        let mut result = String::new();
+        let bytes = output.as_bytes();
+        let mut index = 0usize;
+
+        while index < bytes.len() {
+            if bytes[index] == 0x1b {
+                match bytes.get(index + 1).copied() {
+                    Some(b'[') => {
+                        index += 2;
+                        while index < bytes.len() {
+                            let byte = bytes[index];
+                            index += 1;
+                            if (0x40..=0x7e).contains(&byte) {
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    Some(b']') | Some(b'_') => {
+                        index += 2;
+                        while index < bytes.len() {
+                            if bytes[index] == 0x07 {
+                                index += 1;
+                                break;
+                            }
+                            if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'\\') {
+                                index += 2;
+                                break;
+                            }
+                            index += 1;
+                        }
+                        continue;
+                    }
+                    _ => {
+                        index += 1;
+                        continue;
+                    }
+                }
+            }
+
+            let character = output[index..]
+                .chars()
+                .next()
+                .expect("terminal output should contain a character");
+            index += character.len_utf8();
+
+            if character == '\r'
+                || (character.is_control() && character != '\n' && character != '\t')
+            {
+                continue;
+            }
+
+            result.push(character);
+        }
+
+        result
+    }
+
+    #[derive(Clone)]
+    struct LifecycleScriptedTerminal {
+        state: Arc<LifecycleScriptedTerminalState>,
+    }
+
+    struct LifecycleScriptedTerminalState {
+        writes: Mutex<Vec<String>>,
+        input_handler: Mutex<Option<SharedInputHandler>>,
+        resize_handler: Mutex<Option<SharedResizeHandler>>,
+        active: AtomicBool,
+        start_count: AtomicUsize,
+        stop_count: AtomicUsize,
+    }
+
+    impl LifecycleScriptedTerminal {
+        fn new(script: Vec<(Duration, String)>) -> Self {
+            let state = Arc::new(LifecycleScriptedTerminalState {
+                writes: Mutex::new(Vec::new()),
+                input_handler: Mutex::new(None),
+                resize_handler: Mutex::new(None),
+                active: AtomicBool::new(false),
+                start_count: AtomicUsize::new(0),
+                stop_count: AtomicUsize::new(0),
+            });
+
+            let script_state = Arc::clone(&state);
+            thread::spawn(move || {
+                for (delay, data) in script {
+                    thread::sleep(delay);
+                    loop {
+                        if script_state.active.load(Ordering::Relaxed) {
+                            let handler = script_state
+                                .input_handler
+                                .lock()
+                                .expect("scripted terminal input handler mutex poisoned")
+                                .clone();
+                            if let Some(handler) = handler {
+                                let mut callback = handler
+                                    .lock()
+                                    .expect("scripted terminal input callback mutex poisoned");
+                                (callback)(data.clone());
+                                break;
+                            }
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            });
+
+            Self { state }
+        }
+
+        fn output(&self) -> String {
+            self.state
+                .writes
+                .lock()
+                .expect("scripted terminal writes mutex poisoned")
+                .join("")
+        }
+
+        fn start_count(&self) -> usize {
+            self.state.start_count.load(Ordering::Relaxed)
+        }
+
+        fn stop_count(&self) -> usize {
+            self.state.stop_count.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Terminal for LifecycleScriptedTerminal {
+        fn start(
+            &mut self,
+            on_input: Box<dyn FnMut(String) + Send>,
+            on_resize: Box<dyn FnMut() + Send>,
+        ) -> Result<(), TuiError> {
+            *self
+                .state
+                .input_handler
+                .lock()
+                .expect("scripted terminal input handler mutex poisoned") =
+                Some(Arc::new(Mutex::new(on_input)));
+            *self
+                .state
+                .resize_handler
+                .lock()
+                .expect("scripted terminal resize handler mutex poisoned") =
+                Some(Arc::new(Mutex::new(on_resize)));
+            self.state.active.store(true, Ordering::Relaxed);
+            self.state.start_count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn stop(&mut self) -> Result<(), TuiError> {
+            self.state.active.store(false, Ordering::Relaxed);
+            self.state.stop_count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn drain_input(&mut self, _max: Duration, _idle: Duration) -> Result<(), TuiError> {
+            Ok(())
+        }
+
+        fn write(&mut self, data: &str) -> Result<(), TuiError> {
+            self.state
+                .writes
+                .lock()
+                .expect("scripted terminal writes mutex poisoned")
+                .push(data.to_owned());
+            Ok(())
+        }
+
+        fn columns(&self) -> u16 {
+            100
+        }
+
+        fn rows(&self) -> u16 {
+            12
+        }
+
+        fn kitty_protocol_active(&self) -> bool {
+            false
+        }
+
+        fn move_by(&mut self, _lines: i32) -> Result<(), TuiError> {
+            Ok(())
+        }
+
+        fn hide_cursor(&mut self) -> Result<(), TuiError> {
+            Ok(())
+        }
+
+        fn show_cursor(&mut self) -> Result<(), TuiError> {
+            Ok(())
+        }
+
+        fn clear_line(&mut self) -> Result<(), TuiError> {
+            Ok(())
+        }
+
+        fn clear_from_cursor(&mut self) -> Result<(), TuiError> {
+            Ok(())
+        }
+
+        fn clear_screen(&mut self) -> Result<(), TuiError> {
+            Ok(())
+        }
+
+        fn set_title(&mut self, _title: &str) -> Result<(), TuiError> {
+            Ok(())
+        }
+    }
+
+    struct ReplacingExternalEditorRunner {
+        replacement: String,
+    }
+
+    impl ReplacingExternalEditorRunner {
+        fn new(replacement: &str) -> Self {
+            Self {
+                replacement: replacement.to_owned(),
+            }
+        }
+    }
+
+    impl ExternalEditorCommandRunner for ReplacingExternalEditorRunner {
+        fn run(&self, _command: &str, file_path: &Path) -> io::Result<Option<i32>> {
+            fs::write(file_path, &self.replacement)?;
+            Ok(Some(0))
+        }
+    }
+
+    #[tokio::test]
+    async fn interactive_runtime_external_editor_host_stops_and_restarts_live_terminal() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "interactive-external-editor-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "interactive-external-editor-faux-1".into(),
+                name: Some("Interactive External Editor Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        faux.set_responses(vec![FauxResponse::text("Edited prompt received")]);
+        let model = faux
+            .get_model(Some("interactive-external-editor-faux-1"))
+            .expect("expected faux model");
+
+        let terminal = LifecycleScriptedTerminal::new(vec![
+            (Duration::from_millis(5), String::from("h")),
+            (Duration::from_millis(5), String::from("i")),
+            (Duration::from_millis(5), String::from("\x07")),
+            (Duration::from_millis(25), String::from("\x07")),
+            (Duration::from_millis(25), String::from("\r")),
+            (Duration::from_millis(25), String::from("\r")),
+            (Duration::from_millis(80), String::from("\x04")),
+        ]);
+        let inspector = terminal.clone();
+
+        let exit_code = timeout(
+            Duration::from_secs(3),
+            run_interactive_command_with_runtime(
+                RunCommandOptions {
+                    args: vec![
+                        String::from("--provider"),
+                        model.provider.clone(),
+                        String::from("--model"),
+                        model.id.clone(),
+                    ],
+                    stdin_is_tty: true,
+                    stdin_content: None,
+                    auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                        model.provider.as_str(),
+                        "token",
+                    )])),
+                    built_in_models: vec![model],
+                    models_json_path: None,
+                    agent_dir: None,
+                    cwd: unique_temp_dir("runner-interactive-external-editor"),
+                    default_system_prompt: String::new(),
+                    version: String::from("0.1.0"),
+                    stream_options: StreamOptions::default(),
+                },
+                InteractiveRuntime {
+                    terminal_factory: Arc::new(move || Box::new(terminal.clone())),
+                    extension_editor_command: Some(String::from("mock-editor --wait")),
+                    extension_editor_runner: Some(Arc::new(ReplacingExternalEditorRunner::new(
+                        "edited from external\n",
+                    ))),
+                },
+            ),
+        )
+        .await
+        .expect("interactive runner should complete");
+
+        assert_eq!(exit_code, 0);
+        let output = strip_terminal_control_sequences(&inspector.output());
+        assert!(output.contains("Edit message"), "output: {output}");
+        assert!(output.contains("edited from external"), "output: {output}");
+        assert!(
+            output.contains("Edited prompt received"),
+            "output: {output}"
+        );
+        assert_eq!(inspector.start_count(), 2, "output: {output}");
+        assert_eq!(inspector.stop_count(), 2, "output: {output}");
+
+        faux.unregister();
+    }
 }

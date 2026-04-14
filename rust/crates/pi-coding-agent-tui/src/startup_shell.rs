@@ -795,7 +795,14 @@ impl StartupShellComponent {
     where
         R: ExternalEditorCommandRunner + 'static,
     {
-        self.extension_editor_runner = Some(Arc::new(runner));
+        self.set_extension_editor_command_runner_arc(Arc::new(runner));
+    }
+
+    pub fn set_extension_editor_command_runner_arc(
+        &mut self,
+        runner: Arc<dyn ExternalEditorCommandRunner>,
+    ) {
+        self.extension_editor_runner = Some(runner);
     }
 
     pub fn clear_extension_editor_command_runner(&mut self) {
@@ -806,7 +813,11 @@ impl StartupShellComponent {
     where
         H: ExternalEditorHost + 'static,
     {
-        self.extension_editor_host = Some(Arc::new(host));
+        self.set_extension_editor_host_arc(Arc::new(host));
+    }
+
+    pub fn set_extension_editor_host_arc(&mut self, host: Arc<dyn ExternalEditorHost>) {
+        self.extension_editor_host = Some(host);
     }
 
     pub fn clear_extension_editor_host(&mut self) {
