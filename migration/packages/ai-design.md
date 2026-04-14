@@ -163,6 +163,12 @@ Validation landed in:
 
 This keeps the Anthropic-to-OpenAI Codex replay path frozen at the request-shape level: Anthropic thinking is downgraded to plain text, tool results remain paired, and no OpenAI reasoning replay items are emitted across the provider boundary. The same regression file also covers the reverse OpenAI Responses-to-Anthropic request shape.
 
+OpenAI Completions foreign pipe-separated tool-call IDs are now also pinned in Rust with a fixture-driven regression derived from the TypeScript issue #1022 path. The converter drops the opaque item id, keeps the normalized call id, and still inserts the synthetic tool result before the next user message.
+
+Validation landed in:
+- `rust/crates/pi-ai/tests/openai_completions_tool_call_id.rs`
+- `rust/crates/pi-ai/tests/fixtures/openai_completions_foreign_pipe_tool_call.json`
+
 Partial JSON tool-call streaming is now also validated in Rust.
 Coverage now exists for:
 - partial string fragments inside tool call arguments
