@@ -671,7 +671,6 @@ Remaining likely gaps:
 - full total-token accounting parity
 - full stream/test matrix parity
 - lazy-loading semantics are TS-specific, but equivalent “do not over-initialize provider clients” may still be desirable in Rust
-- Anthropic Claude Code OAuth tool-name round trips should be pinned with a dedicated TS-derived fixture slice
 
 5. TS validation semantics differ from current Rust layering
 - TS validates tools inside `pi-ai` with AJV/TypeBox helpers
@@ -735,15 +734,13 @@ For Rust migration, the most authoritative TS source-of-truth files are:
 
 ## Recommended next step
 
-Proceed with the next Step 3 compatibility slice for `packages/ai`:
-- pin Anthropic Claude Code OAuth tool-name round-trip behavior from `anthropic-tool-name-normalization.test.ts`
+Proceed with the next unresolved Step 3 compatibility slice for `packages/ai`:
 - keep using TS-derived fixtures where possible instead of broad rewrites
-- after that, choose the next small in-scope fixture target before moving to `packages/agent`
+- pick the smallest remaining in-scope fixture target before moving to `packages/agent`
 
 ## Suggested fixture candidates for Step 3
 - OpenAI Codex SSE stream that must terminate on `response.completed` even if body stays open
 - OpenAI Responses foreign tool-call ID normalization
-- Anthropic OAuth tool-name normalization round trips
 - orphaned tool-call synthetic tool-result insertion
 - OpenAI Responses tool result image routing
 - OpenAI Completions tool-result image rerouting

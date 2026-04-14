@@ -226,3 +226,85 @@ async fn surfaces_explicit_error_events() {
         other => panic!("expected error event, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn oauth_tool_names_round_trip_and_passthrough_in_stream() {
+    for (tool_name, stream_tool_name) in [
+        ("todowrite", "TodoWrite"),
+        ("read", "Read"),
+        ("find", "find"),
+        ("my_custom_tool", "my_custom_tool"),
+    ] {
+        let collected = stream_anthropic_sse_events(
+            model("anthropic"),
+            vec![
+                AnthropicStreamEnvelope {
+                    event_type: "message_start".into(),
+                    data: serde_json::from_value(json!({
+                        "message": {
+                            "id": "msg_1",
+                            "usage": {
+                                "input_tokens": 10,
+                                "output_tokens": 0,
+                                "cache_read_input_tokens": 0,
+                                "cache_creation_input_tokens": 0
+                            }
+                        }
+                    }))
+                    .unwrap(),
+                },
+                AnthropicStreamEnvelope {
+                    event_type: "content_block_start".into(),
+                    data: serde_json::from_value(json!({
+                        "index": 0,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": "tool_1",
+                            "name": stream_tool_name,
+                            "input": {}
+                        }
+                    }))
+                    .unwrap(),
+                },
+                AnthropicStreamEnvelope {
+                    event_type: "content_block_stop".into(),
+                    data: serde_json::from_value(json!({ "index": 0 })).unwrap(),
+                },
+                AnthropicStreamEnvelope {
+                    event_type: "message_delta".into(),
+                    data: serde_json::from_value(json!({
+                        "delta": { "stop_reason": "tool_use" },
+                        "usage": { "output_tokens": 1 }
+                    }))
+                    .unwrap(),
+                },
+            ],
+            true,
+            vec![ToolDefinition {
+                name: tool_name.into(),
+                description: format!("{tool_name} tool"),
+                parameters: json!({ "type": "object", "properties": {} }),
+            }],
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let tool_call_name = collected.iter().find_map(|event| match event.as_ref().unwrap() {
+            AssistantEvent::ToolCallEnd { tool_call, .. } => match tool_call {
+                AssistantContent::ToolCall { name, .. } => Some(name.clone()),
+                _ => None,
+            },
+            _ => None,
+        });
+
+        assert_eq!(tool_call_name.as_deref(), Some(tool_name));
+
+        match collected.last().unwrap().as_ref().unwrap() {
+            AssistantEvent::Done { reason, message } => {
+                assert_eq!(*reason, StopReason::ToolUse);
+                assert_eq!(message.response_id.as_deref(), Some("msg_1"));
+            }
+            other => panic!("expected done event, got {other:?}"),
+        }
+    }
+}

@@ -150,8 +150,21 @@ Near-term validation order:
 
 ## Current milestone decision
 
-Use Anthropic Claude Code OAuth tool-name round trips as the next vertical slice because:
-- the user-requested Rust scope explicitly includes Claude Code OAuth behavior on the Anthropic path
-- the TypeScript suite already specifies outbound and inbound casing semantics
-- the behavior is observable in request payloads and emitted tool call names
-- it is small enough to validate without broad package churn
+The Anthropic Claude Code OAuth tool-name slice is now validated in Rust.
+Coverage now exists for:
+- outbound Claude Code canonical casing on matching tools (`todowrite` -> `TodoWrite`, `read` -> `Read`)
+- passthrough of non-Claude tools (`find`, `my_custom_tool`)
+- inbound streamed `tool_use` events round-tripping back to the original tool names on the OAuth path
+
+Validation landed in:
+- `rust/crates/pi-ai/tests/anthropic_messages_params.rs`
+- `rust/crates/pi-ai/tests/anthropic_messages_stream.rs`
+
+## Suggested fixture candidates for the next slice
+- OpenAI Codex SSE stream that must terminate on `response.completed` even if body stays open
+- OpenAI Responses foreign tool-call ID normalization
+- orphaned tool-call synthetic tool-result insertion
+- OpenAI Responses tool result image routing
+- OpenAI Completions tool-result image rerouting
+- partial JSON tool-call streaming examples
+- Unicode surrogate sanitization examples
