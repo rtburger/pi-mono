@@ -1,10 +1,10 @@
 use crate::{
     AssistantMessageComponent, BuiltInHeaderComponent, ClipboardImageSource, CustomEditor,
-    DEFAULT_HIDDEN_THINKING_LABEL, ExtensionEditorComponent, FooterComponent, FooterState,
-    FooterStateHandle, KeyHintStyler, KeybindingsManager, ModelSelectorComponent,
-    PendingMessagesComponent, StartupHeaderStyler, ToolExecutionComponent, ToolExecutionOptions,
-    ToolExecutionResult, TranscriptComponent, UserMessageComponent,
-    paste_clipboard_image_into_shell,
+    DEFAULT_HIDDEN_THINKING_LABEL, ExtensionEditorComponent, ExternalEditorCommandRunner,
+    ExternalEditorHost, FooterComponent, FooterState, FooterStateHandle, KeyHintStyler,
+    KeybindingsManager, ModelSelectorComponent, PendingMessagesComponent, StartupHeaderStyler,
+    ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult, TranscriptComponent,
+    UserMessageComponent, paste_clipboard_image_into_shell,
 };
 use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
 use pi_events::{AssistantMessage, Model, UserContent};
@@ -240,6 +240,9 @@ pub struct StartupShellComponent {
     extension_editor_events: Arc<Mutex<VecDeque<ExtensionEditorEvent>>>,
     extension_editor_on_submit: Option<SubmitCallback>,
     extension_editor_on_cancel: Option<ActionCallback>,
+    extension_editor_command: Option<String>,
+    extension_editor_runner: Option<Arc<dyn ExternalEditorCommandRunner>>,
+    extension_editor_host: Option<Arc<dyn ExternalEditorHost>>,
     model_selector: Option<ModelSelectorComponent>,
     model_selector_events: Arc<Mutex<VecDeque<ModelSelectorEvent>>>,
     model_selector_on_select: Option<ModelSelectorSelectCallback>,
@@ -322,6 +325,9 @@ impl StartupShellComponent {
             extension_editor_events: Arc::new(Mutex::new(VecDeque::new())),
             extension_editor_on_submit: None,
             extension_editor_on_cancel: None,
+            extension_editor_command: None,
+            extension_editor_runner: None,
+            extension_editor_host: None,
             model_selector: None,
             model_selector_events: Arc::new(Mutex::new(VecDeque::new())),
             model_selector_on_select: None,
@@ -777,6 +783,36 @@ impl StartupShellComponent {
         self.input.clear_autocomplete_provider();
     }
 
+    pub fn set_extension_editor_command(&mut self, command: impl Into<String>) {
+        self.extension_editor_command = Some(command.into());
+    }
+
+    pub fn clear_extension_editor_command(&mut self) {
+        self.extension_editor_command = None;
+    }
+
+    pub fn set_extension_editor_command_runner<R>(&mut self, runner: R)
+    where
+        R: ExternalEditorCommandRunner + 'static,
+    {
+        self.extension_editor_runner = Some(Arc::new(runner));
+    }
+
+    pub fn clear_extension_editor_command_runner(&mut self) {
+        self.extension_editor_runner = None;
+    }
+
+    pub fn set_extension_editor_host<H>(&mut self, host: H)
+    where
+        H: ExternalEditorHost + 'static,
+    {
+        self.extension_editor_host = Some(Arc::new(host));
+    }
+
+    pub fn clear_extension_editor_host(&mut self) {
+        self.extension_editor_host = None;
+    }
+
     pub fn show_extension_editor<F, G>(
         &mut self,
         title: impl Into<String>,
@@ -791,6 +827,15 @@ impl StartupShellComponent {
         self.hide_extension_editor();
 
         let mut editor = ExtensionEditorComponent::new(&self.keybindings, title, prefill);
+        if let Some(command) = &self.extension_editor_command {
+            editor.set_external_editor_command(command.clone());
+        }
+        if let Some(runner) = &self.extension_editor_runner {
+            editor.set_external_editor_command_runner_arc(Arc::clone(runner));
+        }
+        if let Some(host) = &self.extension_editor_host {
+            editor.set_external_editor_host_arc(Arc::clone(host));
+        }
         let events = Arc::clone(&self.extension_editor_events);
         editor.set_on_submit(move |value| {
             events

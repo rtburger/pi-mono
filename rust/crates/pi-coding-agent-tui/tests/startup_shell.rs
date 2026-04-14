@@ -1,7 +1,7 @@
 use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
 use pi_coding_agent_tui::{
-    ClipboardImage, ClipboardImageSource, FooterState, KeyId, KeybindingsManager,
-    PlainKeyHintStyler, StartupShellComponent,
+    ClipboardImage, ClipboardImageSource, ExternalEditorCommandRunner, ExternalEditorHost,
+    FooterState, KeyId, KeybindingsManager, PlainKeyHintStyler, StartupShellComponent,
 };
 use pi_events::Model;
 use pi_tui::{
@@ -10,7 +10,7 @@ use pi_tui::{
 };
 use std::{
     collections::BTreeMap,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -66,6 +66,65 @@ struct NoopTerminal;
 #[derive(Clone)]
 struct RecordingTerminal {
     writes: Arc<Mutex<Vec<String>>>,
+}
+
+#[derive(Clone, Default)]
+struct RecordingExternalEditorHost {
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+impl ExternalEditorHost for RecordingExternalEditorHost {
+    fn stop(&self) {
+        self.events
+            .lock()
+            .expect("external editor host events mutex poisoned")
+            .push(String::from("stop"));
+    }
+
+    fn start(&self) {
+        self.events
+            .lock()
+            .expect("external editor host events mutex poisoned")
+            .push(String::from("start"));
+    }
+
+    fn request_render(&self) {
+        self.events
+            .lock()
+            .expect("external editor host events mutex poisoned")
+            .push(String::from("request_render"));
+    }
+}
+
+#[derive(Clone, Default)]
+struct RecordingExternalEditorRunner {
+    calls: Arc<Mutex<Vec<(String, String)>>>,
+    replacement: Option<String>,
+    exit_code: Option<i32>,
+}
+
+impl RecordingExternalEditorRunner {
+    fn with_result(replacement: Option<&str>, exit_code: Option<i32>) -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            replacement: replacement.map(str::to_owned),
+            exit_code,
+        }
+    }
+}
+
+impl ExternalEditorCommandRunner for RecordingExternalEditorRunner {
+    fn run(&self, command: &str, file_path: &Path) -> io::Result<Option<i32>> {
+        let current_text = fs::read_to_string(file_path)?;
+        self.calls
+            .lock()
+            .expect("external editor runner calls mutex poisoned")
+            .push((command.to_owned(), current_text));
+        if let Some(replacement) = &self.replacement {
+            fs::write(file_path, replacement)?;
+        }
+        Ok(self.exit_code)
+    }
 }
 
 impl RecordingTerminal {
@@ -949,6 +1008,99 @@ fn startup_shell_can_cancel_extension_editor_and_restore_hidden_prompt() {
     assert_eq!(*cancelled.lock().expect("cancelled mutex poisoned"), 1);
     assert!(!shell.is_showing_extension_editor());
     assert_eq!(shell.input_value(), "hidden prompt");
+}
+
+#[test]
+fn startup_shell_app_editor_external_opens_prompt_extension_editor_and_restores_edited_prompt() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    let host = RecordingExternalEditorHost::default();
+    let host_events = Arc::clone(&host.events);
+    let runner =
+        RecordingExternalEditorRunner::with_result(Some("edited from external\n"), Some(0));
+    let runner_calls = Arc::clone(&runner.calls);
+    shell.set_extension_editor_host(host);
+    shell.set_extension_editor_command_runner(runner);
+    shell.set_extension_editor_command("mock-editor --wait");
+    shell.set_input_value("draft prompt");
+
+    shell.handle_input("\x07");
+
+    assert!(shell.is_showing_extension_editor());
+    let lines = shell.render(60);
+    assert!(lines.iter().any(|line| line.contains("Edit message")));
+    assert!(lines.iter().any(|line| line.contains("draft prompt")));
+
+    shell.handle_input("\x07");
+
+    assert_eq!(
+        runner_calls
+            .lock()
+            .expect("external editor runner calls mutex poisoned")
+            .as_slice(),
+        &[(
+            String::from("mock-editor --wait"),
+            String::from("draft prompt")
+        )]
+    );
+    assert_eq!(
+        host_events
+            .lock()
+            .expect("external editor host events mutex poisoned")
+            .as_slice(),
+        [
+            String::from("stop"),
+            String::from("start"),
+            String::from("request_render")
+        ]
+    );
+
+    shell.handle_input("\r");
+
+    assert!(!shell.is_showing_extension_editor());
+    assert_eq!(shell.input_value(), "edited from external");
+}
+
+#[test]
+fn startup_shell_registered_external_editor_action_overrides_default_prompt_editor() {
+    let external_calls = Arc::new(Mutex::new(0usize));
+    let external_calls_for_handler = Arc::clone(&external_calls);
+
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let mut shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+    shell.set_input_value("draft prompt");
+    shell.on_action("app.editor.external", move || {
+        *external_calls_for_handler
+            .lock()
+            .expect("external editor action mutex poisoned") += 1;
+    });
+
+    shell.handle_input("\x07");
+
+    assert_eq!(
+        *external_calls
+            .lock()
+            .expect("external editor action mutex poisoned"),
+        1
+    );
+    assert!(!shell.is_showing_extension_editor());
+    assert_eq!(shell.input_value(), "draft prompt");
 }
 
 #[test]

@@ -124,7 +124,14 @@ impl ExtensionEditorComponent {
     where
         R: ExternalEditorCommandRunner + 'static,
     {
-        self.external_editor_runner = Arc::new(runner);
+        self.set_external_editor_command_runner_arc(Arc::new(runner));
+    }
+
+    pub fn set_external_editor_command_runner_arc(
+        &mut self,
+        runner: Arc<dyn ExternalEditorCommandRunner>,
+    ) {
+        self.external_editor_runner = runner;
     }
 
     pub fn clear_external_editor_command_runner(&mut self) {
@@ -135,7 +142,11 @@ impl ExtensionEditorComponent {
     where
         H: ExternalEditorHost + 'static,
     {
-        self.external_editor_host = Some(Arc::new(host));
+        self.set_external_editor_host_arc(Arc::new(host));
+    }
+
+    pub fn set_external_editor_host_arc(&mut self, host: Arc<dyn ExternalEditorHost>) {
+        self.external_editor_host = Some(host);
     }
 
     pub fn clear_external_editor_host(&mut self) {
