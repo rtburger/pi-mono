@@ -75,6 +75,7 @@ pub struct RuntimeSettings {
     pub thinking_budgets: ThinkingBudgetsSettings,
     pub editor_padding_x: usize,
     pub autocomplete_max_visible: usize,
+    pub enabled_models: Option<Vec<String>>,
 }
 
 impl Default for RuntimeSettings {
@@ -85,6 +86,7 @@ impl Default for RuntimeSettings {
             thinking_budgets: ThinkingBudgetsSettings::default(),
             editor_padding_x: 0,
             autocomplete_max_visible: 5,
+            enabled_models: None,
         }
     }
 }
@@ -106,6 +108,7 @@ struct RawSettings {
     thinking_budgets: RawThinkingBudgetsSettings,
     editor_padding_x: Option<f64>,
     autocomplete_max_visible: Option<f64>,
+    enabled_models: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -194,6 +197,10 @@ fn apply_settings_file(loaded: &mut LoadedRuntimeSettings, scope: SettingsScope,
     {
         loaded.settings.autocomplete_max_visible =
             autocomplete_max_visible.floor().clamp(3.0, 20.0) as usize;
+    }
+
+    if let Some(enabled_models) = parsed.enabled_models {
+        loaded.settings.enabled_models = Some(enabled_models);
     }
 }
 

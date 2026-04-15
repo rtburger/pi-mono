@@ -32,19 +32,21 @@ use pi_coding_agent_core::{
 use pi_coding_agent_tui::{
     CustomMessageComponent, DEFAULT_APP_KEYBINDINGS, ExternalEditorCommandRunner,
     ExternalEditorHost, FooterStateHandle, InteractiveCoreBinding, KeybindingsManager,
-    PlainKeyHintStyler, StartupShellComponent, StatusHandle,
+    PlainKeyHintStyler, StartupShellComponent, StatusHandle, key_hint,
 };
 use pi_config::{LoadedRuntimeSettings, ThinkingBudgetsSettings, load_runtime_settings};
 use pi_events::{AssistantContent, Message, Model, UserContent};
 use pi_tui::{
-    AutocompleteItem, CombinedAutocompleteProvider, Component, ProcessTerminal, RenderHandle,
-    SlashCommand, Terminal, Tui, TuiError, fuzzy_filter, matches_key, truncate_to_width,
+    AutocompleteItem, CombinedAutocompleteProvider, Component, Input, ProcessTerminal,
+    RenderHandle, SlashCommand, Terminal, Tui, TuiError, fuzzy_filter, matches_key,
+    truncate_to_width,
 };
 use std::{
     borrow::Cow,
     cell::Cell,
     collections::BTreeMap,
     env, fs,
+    ops::Deref,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -54,6 +56,8 @@ use std::{
     time::Duration,
 };
 use tokio::time::sleep;
+
+use serde_json::Value;
 
 const NO_MODELS_ENV_HINT: &str = "  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.";
 const API_KEY_MODEL_REQUIREMENT: &str =
@@ -120,6 +124,9 @@ enum InteractiveTransitionRequest {
     ResumePicker,
     ForkPicker,
     TreePicker,
+    SettingsPicker,
+    ScopedModelsPicker { initial_search: Option<String> },
+    Reload,
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +174,8 @@ struct InteractiveIterationOptions {
     prefill_input: Option<String>,
     initial_status_message: Option<String>,
     bootstrap_defaults: Option<BootstrapDefaults>,
+    scoped_models_override: Option<Vec<ScopedModel>>,
+    runtime_settings_override: Option<LoadedRuntimeSettings>,
 }
 
 struct InteractiveIterationOutcome {
@@ -182,6 +191,9 @@ struct InteractiveSessionContext {
     cwd: String,
     model: Model,
     thinking_level: ThinkingLevel,
+    scoped_models: Vec<ScopedModel>,
+    available_models: Vec<Model>,
+    runtime_settings: LoadedRuntimeSettings,
 }
 
 struct InteractiveTransitionPlan {
@@ -190,6 +202,8 @@ struct InteractiveTransitionPlan {
     prefill_input: Option<String>,
     initial_status_message: Option<String>,
     bootstrap_defaults: Option<BootstrapDefaults>,
+    scoped_models: Vec<ScopedModel>,
+    runtime_settings: LoadedRuntimeSettings,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,6 +211,27 @@ struct ForkMessageCandidate {
     entry_id: String,
     parent_id: Option<String>,
     text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SettingsPickerSelection {
+    auto_compact: bool,
+    auto_resize_images: bool,
+    block_images: bool,
+    editor_padding_x: usize,
+    autocomplete_max_visible: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PersistedScopedModels {
+    AllEnabled,
+    Explicit(Vec<String>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScopedModelsPickerSelection {
+    enabled_ids: Option<Vec<String>>,
+    persisted: Option<PersistedScopedModels>,
 }
 
 fn create_session_support(
@@ -832,6 +867,8 @@ async fn run_interactive_command_with_runtime(
     let mut prefill_input = None;
     let mut initial_status_message = None;
     let mut bootstrap_defaults = None;
+    let mut scoped_models_override = None;
+    let mut runtime_settings_override = None;
     let initial_show_resume_picker = parsed.resume
         && !parsed.no_session
         && parsed.session.is_none()
@@ -868,6 +905,8 @@ async fn run_interactive_command_with_runtime(
             prefill_input: prefill_input.take(),
             initial_status_message: initial_status_message.take(),
             bootstrap_defaults: bootstrap_defaults.take(),
+            scoped_models_override: scoped_models_override.take(),
+            runtime_settings_override: runtime_settings_override.take(),
         })
         .await;
 
@@ -896,6 +935,8 @@ async fn run_interactive_command_with_runtime(
         prefill_input = plan.prefill_input;
         initial_status_message = plan.initial_status_message;
         bootstrap_defaults = plan.bootstrap_defaults;
+        scoped_models_override = Some(plan.scoped_models);
+        runtime_settings_override = Some(plan.runtime_settings);
         use_initial_input = false;
     }
 }
@@ -921,16 +962,22 @@ async fn run_interactive_iteration(
         prefill_input,
         initial_status_message,
         bootstrap_defaults,
+        scoped_models_override,
+        runtime_settings_override,
     } = options;
 
-    let runtime_settings = agent_dir
-        .as_deref()
-        .map(|agent_dir| load_runtime_settings(&cwd, agent_dir))
-        .unwrap_or_default();
+    let runtime_settings = runtime_settings_override.unwrap_or_else(|| {
+        agent_dir
+            .as_deref()
+            .map(|agent_dir| load_runtime_settings(&cwd, agent_dir))
+            .unwrap_or_default()
+    });
     let shared_runtime_settings = Arc::new(Mutex::new(runtime_settings.clone()));
     eprint!("{}", render_settings_warnings(&runtime_settings.warnings));
 
-    let scoped_models = if let Some(patterns) = parsed.models.as_ref() {
+    let scoped_models = if let Some(scoped_models_override) = scoped_models_override {
+        scoped_models_override
+    } else if let Some(patterns) = parsed.models.as_ref() {
         let registry = ModelRegistry::new(
             auth_source.clone(),
             built_in_models.clone(),
@@ -939,6 +986,19 @@ async fn run_interactive_iteration(
         let resolved = resolve_model_scope(patterns, &registry.get_available());
         eprint!("{}", render_scope_warnings(&resolved.warnings));
         resolved.scoped_models
+    } else if let Some(patterns) = runtime_settings.settings.enabled_models.as_ref() {
+        if patterns.is_empty() {
+            Vec::new()
+        } else {
+            let registry = ModelRegistry::new(
+                auth_source.clone(),
+                built_in_models.clone(),
+                models_json_path.clone(),
+            );
+            let resolved = resolve_model_scope(patterns, &registry.get_available());
+            eprint!("{}", render_scope_warnings(&resolved.warnings));
+            resolved.scoped_models
+        }
     } else {
         Vec::new()
     };
@@ -1225,8 +1285,8 @@ async fn run_interactive_iteration(
         &mut shell,
         created.core.clone(),
         created.core.model_registry(),
-        interactive_scoped_models,
-        interactive_session_manager,
+        interactive_scoped_models.clone(),
+        interactive_session_manager.clone(),
         slash_command_context,
         status_handle,
         footer_state_handle,
@@ -1271,6 +1331,7 @@ async fn run_interactive_iteration(
         .expect("interactive transition request mutex poisoned")
         .take();
     let final_state = created.core.state();
+    let available_models = created.core.model_registry().get_available();
     let _ = tui
         .terminal_mut()
         .drain_input(Duration::from_millis(1000), Duration::from_millis(50));
@@ -1279,9 +1340,17 @@ async fn run_interactive_iteration(
     drop(binding);
     drop(tui);
     drop(created);
+    drop(interactive_session_manager);
 
     let session_context = if transition.is_some() {
-        build_interactive_session_context(session_support, &final_state)
+        build_interactive_session_context(
+            session_support,
+            &final_state,
+            &cwd,
+            interactive_scoped_models,
+            available_models,
+            runtime_settings,
+        )
     } else {
         None
     };
@@ -1316,25 +1385,46 @@ fn sanitize_interactive_follow_up_args(parsed: &Args) -> Args {
 fn build_interactive_session_context(
     session_support: Option<SessionSupport>,
     state: &pi_agent::AgentState,
+    current_cwd: &Path,
+    scoped_models: Vec<ScopedModel>,
+    available_models: Vec<Model>,
+    runtime_settings: LoadedRuntimeSettings,
 ) -> Option<InteractiveSessionContext> {
-    let session_support = session_support?;
-    let session_file;
-    let session_dir;
-    let cwd;
-    {
-        let session_manager = session_support
-            .manager
-            .lock()
-            .expect("session manager mutex poisoned");
-        session_file = session_manager.get_session_file().map(str::to_owned);
-        session_dir = (!session_manager.get_session_dir().is_empty())
-            .then(|| session_manager.get_session_dir().to_owned());
-        cwd = session_manager.get_cwd().to_owned();
-    }
+    let snapshot_cwd = current_cwd.to_string_lossy().into_owned();
 
-    let manager = Arc::try_unwrap(session_support.manager)
-        .ok()
-        .and_then(|manager| manager.into_inner().ok());
+    let (manager, session_file, session_dir, cwd) = if let Some(session_support) = session_support {
+        let session_file;
+        let session_dir;
+        let cwd;
+        {
+            let session_manager = session_support
+                .manager
+                .lock()
+                .expect("session manager mutex poisoned");
+            session_file = session_manager.get_session_file().map(str::to_owned);
+            session_dir = (!session_manager.get_session_dir().is_empty())
+                .then(|| session_manager.get_session_dir().to_owned());
+            cwd = session_manager.get_cwd().to_owned();
+        }
+
+        let manager = Arc::try_unwrap(session_support.manager)
+            .ok()
+            .and_then(|manager| manager.into_inner().ok())
+            .or_else(|| {
+                session_file
+                    .is_none()
+                    .then(|| snapshot_session_manager(&cwd, state))
+            });
+
+        (manager, session_file, session_dir, cwd)
+    } else {
+        (
+            Some(snapshot_session_manager(&snapshot_cwd, state)),
+            None,
+            None,
+            snapshot_cwd,
+        )
+    };
 
     Some(InteractiveSessionContext {
         manager,
@@ -1343,20 +1433,47 @@ fn build_interactive_session_context(
         cwd,
         model: state.model.clone(),
         thinking_level: state.thinking_level,
+        scoped_models,
+        available_models,
+        runtime_settings,
     })
 }
 
+fn snapshot_session_manager(cwd: &str, state: &pi_agent::AgentState) -> SessionManager {
+    let mut manager = SessionManager::in_memory(cwd);
+    let _ = manager.append_model_change(state.model.provider.clone(), state.model.id.clone());
+    let _ = manager.append_thinking_level_change(thinking_level_label(state.thinking_level));
+    for message in &state.messages {
+        let _ = manager.append_message(message.clone());
+    }
+    manager
+}
+
 fn restore_session_manager(context: InteractiveSessionContext) -> Result<SessionManager, String> {
-    if let Some(manager) = context.manager {
+    restore_session_manager_from_parts(
+        context.manager,
+        context.session_file,
+        context.session_dir,
+        &context.cwd,
+    )
+}
+
+fn restore_session_manager_from_parts(
+    manager: Option<SessionManager>,
+    session_file: Option<String>,
+    session_dir: Option<String>,
+    cwd: &str,
+) -> Result<SessionManager, String> {
+    if let Some(manager) = manager {
         return Ok(manager);
     }
 
-    if let Some(session_file) = context.session_file {
-        return SessionManager::open(&session_file, context.session_dir.as_deref(), None)
+    if let Some(session_file) = session_file {
+        return SessionManager::open(&session_file, session_dir.as_deref(), None)
             .map_err(|error| error.to_string());
     }
 
-    Ok(SessionManager::in_memory(&context.cwd))
+    Ok(SessionManager::in_memory(cwd))
 }
 
 async fn resolve_interactive_transition(
@@ -1371,6 +1488,14 @@ async fn resolve_interactive_transition(
             let defaults = session_context.as_ref().map(|context| {
                 BootstrapDefaults::from_model(&context.model, context.thinking_level)
             });
+            let scoped_models = session_context
+                .as_ref()
+                .map(|context| context.scoped_models.clone())
+                .unwrap_or_default();
+            let runtime_settings = session_context
+                .as_ref()
+                .map(|context| context.runtime_settings.clone())
+                .unwrap_or_default();
             let mut manager = match session_context {
                 Some(context) => restore_session_manager(context)?,
                 None => SessionManager::in_memory(&current_cwd.to_string_lossy()),
@@ -1382,6 +1507,8 @@ async fn resolve_interactive_transition(
                 prefill_input: None,
                 initial_status_message: Some(String::from("New session started")),
                 bootstrap_defaults: defaults,
+                scoped_models,
+                runtime_settings,
             })
         }
         InteractiveTransitionRequest::ResumePicker => {
@@ -1390,6 +1517,14 @@ async fn resolve_interactive_transition(
                 .as_ref()
                 .map(|context| context.cwd.clone())
                 .unwrap_or_else(|| current_cwd.to_string_lossy().into_owned());
+            let current_runtime_settings = current_context
+                .as_ref()
+                .map(|context| context.runtime_settings.clone())
+                .unwrap_or_default();
+            let current_scoped_models = current_context
+                .as_ref()
+                .map(|context| context.scoped_models.clone())
+                .unwrap_or_default();
             let session_dir = current_context
                 .as_ref()
                 .and_then(|context| context.session_dir.clone());
@@ -1408,21 +1543,42 @@ async fn resolve_interactive_transition(
                 Some(path) => {
                     let manager = SessionManager::open(&path, None, None)
                         .map_err(|error| error.to_string())?;
+                    let next_cwd = PathBuf::from(manager.get_cwd());
+                    let runtime_settings = agent_dir
+                        .map(|agent_dir| load_runtime_settings(&next_cwd, agent_dir))
+                        .unwrap_or(current_runtime_settings);
                     Ok(InteractiveTransitionPlan {
-                        cwd: PathBuf::from(manager.get_cwd()),
+                        cwd: next_cwd,
                         manager: Some(manager),
                         prefill_input: None,
                         initial_status_message: Some(String::from("Resumed session")),
                         bootstrap_defaults: None,
+                        scoped_models: current_scoped_models,
+                        runtime_settings,
                     })
                 }
                 None => {
-                    let (manager, cwd) = match current_context {
+                    let (manager, cwd, scoped_models, runtime_settings) = match current_context {
                         Some(context) => {
                             let cwd = PathBuf::from(&context.cwd);
-                            (Some(restore_session_manager(context)?), cwd)
+                            (
+                                Some(restore_session_manager_from_parts(
+                                    context.manager,
+                                    context.session_file,
+                                    context.session_dir,
+                                    &context.cwd,
+                                )?),
+                                cwd,
+                                context.scoped_models,
+                                context.runtime_settings,
+                            )
                         }
-                        None => (None, current_cwd.to_path_buf()),
+                        None => (
+                            None,
+                            current_cwd.to_path_buf(),
+                            Vec::new(),
+                            LoadedRuntimeSettings::default(),
+                        ),
                     };
                     Ok(InteractiveTransitionPlan {
                         cwd,
@@ -1430,6 +1586,8 @@ async fn resolve_interactive_transition(
                         prefill_input: None,
                         initial_status_message: None,
                         bootstrap_defaults: None,
+                        scoped_models,
+                        runtime_settings,
                     })
                 }
             }
@@ -1441,6 +1599,8 @@ async fn resolve_interactive_transition(
                 &session_context.model,
                 session_context.thinking_level,
             );
+            let scoped_models = session_context.scoped_models.clone();
+            let runtime_settings = session_context.runtime_settings.clone();
             let mut manager = restore_session_manager(session_context)?;
             let candidates = collect_fork_candidates(&manager);
             if candidates.is_empty() {
@@ -1450,6 +1610,8 @@ async fn resolve_interactive_transition(
                     prefill_input: None,
                     initial_status_message: Some(String::from("No messages to fork from")),
                     bootstrap_defaults: None,
+                    scoped_models,
+                    runtime_settings,
                 });
             }
 
@@ -1466,6 +1628,8 @@ async fn resolve_interactive_transition(
                             prefill_input: None,
                             initial_status_message: None,
                             bootstrap_defaults: None,
+                            scoped_models,
+                            runtime_settings,
                         });
                     }
                 };
@@ -1494,11 +1658,15 @@ async fn resolve_interactive_transition(
                 prefill_input: Some(selected.text),
                 initial_status_message: Some(String::from("Branched to new session")),
                 bootstrap_defaults,
+                scoped_models,
+                runtime_settings,
             })
         }
         InteractiveTransitionRequest::TreePicker => {
             let session_context =
                 session_context.ok_or_else(|| String::from("Session data unavailable"))?;
+            let scoped_models = session_context.scoped_models.clone();
+            let runtime_settings = session_context.runtime_settings.clone();
             let mut manager = restore_session_manager(session_context)?;
             if manager.get_entries().is_empty() {
                 return Ok(InteractiveTransitionPlan {
@@ -1507,6 +1675,8 @@ async fn resolve_interactive_transition(
                     prefill_input: None,
                     initial_status_message: Some(String::from("No entries in session")),
                     bootstrap_defaults: None,
+                    scoped_models,
+                    runtime_settings,
                 });
             }
 
@@ -1534,6 +1704,8 @@ async fn resolve_interactive_transition(
                         prefill_input: None,
                         initial_status_message: None,
                         bootstrap_defaults: None,
+                        scoped_models,
+                        runtime_settings,
                     });
                 }
             };
@@ -1557,9 +1729,1365 @@ async fn resolve_interactive_transition(
                 prefill_input: None,
                 initial_status_message: Some(initial_status_message),
                 bootstrap_defaults: None,
+                scoped_models,
+                runtime_settings,
+            })
+        }
+        InteractiveTransitionRequest::SettingsPicker => {
+            let session_context =
+                session_context.ok_or_else(|| String::from("Session data unavailable"))?;
+            let keybindings = create_keybindings_manager(agent_dir);
+            let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
+            let mut tui = Tui::new(terminal);
+            let selection = select_settings(
+                &mut tui,
+                &keybindings,
+                &session_context.runtime_settings,
+                agent_dir.is_some(),
+            )
+            .await?;
+
+            let current_cwd = PathBuf::from(&session_context.cwd);
+            let runtime_settings = if let Some(agent_dir) = agent_dir {
+                persist_runtime_settings_changes(
+                    &agent_dir.join("settings.json"),
+                    &session_context.runtime_settings,
+                    &selection,
+                )?;
+                load_runtime_settings(&current_cwd, agent_dir)
+            } else {
+                apply_settings_selection(&session_context.runtime_settings, &selection)
+            };
+
+            let changed =
+                selection != settings_selection_from_loaded(&session_context.runtime_settings);
+            let initial_status_message = Some(if changed {
+                if agent_dir.is_some() {
+                    String::from("Updated settings")
+                } else {
+                    String::from("Updated session settings")
+                }
+            } else {
+                String::from("Settings unchanged")
+            });
+
+            let manager = restore_session_manager_from_parts(
+                session_context.manager,
+                session_context.session_file,
+                session_context.session_dir,
+                &session_context.cwd,
+            )?;
+            Ok(InteractiveTransitionPlan {
+                cwd: PathBuf::from(manager.get_cwd()),
+                manager: Some(manager),
+                prefill_input: None,
+                initial_status_message,
+                bootstrap_defaults: Some(BootstrapDefaults::from_model(
+                    &session_context.model,
+                    session_context.thinking_level,
+                )),
+                scoped_models: session_context.scoped_models,
+                runtime_settings,
+            })
+        }
+        InteractiveTransitionRequest::ScopedModelsPicker { initial_search } => {
+            let session_context =
+                session_context.ok_or_else(|| String::from("Session data unavailable"))?;
+            let manager = restore_session_manager_from_parts(
+                session_context.manager,
+                session_context.session_file,
+                session_context.session_dir,
+                &session_context.cwd,
+            )?;
+            if session_context.available_models.is_empty() {
+                return Ok(InteractiveTransitionPlan {
+                    cwd: PathBuf::from(manager.get_cwd()),
+                    manager: Some(manager),
+                    prefill_input: None,
+                    initial_status_message: Some(String::from("No models available")),
+                    bootstrap_defaults: Some(BootstrapDefaults::from_model(
+                        &session_context.model,
+                        session_context.thinking_level,
+                    )),
+                    scoped_models: session_context.scoped_models,
+                    runtime_settings: session_context.runtime_settings,
+                });
+            }
+
+            let keybindings = create_keybindings_manager(agent_dir);
+            let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
+            let mut tui = Tui::new(terminal);
+            let selection = select_scoped_models(
+                &mut tui,
+                &keybindings,
+                session_context.available_models.clone(),
+                &session_context.scoped_models,
+                initial_search.as_deref(),
+                agent_dir.is_some(),
+            )
+            .await?;
+
+            if let Some(agent_dir) = agent_dir
+                && let Some(persisted) = selection.persisted.as_ref()
+            {
+                persist_enabled_models_setting(&agent_dir.join("settings.json"), persisted)?;
+            }
+
+            let next_scoped_models = scoped_models_from_enabled_ids(
+                &session_context.available_models,
+                selection.enabled_ids.as_deref(),
+            );
+            let initial_status_message = Some(scoped_models_status_message(
+                &session_context.scoped_models,
+                &next_scoped_models,
+                selection.persisted.as_ref(),
+                agent_dir.is_some(),
+            ));
+
+            Ok(InteractiveTransitionPlan {
+                cwd: PathBuf::from(manager.get_cwd()),
+                manager: Some(manager),
+                prefill_input: None,
+                initial_status_message,
+                bootstrap_defaults: Some(BootstrapDefaults::from_model(
+                    &session_context.model,
+                    session_context.thinking_level,
+                )),
+                scoped_models: next_scoped_models,
+                runtime_settings: session_context.runtime_settings,
+            })
+        }
+        InteractiveTransitionRequest::Reload => {
+            let session_context =
+                session_context.ok_or_else(|| String::from("Session data unavailable"))?;
+            let manager = restore_session_manager_from_parts(
+                session_context.manager,
+                session_context.session_file,
+                session_context.session_dir,
+                &session_context.cwd,
+            )?;
+            let cwd = PathBuf::from(manager.get_cwd());
+            let runtime_settings = agent_dir
+                .map(|agent_dir| load_runtime_settings(&cwd, agent_dir))
+                .unwrap_or(session_context.runtime_settings.clone());
+
+            Ok(InteractiveTransitionPlan {
+                cwd,
+                manager: Some(manager),
+                prefill_input: None,
+                initial_status_message: Some(String::from("Reloaded keybindings and settings")),
+                bootstrap_defaults: Some(BootstrapDefaults::from_model(
+                    &session_context.model,
+                    session_context.thinking_level,
+                )),
+                scoped_models: session_context.scoped_models,
+                runtime_settings,
             })
         }
     }
+}
+
+fn settings_selection_from_loaded(loaded: &LoadedRuntimeSettings) -> SettingsPickerSelection {
+    SettingsPickerSelection {
+        auto_compact: loaded.settings.compaction.enabled,
+        auto_resize_images: loaded.settings.images.auto_resize_images,
+        block_images: loaded.settings.images.block_images,
+        editor_padding_x: loaded.settings.editor_padding_x,
+        autocomplete_max_visible: loaded.settings.autocomplete_max_visible,
+    }
+}
+
+fn apply_settings_selection(
+    loaded: &LoadedRuntimeSettings,
+    selection: &SettingsPickerSelection,
+) -> LoadedRuntimeSettings {
+    let mut next = loaded.clone();
+    next.settings.compaction.enabled = selection.auto_compact;
+    next.settings.images.auto_resize_images = selection.auto_resize_images;
+    next.settings.images.block_images = selection.block_images;
+    next.settings.editor_padding_x = selection.editor_padding_x;
+    next.settings.autocomplete_max_visible = selection.autocomplete_max_visible;
+    next
+}
+
+fn persist_runtime_settings_changes(
+    path: &Path,
+    loaded: &LoadedRuntimeSettings,
+    selection: &SettingsPickerSelection,
+) -> Result<(), String> {
+    let previous = settings_selection_from_loaded(loaded);
+    if previous == *selection {
+        return Ok(());
+    }
+
+    update_settings_file(path, |config| {
+        if selection.auto_compact != previous.auto_compact {
+            set_nested_bool(config, "compaction", "enabled", selection.auto_compact);
+        }
+        if selection.auto_resize_images != previous.auto_resize_images {
+            set_nested_bool(config, "images", "autoResize", selection.auto_resize_images);
+        }
+        if selection.block_images != previous.block_images {
+            set_nested_bool(config, "images", "blockImages", selection.block_images);
+        }
+        if selection.editor_padding_x != previous.editor_padding_x {
+            set_usize(config, "editorPaddingX", selection.editor_padding_x);
+        }
+        if selection.autocomplete_max_visible != previous.autocomplete_max_visible {
+            set_usize(
+                config,
+                "autocompleteMaxVisible",
+                selection.autocomplete_max_visible,
+            );
+        }
+    })
+}
+
+fn persist_enabled_models_setting(
+    path: &Path,
+    persisted: &PersistedScopedModels,
+) -> Result<(), String> {
+    update_settings_file(path, |config| match persisted {
+        PersistedScopedModels::AllEnabled => {
+            config.remove("enabledModels");
+        }
+        PersistedScopedModels::Explicit(enabled_models) => {
+            config.insert(
+                String::from("enabledModels"),
+                Value::Array(enabled_models.iter().cloned().map(Value::String).collect()),
+            );
+        }
+    })
+}
+
+fn update_settings_file(
+    path: &Path,
+    update: impl FnOnce(&mut serde_json::Map<String, Value>),
+) -> Result<(), String> {
+    let mut config = load_settings_file(path)?;
+    update(&mut config);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let rendered =
+        serde_json::to_string_pretty(&Value::Object(config)).map_err(|error| error.to_string())?;
+    fs::write(path, format!("{rendered}\n")).map_err(|error| error.to_string())
+}
+
+fn load_settings_file(path: &Path) -> Result<serde_json::Map<String, Value>, String> {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(serde_json::Map::new());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+
+    match serde_json::from_str::<Value>(&raw).map_err(|error| error.to_string())? {
+        Value::Object(config) => Ok(config),
+        _ => Err(format!("{} must contain a JSON object", path.display())),
+    }
+}
+
+fn set_nested_bool(
+    config: &mut serde_json::Map<String, Value>,
+    parent_key: &str,
+    child_key: &str,
+    value: bool,
+) {
+    ensure_json_object(config, parent_key).insert(child_key.to_owned(), Value::Bool(value));
+}
+
+fn set_usize(config: &mut serde_json::Map<String, Value>, key: &str, value: usize) {
+    config.insert(key.to_owned(), Value::from(value as u64));
+}
+
+fn ensure_json_object<'a>(
+    config: &'a mut serde_json::Map<String, Value>,
+    key: &str,
+) -> &'a mut serde_json::Map<String, Value> {
+    if !matches!(config.get(key), Some(Value::Object(_))) {
+        config.insert(key.to_owned(), Value::Object(serde_json::Map::new()));
+    }
+
+    match config.get_mut(key) {
+        Some(Value::Object(object)) => object,
+        _ => unreachable!("settings parent entry should be an object"),
+    }
+}
+
+fn scoped_models_status_message(
+    previous: &[ScopedModel],
+    next: &[ScopedModel],
+    persisted: Option<&PersistedScopedModels>,
+    can_persist: bool,
+) -> String {
+    let changed = !same_scoped_models(previous, next);
+    let mut message = if changed {
+        if next.is_empty() {
+            String::from("Model scope cleared")
+        } else {
+            String::from("Updated session model scope")
+        }
+    } else {
+        String::from("Model scope unchanged")
+    };
+
+    if persisted.is_some() {
+        if can_persist {
+            if changed {
+                message.push_str(" and saved to settings");
+            } else {
+                message = String::from("Saved model scope to settings");
+            }
+        } else if !changed {
+            message = String::from("Settings unavailable; model scope unchanged");
+        }
+    }
+
+    message
+}
+
+fn same_scoped_models(left: &[ScopedModel], right: &[ScopedModel]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.model.provider == right.model.provider
+                && left.model.id == right.model.id
+                && left.thinking_level == right.thinking_level
+        })
+}
+
+fn scoped_models_from_enabled_ids(
+    models: &[Model],
+    enabled_ids: Option<&[String]>,
+) -> Vec<ScopedModel> {
+    let Some(enabled_ids) = enabled_ids else {
+        return Vec::new();
+    };
+    if enabled_ids.is_empty() || enabled_ids.len() >= models.len() {
+        return Vec::new();
+    }
+
+    let models_by_id = models
+        .iter()
+        .map(|model| (full_model_id(model), model.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    enabled_ids
+        .iter()
+        .filter_map(|id| models_by_id.get(id).cloned())
+        .map(|model| ScopedModel {
+            model,
+            thinking_level: None,
+        })
+        .collect()
+}
+
+fn full_model_id(model: &Model) -> String {
+    format!("{}/{}", model.provider, model.id)
+}
+
+#[derive(Debug, Clone)]
+enum SettingsPickerOutcome {
+    Closed(SettingsPickerSelection),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsPickerItem {
+    AutoCompact,
+    AutoResizeImages,
+    BlockImages,
+    EditorPadding,
+    AutocompleteMaxVisible,
+}
+
+struct SettingsPickerComponent {
+    keybindings: KeybindingsManager,
+    selection: SettingsPickerSelection,
+    selected_index: usize,
+    on_close: Option<Box<dyn FnMut(SettingsPickerSelection) + Send + 'static>>,
+    viewport_size: Cell<Option<(usize, usize)>>,
+}
+
+impl SettingsPickerComponent {
+    const ITEMS: [SettingsPickerItem; 5] = [
+        SettingsPickerItem::AutoCompact,
+        SettingsPickerItem::AutoResizeImages,
+        SettingsPickerItem::BlockImages,
+        SettingsPickerItem::EditorPadding,
+        SettingsPickerItem::AutocompleteMaxVisible,
+    ];
+
+    fn new(keybindings: &KeybindingsManager, selection: SettingsPickerSelection) -> Self {
+        Self {
+            keybindings: keybindings.clone(),
+            selection,
+            selected_index: 0,
+            on_close: None,
+            viewport_size: Cell::new(None),
+        }
+    }
+
+    fn set_on_close<F>(&mut self, on_close: F)
+    where
+        F: FnMut(SettingsPickerSelection) + Send + 'static,
+    {
+        self.on_close = Some(Box::new(on_close));
+    }
+
+    fn current_item(&self) -> SettingsPickerItem {
+        Self::ITEMS[self.selected_index]
+    }
+
+    fn matches_binding(&self, data: &str, keybinding: &str) -> bool {
+        self.keybindings
+            .get_keys(keybinding)
+            .iter()
+            .any(|key| matches_key(data, key.as_str()))
+    }
+
+    fn close(&mut self) {
+        if let Some(on_close) = &mut self.on_close {
+            on_close(self.selection.clone());
+        }
+    }
+
+    fn cycle_selected_value(&mut self, delta: isize) {
+        match self.current_item() {
+            SettingsPickerItem::AutoCompact => {
+                self.selection.auto_compact = !self.selection.auto_compact;
+            }
+            SettingsPickerItem::AutoResizeImages => {
+                self.selection.auto_resize_images = !self.selection.auto_resize_images;
+            }
+            SettingsPickerItem::BlockImages => {
+                self.selection.block_images = !self.selection.block_images;
+            }
+            SettingsPickerItem::EditorPadding => {
+                const VALUES: [usize; 4] = [0, 1, 2, 3];
+                self.selection.editor_padding_x =
+                    cycle_usize_value(self.selection.editor_padding_x, &VALUES, delta);
+            }
+            SettingsPickerItem::AutocompleteMaxVisible => {
+                const VALUES: [usize; 6] = [3, 5, 7, 10, 15, 20];
+                self.selection.autocomplete_max_visible =
+                    cycle_usize_value(self.selection.autocomplete_max_visible, &VALUES, delta);
+            }
+        }
+    }
+
+    fn item_label(item: SettingsPickerItem) -> &'static str {
+        match item {
+            SettingsPickerItem::AutoCompact => "Auto-compact",
+            SettingsPickerItem::AutoResizeImages => "Auto-resize images",
+            SettingsPickerItem::BlockImages => "Block images",
+            SettingsPickerItem::EditorPadding => "Editor padding",
+            SettingsPickerItem::AutocompleteMaxVisible => "Autocomplete max items",
+        }
+    }
+
+    fn item_description(item: SettingsPickerItem) -> &'static str {
+        match item {
+            SettingsPickerItem::AutoCompact => {
+                "Automatically compact the session context when it gets too large"
+            }
+            SettingsPickerItem::AutoResizeImages => {
+                "Resize large images to 2000x2000 before sending them to models"
+            }
+            SettingsPickerItem::BlockImages => {
+                "Prevent images from being sent to the selected model"
+            }
+            SettingsPickerItem::EditorPadding => {
+                "Horizontal padding for the interactive editor (0-3 columns)"
+            }
+            SettingsPickerItem::AutocompleteMaxVisible => {
+                "Maximum visible autocomplete items (3-20)"
+            }
+        }
+    }
+
+    fn item_value(&self, item: SettingsPickerItem) -> String {
+        match item {
+            SettingsPickerItem::AutoCompact => on_off_label(self.selection.auto_compact),
+            SettingsPickerItem::AutoResizeImages => on_off_label(self.selection.auto_resize_images),
+            SettingsPickerItem::BlockImages => on_off_label(self.selection.block_images),
+            SettingsPickerItem::EditorPadding => self.selection.editor_padding_x.to_string(),
+            SettingsPickerItem::AutocompleteMaxVisible => {
+                self.selection.autocomplete_max_visible.to_string()
+            }
+        }
+    }
+
+    fn max_visible(&self) -> usize {
+        self.viewport_size
+            .get()
+            .map(|(_, height)| height.saturating_sub(7).max(1))
+            .unwrap_or(Self::ITEMS.len())
+    }
+
+    fn render_items(&self, width: usize) -> Vec<String> {
+        let max_visible = self.max_visible();
+        let start_index = self
+            .selected_index
+            .saturating_sub(max_visible / 2)
+            .min(Self::ITEMS.len().saturating_sub(max_visible));
+        let end_index = (start_index + max_visible).min(Self::ITEMS.len());
+        let mut lines = Vec::new();
+
+        for (visible_index, item) in Self::ITEMS[start_index..end_index].iter().enumerate() {
+            let actual_index = start_index + visible_index;
+            let prefix = if actual_index == self.selected_index {
+                "→ "
+            } else {
+                "  "
+            };
+            let line = format!(
+                "{prefix}{:<24} {}",
+                Self::item_label(*item),
+                self.item_value(*item)
+            );
+            lines.push(truncate_to_width(&line, width, "...", false));
+        }
+
+        lines
+    }
+
+    fn render_hint_line(&self, width: usize) -> String {
+        let styler = PlainKeyHintStyler;
+        let hint = format!(
+            "{}  {}  {}  {}",
+            key_hint(&self.keybindings, &styler, "tui.select.up", "navigate"),
+            key_hint(
+                &self.keybindings,
+                &styler,
+                "tui.editor.cursorLeft",
+                "change"
+            ),
+            key_hint(&self.keybindings, &styler, "tui.select.confirm", "toggle"),
+            key_hint(&self.keybindings, &styler, "tui.select.cancel", "back"),
+        );
+        truncate_to_width(&hint, width, "...", false)
+    }
+}
+
+impl Component for SettingsPickerComponent {
+    fn render(&self, width: usize) -> Vec<String> {
+        if width == 0 {
+            return vec![String::new()];
+        }
+
+        let selected = self.current_item();
+        let mut lines = Vec::new();
+        lines.push("─".repeat(width));
+        lines.push(truncate_to_width("Settings", width, "...", false));
+        lines.push(truncate_to_width(
+            "Saved to global settings when available. Escape closes.",
+            width,
+            "...",
+            false,
+        ));
+        lines.extend(self.render_items(width));
+        lines.push(String::new());
+        lines.push(truncate_to_width(
+            Self::item_description(selected),
+            width,
+            "...",
+            false,
+        ));
+        lines.push(self.render_hint_line(width));
+        lines.push("─".repeat(width));
+        lines
+    }
+
+    fn invalidate(&mut self) {}
+
+    fn handle_input(&mut self, data: &str) {
+        if self.matches_binding(data, "tui.select.cancel") {
+            self.close();
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.up") {
+            self.selected_index = self.selected_index.saturating_sub(1);
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.down") {
+            self.selected_index =
+                (self.selected_index + 1).min(Self::ITEMS.len().saturating_sub(1));
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.pageUp") {
+            self.selected_index = self.selected_index.saturating_sub(self.max_visible());
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.pageDown") {
+            self.selected_index =
+                (self.selected_index + self.max_visible()).min(Self::ITEMS.len().saturating_sub(1));
+            return;
+        }
+
+        if self.matches_binding(data, "tui.editor.cursorLeft") {
+            self.cycle_selected_value(-1);
+            return;
+        }
+
+        if self.matches_binding(data, "tui.editor.cursorRight")
+            || self.matches_binding(data, "tui.select.confirm")
+        {
+            self.cycle_selected_value(1);
+        }
+    }
+
+    fn set_viewport_size(&self, width: usize, height: usize) {
+        self.viewport_size.set(Some((width, height)));
+    }
+}
+
+async fn select_settings(
+    tui: &mut Tui<LiveInteractiveTerminal>,
+    keybindings: &KeybindingsManager,
+    runtime_settings: &LoadedRuntimeSettings,
+    _can_persist: bool,
+) -> Result<SettingsPickerSelection, String> {
+    let outcome = Arc::new(Mutex::new(None::<SettingsPickerOutcome>));
+    let mut picker = SettingsPickerComponent::new(
+        keybindings,
+        settings_selection_from_loaded(runtime_settings),
+    );
+
+    let outcome_for_close = Arc::clone(&outcome);
+    picker.set_on_close(move |selection| {
+        *outcome_for_close
+            .lock()
+            .expect("settings picker outcome mutex poisoned") =
+            Some(SettingsPickerOutcome::Closed(selection));
+    });
+
+    let picker_id = tui.add_child(Box::new(picker));
+    let _ = tui.set_focus_child(picker_id);
+    tui.start().map_err(|error| error.to_string())?;
+
+    loop {
+        if let Some(SettingsPickerOutcome::Closed(selection)) = outcome
+            .lock()
+            .expect("settings picker outcome mutex poisoned")
+            .take()
+        {
+            tui.clear();
+            return Ok(selection);
+        }
+
+        tui.drain_terminal_events()
+            .map_err(|error| error.to_string())?;
+        sleep(Duration::from_millis(16)).await;
+    }
+}
+
+fn on_off_label(enabled: bool) -> String {
+    if enabled {
+        String::from("on")
+    } else {
+        String::from("off")
+    }
+}
+
+fn cycle_usize_value(current: usize, values: &[usize], delta: isize) -> usize {
+    let Some(index) = values.iter().position(|value| *value == current) else {
+        return values.first().copied().unwrap_or(current);
+    };
+    let next_index = if delta < 0 {
+        if index == 0 {
+            values.len().saturating_sub(1)
+        } else {
+            index - 1
+        }
+    } else {
+        (index + 1) % values.len().max(1)
+    };
+    values.get(next_index).copied().unwrap_or(current)
+}
+
+#[derive(Debug, Clone)]
+enum ScopedModelsPickerOutcome {
+    Closed(ScopedModelsPickerSelection),
+}
+
+#[derive(Clone)]
+struct ScopedModelsPickerItem {
+    full_id: String,
+    model: Model,
+    enabled: bool,
+}
+
+struct ScopedModelsPickerComponent {
+    keybindings: KeybindingsManager,
+    models_by_id: BTreeMap<String, Model>,
+    all_ids: Vec<String>,
+    enabled_ids: Option<Vec<String>>,
+    filtered_items: Vec<ScopedModelsPickerItem>,
+    selected_index: usize,
+    search_input: Input,
+    on_close: Option<Box<dyn FnMut(ScopedModelsPickerSelection) + Send + 'static>>,
+    viewport_size: Cell<Option<(usize, usize)>>,
+    can_persist: bool,
+    dirty: bool,
+    saved_snapshot: Option<PersistedScopedModels>,
+    focused: bool,
+}
+
+impl ScopedModelsPickerComponent {
+    fn new(
+        keybindings: &KeybindingsManager,
+        mut models: Vec<Model>,
+        scoped_models: &[ScopedModel],
+        initial_search: Option<&str>,
+        can_persist: bool,
+    ) -> Self {
+        models.sort_by(|left, right| {
+            left.provider
+                .cmp(&right.provider)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        let mut models_by_id = BTreeMap::new();
+        let mut all_ids = Vec::new();
+        for model in models {
+            let full_id = full_model_id(&model);
+            models_by_id.insert(full_id.clone(), model);
+            all_ids.push(full_id);
+        }
+
+        let enabled_ids = if scoped_models.is_empty() {
+            None
+        } else {
+            Some(
+                scoped_models
+                    .iter()
+                    .map(|scoped_model| full_model_id(&scoped_model.model))
+                    .collect(),
+            )
+        };
+
+        let mut search_input = Input::with_keybindings(keybindings.deref().clone());
+        if let Some(initial_search) = initial_search {
+            search_input.set_value(initial_search);
+        }
+
+        let mut picker = Self {
+            keybindings: keybindings.clone(),
+            models_by_id,
+            all_ids,
+            enabled_ids,
+            filtered_items: Vec::new(),
+            selected_index: 0,
+            search_input,
+            on_close: None,
+            viewport_size: Cell::new(None),
+            can_persist,
+            dirty: false,
+            saved_snapshot: None,
+            focused: false,
+        };
+        picker.refresh();
+        picker
+    }
+
+    fn set_on_close<F>(&mut self, on_close: F)
+    where
+        F: FnMut(ScopedModelsPickerSelection) + Send + 'static,
+    {
+        self.on_close = Some(Box::new(on_close));
+    }
+
+    fn matches_binding(&self, data: &str, keybinding: &str) -> bool {
+        self.keybindings
+            .get_keys(keybinding)
+            .iter()
+            .any(|key| matches_key(data, key.as_str()))
+    }
+
+    fn close(&mut self) {
+        if let Some(on_close) = &mut self.on_close {
+            on_close(ScopedModelsPickerSelection {
+                enabled_ids: self.enabled_ids.clone(),
+                persisted: self.saved_snapshot.clone(),
+            });
+        }
+    }
+
+    fn build_items(&self) -> Vec<ScopedModelsPickerItem> {
+        ordered_scoped_model_ids(self.enabled_ids.as_deref(), &self.all_ids)
+            .into_iter()
+            .filter_map(|id| {
+                self.models_by_id
+                    .get(&id)
+                    .cloned()
+                    .map(|model| ScopedModelsPickerItem {
+                        enabled: scoped_model_enabled(self.enabled_ids.as_deref(), &id),
+                        full_id: id,
+                        model,
+                    })
+            })
+            .collect()
+    }
+
+    fn refresh(&mut self) {
+        let query = self.search_input.get_value();
+        let items = self.build_items();
+        self.filtered_items = if query.trim().is_empty() {
+            items
+        } else {
+            fuzzy_filter(&items, query, |item| {
+                Cow::Owned(format!("{} {}", item.model.id, item.model.provider))
+            })
+            .into_iter()
+            .cloned()
+            .collect()
+        };
+        self.selected_index = self
+            .selected_index
+            .min(self.filtered_items.len().saturating_sub(1));
+    }
+
+    fn max_visible(&self) -> usize {
+        self.viewport_size
+            .get()
+            .map(|(_, height)| height.saturating_sub(9).max(1))
+            .unwrap_or(12)
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    fn render_hint_lines(&self, width: usize) -> Vec<String> {
+        let styler = PlainKeyHintStyler;
+        let mut first = vec![
+            key_hint(&self.keybindings, &styler, "tui.select.confirm", "toggle"),
+            key_hint(&self.keybindings, &styler, "tui.select.up", "navigate"),
+            key_hint(&self.keybindings, &styler, "tui.select.cancel", "back"),
+        ];
+        if self.can_persist {
+            first.push(key_hint(
+                &self.keybindings,
+                &styler,
+                "app.scopedModels.save",
+                "save",
+            ));
+        }
+        let second = vec![
+            key_hint(
+                &self.keybindings,
+                &styler,
+                "app.scopedModels.enableAll",
+                "all",
+            ),
+            key_hint(
+                &self.keybindings,
+                &styler,
+                "app.scopedModels.clearAll",
+                "clear",
+            ),
+            key_hint(
+                &self.keybindings,
+                &styler,
+                "app.scopedModels.toggleProvider",
+                "provider",
+            ),
+            key_hint(
+                &self.keybindings,
+                &styler,
+                "app.scopedModels.moveUp",
+                "reorder",
+            ),
+        ];
+
+        vec![
+            truncate_to_width(&first.join("  "), width, "...", false),
+            truncate_to_width(&second.join("  "), width, "...", false),
+        ]
+    }
+
+    fn footer_status_text(&self) -> String {
+        let enabled_count = self
+            .enabled_ids
+            .as_ref()
+            .map(|enabled_ids| enabled_ids.len())
+            .unwrap_or(self.all_ids.len());
+        let all_enabled = self.enabled_ids.is_none();
+        let count_text = if all_enabled {
+            String::from("all enabled")
+        } else {
+            format!("{enabled_count}/{} enabled", self.all_ids.len())
+        };
+        if self.dirty {
+            format!("{count_text} (unsaved)")
+        } else {
+            count_text
+        }
+    }
+
+    fn render_model_lines(&self, width: usize) -> Vec<String> {
+        if self.filtered_items.is_empty() {
+            return vec![truncate_to_width("No matching models", width, "...", false)];
+        }
+
+        let max_visible = self.max_visible();
+        let start_index = self
+            .selected_index
+            .saturating_sub(max_visible / 2)
+            .min(self.filtered_items.len().saturating_sub(max_visible));
+        let end_index = (start_index + max_visible).min(self.filtered_items.len());
+        let all_enabled = self.enabled_ids.is_none();
+        let mut lines = Vec::new();
+
+        for (visible_index, item) in self.filtered_items[start_index..end_index]
+            .iter()
+            .enumerate()
+        {
+            let actual_index = start_index + visible_index;
+            let prefix = if actual_index == self.selected_index {
+                "→ "
+            } else {
+                "  "
+            };
+            let status = if all_enabled {
+                ""
+            } else if item.enabled {
+                " ✓"
+            } else {
+                " ✗"
+            };
+            let line = format!(
+                "{prefix}{} [{}]{}",
+                item.model.id, item.model.provider, status
+            );
+            lines.push(truncate_to_width(&line, width, "...", false));
+        }
+
+        if start_index > 0 || end_index < self.filtered_items.len() {
+            lines.push(truncate_to_width(
+                &format!(
+                    "  ({}/{})",
+                    self.selected_index + 1,
+                    self.filtered_items.len()
+                ),
+                width,
+                "...",
+                false,
+            ));
+        }
+
+        if let Some(selected) = self.filtered_items.get(self.selected_index) {
+            lines.push(String::new());
+            lines.push(truncate_to_width(
+                &format!("  Model Name: {}", selected.model.name),
+                width,
+                "...",
+                false,
+            ));
+        }
+
+        lines
+    }
+}
+
+impl Component for ScopedModelsPickerComponent {
+    fn render(&self, width: usize) -> Vec<String> {
+        if width == 0 {
+            return vec![String::new()];
+        }
+
+        let mut lines = Vec::new();
+        lines.push("─".repeat(width));
+        lines.push(truncate_to_width("Scoped Models", width, "...", false));
+        lines.push(truncate_to_width(
+            if self.can_persist {
+                "Session-only until saved. Escape closes."
+            } else {
+                "Session-only. Settings unavailable. Escape closes."
+            },
+            width,
+            "...",
+            false,
+        ));
+        lines.extend(self.search_input.render(width));
+        lines.extend(self.render_model_lines(width));
+        lines.push(String::new());
+        lines.extend(self.render_hint_lines(width));
+        lines.push(truncate_to_width(
+            &self.footer_status_text(),
+            width,
+            "...",
+            false,
+        ));
+        lines.push("─".repeat(width));
+        lines
+    }
+
+    fn invalidate(&mut self) {
+        self.search_input.invalidate();
+    }
+
+    fn handle_input(&mut self, data: &str) {
+        if self.matches_binding(data, "tui.select.cancel") {
+            self.close();
+            return;
+        }
+
+        if self.matches_binding(data, "app.clear") {
+            if self.search_input.get_value().is_empty() {
+                self.close();
+            } else {
+                self.search_input.clear();
+                self.refresh();
+            }
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.up") {
+            if self.filtered_items.is_empty() {
+                return;
+            }
+            self.selected_index = self.selected_index.saturating_sub(1);
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.down") {
+            if self.filtered_items.is_empty() {
+                return;
+            }
+            self.selected_index =
+                (self.selected_index + 1).min(self.filtered_items.len().saturating_sub(1));
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.pageUp") {
+            self.selected_index = self.selected_index.saturating_sub(self.max_visible());
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.pageDown") {
+            self.selected_index = (self.selected_index + self.max_visible())
+                .min(self.filtered_items.len().saturating_sub(1));
+            return;
+        }
+
+        if self.matches_binding(data, "app.scopedModels.moveUp")
+            || self.matches_binding(data, "app.scopedModels.moveDown")
+        {
+            if let Some(item) = self.filtered_items.get(self.selected_index) {
+                if scoped_model_enabled(self.enabled_ids.as_deref(), &item.full_id) {
+                    let delta = if self.matches_binding(data, "app.scopedModels.moveUp") {
+                        -1
+                    } else {
+                        1
+                    };
+                    self.enabled_ids = move_scoped_model_id(
+                        self.enabled_ids.as_deref(),
+                        &self.all_ids,
+                        &item.full_id,
+                        delta,
+                    );
+                    self.mark_dirty();
+                    self.refresh();
+                    if delta < 0 {
+                        self.selected_index = self.selected_index.saturating_sub(1);
+                    } else {
+                        self.selected_index = (self.selected_index + 1)
+                            .min(self.filtered_items.len().saturating_sub(1));
+                    }
+                }
+            }
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.confirm") {
+            if let Some(item) = self.filtered_items.get(self.selected_index) {
+                self.enabled_ids =
+                    toggle_scoped_model_id(self.enabled_ids.as_deref(), &item.full_id);
+                self.mark_dirty();
+                self.refresh();
+            }
+            return;
+        }
+
+        if self.matches_binding(data, "app.scopedModels.enableAll") {
+            let target_ids = if self.search_input.get_value().trim().is_empty() {
+                None
+            } else {
+                Some(
+                    self.filtered_items
+                        .iter()
+                        .map(|item| item.full_id.clone())
+                        .collect::<Vec<_>>(),
+                )
+            };
+            self.enabled_ids = enable_scoped_model_ids(
+                self.enabled_ids.as_deref(),
+                &self.all_ids,
+                target_ids.as_deref(),
+            );
+            self.mark_dirty();
+            self.refresh();
+            return;
+        }
+
+        if self.matches_binding(data, "app.scopedModels.clearAll") {
+            let target_ids = if self.search_input.get_value().trim().is_empty() {
+                None
+            } else {
+                Some(
+                    self.filtered_items
+                        .iter()
+                        .map(|item| item.full_id.clone())
+                        .collect::<Vec<_>>(),
+                )
+            };
+            self.enabled_ids = clear_scoped_model_ids(
+                self.enabled_ids.as_deref(),
+                &self.all_ids,
+                target_ids.as_deref(),
+            );
+            self.mark_dirty();
+            self.refresh();
+            return;
+        }
+
+        if self.matches_binding(data, "app.scopedModels.toggleProvider") {
+            if let Some(item) = self.filtered_items.get(self.selected_index) {
+                let provider = &item.model.provider;
+                let provider_ids = self
+                    .all_ids
+                    .iter()
+                    .filter(|id| {
+                        self.models_by_id
+                            .get(*id)
+                            .is_some_and(|model| model.provider == *provider)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let all_enabled = provider_ids
+                    .iter()
+                    .all(|id| scoped_model_enabled(self.enabled_ids.as_deref(), id));
+                self.enabled_ids = if all_enabled {
+                    clear_scoped_model_ids(
+                        self.enabled_ids.as_deref(),
+                        &self.all_ids,
+                        Some(provider_ids.as_slice()),
+                    )
+                } else {
+                    enable_scoped_model_ids(
+                        self.enabled_ids.as_deref(),
+                        &self.all_ids,
+                        Some(provider_ids.as_slice()),
+                    )
+                };
+                self.mark_dirty();
+                self.refresh();
+            }
+            return;
+        }
+
+        if self.can_persist && self.matches_binding(data, "app.scopedModels.save") {
+            self.saved_snapshot = Some(persisted_scoped_models_snapshot(
+                self.enabled_ids.as_deref(),
+                &self.all_ids,
+            ));
+            self.dirty = false;
+            return;
+        }
+
+        self.search_input.handle_input(data);
+        self.refresh();
+    }
+
+    fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+        self.search_input.set_focused(focused);
+    }
+
+    fn set_viewport_size(&self, width: usize, height: usize) {
+        self.viewport_size.set(Some((width, height)));
+        self.search_input.set_viewport_size(width, 1);
+    }
+}
+
+async fn select_scoped_models(
+    tui: &mut Tui<LiveInteractiveTerminal>,
+    keybindings: &KeybindingsManager,
+    models: Vec<Model>,
+    scoped_models: &[ScopedModel],
+    initial_search: Option<&str>,
+    can_persist: bool,
+) -> Result<ScopedModelsPickerSelection, String> {
+    let outcome = Arc::new(Mutex::new(None::<ScopedModelsPickerOutcome>));
+    let mut picker = ScopedModelsPickerComponent::new(
+        keybindings,
+        models,
+        scoped_models,
+        initial_search,
+        can_persist,
+    );
+
+    let outcome_for_close = Arc::clone(&outcome);
+    picker.set_on_close(move |selection| {
+        *outcome_for_close
+            .lock()
+            .expect("scoped models picker outcome mutex poisoned") =
+            Some(ScopedModelsPickerOutcome::Closed(selection));
+    });
+
+    let picker_id = tui.add_child(Box::new(picker));
+    let _ = tui.set_focus_child(picker_id);
+    tui.start().map_err(|error| error.to_string())?;
+
+    loop {
+        if let Some(ScopedModelsPickerOutcome::Closed(selection)) = outcome
+            .lock()
+            .expect("scoped models picker outcome mutex poisoned")
+            .take()
+        {
+            tui.clear();
+            return Ok(selection);
+        }
+
+        tui.drain_terminal_events()
+            .map_err(|error| error.to_string())?;
+        sleep(Duration::from_millis(16)).await;
+    }
+}
+
+fn scoped_model_enabled(enabled_ids: Option<&[String]>, id: &str) -> bool {
+    enabled_ids.is_none_or(|enabled_ids| enabled_ids.iter().any(|entry| entry == id))
+}
+
+fn toggle_scoped_model_id(enabled_ids: Option<&[String]>, id: &str) -> Option<Vec<String>> {
+    match enabled_ids {
+        None => Some(vec![id.to_owned()]),
+        Some(enabled_ids) => {
+            let mut next = enabled_ids.to_vec();
+            if let Some(index) = next.iter().position(|entry| entry == id) {
+                next.remove(index);
+            } else {
+                next.push(id.to_owned());
+            }
+            Some(next)
+        }
+    }
+}
+
+fn enable_scoped_model_ids(
+    enabled_ids: Option<&[String]>,
+    all_ids: &[String],
+    target_ids: Option<&[String]>,
+) -> Option<Vec<String>> {
+    if enabled_ids.is_none() {
+        return None;
+    }
+
+    let Some(target_ids) = target_ids else {
+        return None;
+    };
+
+    let mut next = enabled_ids.map_or_else(Vec::new, |enabled_ids| enabled_ids.to_vec());
+    for id in target_ids {
+        if !next.iter().any(|entry| entry == id) {
+            next.push(id.clone());
+        }
+    }
+
+    if next.len() >= all_ids.len() {
+        None
+    } else {
+        Some(next)
+    }
+}
+
+fn clear_scoped_model_ids(
+    enabled_ids: Option<&[String]>,
+    all_ids: &[String],
+    target_ids: Option<&[String]>,
+) -> Option<Vec<String>> {
+    let targets = target_ids
+        .map(|target_ids| target_ids.to_vec())
+        .unwrap_or_else(|| all_ids.to_vec());
+    if targets.is_empty() {
+        return enabled_ids.map(|enabled_ids| enabled_ids.to_vec());
+    }
+
+    match enabled_ids {
+        None => Some(
+            all_ids
+                .iter()
+                .filter(|id| !targets.iter().any(|target| target == *id))
+                .cloned()
+                .collect(),
+        ),
+        Some(enabled_ids) => Some(
+            enabled_ids
+                .iter()
+                .filter(|id| !targets.iter().any(|target| target == *id))
+                .cloned()
+                .collect(),
+        ),
+    }
+}
+
+fn move_scoped_model_id(
+    enabled_ids: Option<&[String]>,
+    all_ids: &[String],
+    id: &str,
+    delta: isize,
+) -> Option<Vec<String>> {
+    let mut next = enabled_ids.map_or_else(|| all_ids.to_vec(), |enabled_ids| enabled_ids.to_vec());
+    let Some(index) = next.iter().position(|entry| entry == id) else {
+        return if enabled_ids.is_some() {
+            Some(next)
+        } else {
+            None
+        };
+    };
+    let Some(next_index) = index.checked_add_signed(delta) else {
+        return Some(next);
+    };
+    if next_index >= next.len() {
+        return Some(next);
+    }
+    next.swap(index, next_index);
+    Some(next)
+}
+
+fn persisted_scoped_models_snapshot(
+    enabled_ids: Option<&[String]>,
+    all_ids: &[String],
+) -> PersistedScopedModels {
+    match enabled_ids {
+        None => PersistedScopedModels::AllEnabled,
+        Some(enabled_ids) if enabled_ids.len() >= all_ids.len() => {
+            PersistedScopedModels::AllEnabled
+        }
+        Some(enabled_ids) => PersistedScopedModels::Explicit(enabled_ids.to_vec()),
+    }
+}
+
+fn ordered_scoped_model_ids(enabled_ids: Option<&[String]>, all_ids: &[String]) -> Vec<String> {
+    let Some(enabled_ids) = enabled_ids else {
+        return all_ids.to_vec();
+    };
+
+    let enabled = enabled_ids.to_vec();
+    let mut ordered = enabled.clone();
+    ordered.extend(
+        all_ids
+            .iter()
+            .filter(|id| !enabled.iter().any(|enabled_id| enabled_id == *id))
+            .cloned(),
+    );
+    ordered
 }
 
 pub fn finalize_system_prompt(prompt: impl Into<String>) -> String {
@@ -2349,7 +3877,10 @@ fn build_interactive_slash_commands(
                 )
             })),
         },
-        simple_slash_command("scoped-models", "Show scoped models for Ctrl+P cycling"),
+        simple_slash_command(
+            "scoped-models",
+            "Configure scoped models for Ctrl+P cycling",
+        ),
         simple_slash_command("export", "Export session (HTML default, or specify .jsonl)"),
         simple_slash_command("share", "Share session with an HTML preview link"),
         simple_slash_command("copy", "Copy last assistant message to clipboard"),
@@ -2376,7 +3907,7 @@ fn build_interactive_slash_commands(
         simple_slash_command("new", "Start a new session"),
         simple_slash_command("compact", "Compact the current session context"),
         simple_slash_command("resume", "Resume a different session"),
-        simple_slash_command("reload", "Reload keybindings and resources"),
+        simple_slash_command("reload", "Reload keybindings and settings"),
         SlashCommand {
             name: String::from("quit"),
             description: Some(String::from("Quit pi")),
@@ -2689,7 +4220,7 @@ fn request_interactive_transition(
         return true;
     }
 
-    if matches!(transition, InteractiveTransitionRequest::ForkPicker) {
+    if matches!(&transition, InteractiveTransitionRequest::ForkPicker) {
         let Some(session_manager) = session_manager else {
             status_handle.set_message("No messages to fork from");
             return true;
@@ -2703,7 +4234,7 @@ fn request_interactive_transition(
         }
     }
 
-    if matches!(transition, InteractiveTransitionRequest::TreePicker) {
+    if matches!(&transition, InteractiveTransitionRequest::TreePicker) {
         let Some(session_manager) = session_manager else {
             status_handle.set_message("Session tree is not available in this interactive mode.");
             return true;
@@ -2855,189 +4386,6 @@ fn current_runtime_settings(context: &InteractiveSlashCommandContext) -> LoadedR
         .clone()
 }
 
-fn render_runtime_settings_text(context: &InteractiveSlashCommandContext) -> String {
-    let runtime_settings = current_runtime_settings(context);
-    let mut output = String::new();
-    push_line(&mut output, "Settings");
-    push_line(&mut output, "");
-    let global_settings_path = context
-        .agent_dir
-        .as_ref()
-        .map(|agent_dir| agent_dir.join("settings.json"));
-    if let Some(global_settings_path) = global_settings_path {
-        push_line(
-            &mut output,
-            &format!("Global settings: {}", global_settings_path.display()),
-        );
-    } else {
-        push_line(&mut output, "Global settings: unavailable");
-    }
-    push_line(
-        &mut output,
-        &format!(
-            "Project settings: {}",
-            context.cwd.join(".pi/settings.json").display()
-        ),
-    );
-    push_line(&mut output, "");
-    push_line(&mut output, "Images");
-    push_line(
-        &mut output,
-        &format!(
-            "Auto resize: {}",
-            if runtime_settings.settings.images.auto_resize_images {
-                "on"
-            } else {
-                "off"
-            }
-        ),
-    );
-    push_line(
-        &mut output,
-        &format!(
-            "Block images: {}",
-            if runtime_settings.settings.images.block_images {
-                "on"
-            } else {
-                "off"
-            }
-        ),
-    );
-    push_line(&mut output, "");
-    push_line(&mut output, "Compaction");
-    push_line(
-        &mut output,
-        &format!(
-            "Enabled: {}",
-            if runtime_settings.settings.compaction.enabled {
-                "on"
-            } else {
-                "off"
-            }
-        ),
-    );
-    push_line(
-        &mut output,
-        &format!(
-            "Reserve tokens: {}",
-            runtime_settings.settings.compaction.reserve_tokens
-        ),
-    );
-    push_line(
-        &mut output,
-        &format!(
-            "Keep recent tokens: {}",
-            runtime_settings.settings.compaction.keep_recent_tokens
-        ),
-    );
-    push_line(&mut output, "");
-    push_line(&mut output, "Editor");
-    push_line(
-        &mut output,
-        &format!("Padding X: {}", runtime_settings.settings.editor_padding_x),
-    );
-    push_line(
-        &mut output,
-        &format!(
-            "Autocomplete max visible: {}",
-            runtime_settings.settings.autocomplete_max_visible
-        ),
-    );
-    push_line(&mut output, "");
-    push_line(&mut output, "Thinking budgets");
-    push_line(
-        &mut output,
-        &format!(
-            "minimal: {}",
-            option_u64_label(runtime_settings.settings.thinking_budgets.minimal)
-        ),
-    );
-    push_line(
-        &mut output,
-        &format!(
-            "low: {}",
-            option_u64_label(runtime_settings.settings.thinking_budgets.low)
-        ),
-    );
-    push_line(
-        &mut output,
-        &format!(
-            "medium: {}",
-            option_u64_label(runtime_settings.settings.thinking_budgets.medium)
-        ),
-    );
-    push_line(
-        &mut output,
-        &format!(
-            "high: {}",
-            option_u64_label(runtime_settings.settings.thinking_budgets.high)
-        ),
-    );
-
-    if !runtime_settings.warnings.is_empty() {
-        push_line(&mut output, "");
-        push_line(&mut output, "Warnings");
-        for warning in &runtime_settings.warnings {
-            push_line(
-                &mut output,
-                &format!("- ({} settings) {}", warning.scope.label(), warning.message),
-            );
-        }
-    }
-
-    output.trim_end().to_owned()
-}
-
-fn option_u64_label(value: Option<u64>) -> String {
-    value
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| String::from("default"))
-}
-
-fn render_scoped_models_text(core: &CodingAgentCore, scoped_models: &[ScopedModel]) -> String {
-    let mut output = String::new();
-    push_line(&mut output, "Scoped Models");
-    push_line(&mut output, "");
-    let current_model = core.state().model;
-    push_line(
-        &mut output,
-        &format!(
-            "Current model: {}/{}",
-            current_model.provider, current_model.id
-        ),
-    );
-    push_line(&mut output, "");
-
-    if scoped_models.is_empty() {
-        push_line(
-            &mut output,
-            "No scoped models configured. Model cycling uses all available models.",
-        );
-        return output.trim_end().to_owned();
-    }
-
-    for scoped_model in scoped_models {
-        let marker = if models_are_equal(Some(&scoped_model.model), Some(&current_model)) {
-            "*"
-        } else {
-            "-"
-        };
-        let mut line = format!(
-            "{marker} {}/{}",
-            scoped_model.model.provider, scoped_model.model.id
-        );
-        if let Some(thinking_level) = scoped_model.thinking_level {
-            line.push_str(&format!(
-                " (thinking: {})",
-                thinking_level_label(thinking_level)
-            ));
-        }
-        push_line(&mut output, &line);
-    }
-
-    output.trim_end().to_owned()
-}
-
 fn render_hotkeys_text(keybindings: &KeybindingsManager) -> String {
     let mut output = String::new();
     push_line(&mut output, "Keyboard Shortcuts");
@@ -3045,6 +4393,10 @@ fn render_hotkeys_text(keybindings: &KeybindingsManager) -> String {
 
     let mut current_section = None::<&str>;
     for (keybinding, definition) in DEFAULT_APP_KEYBINDINGS.iter() {
+        if keybinding.starts_with("app.scopedModels.") {
+            continue;
+        }
+
         let section = if keybinding.starts_with("tui.editor.") {
             "Editor"
         } else if keybinding.starts_with("tui.input.") {
@@ -3983,12 +5335,14 @@ fn handle_interactive_slash_command(
     }
 
     if text == "/settings" {
-        append_transcript_custom_message(
-            shell,
-            "settings",
-            render_runtime_settings_text(slash_command_context),
+        return request_interactive_transition(
+            InteractiveTransitionRequest::SettingsPicker,
+            core,
+            session_manager,
+            status_handle,
+            transition_request,
+            exit_requested,
         );
-        return true;
     }
 
     if text == "/new" {
@@ -4060,12 +5414,25 @@ fn handle_interactive_slash_command(
     }
 
     if text == "/scoped-models" || text.starts_with("/scoped-models ") {
-        append_transcript_custom_message(
-            shell,
-            "scoped-models",
-            render_scoped_models_text(core, scoped_models),
+        if model_registry.get_available().is_empty() {
+            status_handle.set_message("No models available");
+            return true;
+        }
+
+        let initial_search = text
+            .strip_prefix("/scoped-models")
+            .unwrap_or_default()
+            .trim();
+        return request_interactive_transition(
+            InteractiveTransitionRequest::ScopedModelsPicker {
+                initial_search: (!initial_search.is_empty()).then_some(initial_search.to_owned()),
+            },
+            core,
+            session_manager,
+            status_handle,
+            transition_request,
+            exit_requested,
         );
-        return true;
     }
 
     if text == "/session" {
@@ -4338,38 +5705,14 @@ fn handle_interactive_slash_command(
             return true;
         }
 
-        let Some(agent_dir) = slash_command_context.agent_dir.as_ref() else {
-            status_handle.set_message("Reloading settings requires an agent directory.");
-            return true;
-        };
-
-        let loaded = load_runtime_settings(&slash_command_context.cwd, agent_dir);
-        core.set_auto_resize_images(loaded.settings.images.auto_resize_images);
-        core.set_block_images(loaded.settings.images.block_images);
-        core.set_thinking_budgets(map_thinking_budgets(&loaded.settings.thinking_budgets));
-        shell.set_input_padding_x(loaded.settings.editor_padding_x);
-        shell.set_autocomplete_max_visible(loaded.settings.autocomplete_max_visible);
-        footer_state_handle.update(|footer_state| {
-            footer_state.auto_compact_enabled = loaded.settings.compaction.enabled;
-        });
-        *slash_command_context
-            .runtime_settings
-            .lock()
-            .expect("interactive runtime settings mutex poisoned") = loaded.clone();
-
-        if loaded.warnings.is_empty() {
-            status_handle.set_message("Reloaded settings");
-        } else {
-            append_transcript_custom_message(
-                shell,
-                "reload",
-                render_settings_warnings(&loaded.warnings)
-                    .trim_end()
-                    .to_owned(),
-            );
-            status_handle.set_message("Reloaded settings with warnings");
-        }
-        return true;
+        return request_interactive_transition(
+            InteractiveTransitionRequest::Reload,
+            core,
+            session_manager,
+            status_handle,
+            transition_request,
+            exit_requested,
+        );
     }
 
     if text == "/model" || text.starts_with("/model ") {
@@ -5277,7 +6620,128 @@ mod tests {
     }
 
     #[test]
-    fn slash_commands_render_settings_hotkeys_and_changelog() {
+    fn settings_and_scoped_models_slash_commands_request_transitions() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "slash-settings-scope-faux".into(),
+            models: vec![
+                FauxModelDefinition {
+                    id: "slash-settings-scope-faux-1".into(),
+                    name: Some("Slash Settings Scope Faux 1".into()),
+                    reasoning: false,
+                },
+                FauxModelDefinition {
+                    id: "slash-settings-scope-faux-2".into(),
+                    name: Some("Slash Settings Scope Faux 2".into()),
+                    reasoning: false,
+                },
+            ],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("slash-settings-scope-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("slash-settings-scope-cwd");
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![
+                model.clone(),
+                faux.get_model(Some("slash-settings-scope-faux-2"))
+                    .expect("expected second faux model"),
+            ],
+            models_json_path: None,
+            cwd: Some(cwd.clone()),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
+        let status_handle = shell.status_handle();
+        let footer_state_handle = shell.footer_state_handle();
+        let exit_requested = Arc::new(AtomicBool::new(false));
+        let transition_request = Arc::new(Mutex::new(None));
+        let slash_command_context = test_slash_command_context(&keybindings, cwd);
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/settings",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            None,
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+        assert!(exit_requested.load(Ordering::Relaxed));
+        assert_eq!(
+            transition_request
+                .lock()
+                .expect("interactive transition request mutex poisoned")
+                .clone(),
+            Some(InteractiveTransitionRequest::SettingsPicker)
+        );
+
+        exit_requested.store(false, Ordering::Relaxed);
+        *transition_request
+            .lock()
+            .expect("interactive transition request mutex poisoned") = None;
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/scoped-models beta",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            None,
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+        assert!(exit_requested.load(Ordering::Relaxed));
+        assert_eq!(
+            transition_request
+                .lock()
+                .expect("interactive transition request mutex poisoned")
+                .clone(),
+            Some(InteractiveTransitionRequest::ScopedModelsPicker {
+                initial_search: Some(String::from("beta")),
+            })
+        );
+
+        faux.unregister();
+    }
+
+    #[test]
+    fn slash_commands_render_hotkeys_and_changelog() {
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             provider: "slash-render-commands-faux".into(),
             models: vec![FauxModelDefinition {
@@ -5306,16 +6770,6 @@ mod tests {
         })
         .expect("expected coding agent core");
         let core = created.core;
-        let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
         let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
         manager
             .append_message(Message::User {
@@ -5332,7 +6786,7 @@ mod tests {
         let transition_request = Arc::new(Mutex::new(None));
         let slash_command_context = test_slash_command_context(&keybindings, cwd);
 
-        for command in ["/settings", "/scoped-models", "/hotkeys", "/changelog"] {
+        for command in ["/hotkeys", "/changelog"] {
             assert!(handle_interactive_slash_command(
                 &mut shell,
                 command,
@@ -5349,8 +6803,6 @@ mod tests {
         }
 
         let rendered = shell.render(120).join("\n");
-        assert!(rendered.contains("Settings"), "output: {rendered}");
-        assert!(rendered.contains("Scoped Models"), "output: {rendered}");
         assert!(
             rendered.contains("Keyboard Shortcuts"),
             "output: {rendered}"
@@ -5521,7 +6973,7 @@ mod tests {
     }
 
     #[test]
-    fn reload_slash_command_reloads_runtime_settings_from_disk() {
+    fn reload_slash_command_requests_reload_transition() {
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             provider: "slash-reload-faux".into(),
             models: vec![FauxModelDefinition {
@@ -5535,27 +6987,6 @@ mod tests {
             .get_model(Some("slash-reload-faux-1"))
             .expect("expected faux model");
         let cwd = unique_temp_dir("slash-reload-cwd");
-        let agent_dir = unique_temp_dir("slash-reload-agent");
-        fs::write(
-            agent_dir.join("settings.json"),
-            serde_json::json!({
-                "images": {
-                    "autoResize": false,
-                    "blockImages": true
-                },
-                "compaction": {
-                    "enabled": false
-                },
-                "thinkingBudgets": {
-                    "low": 123
-                },
-                "editorPaddingX": 2,
-                "autocompleteMaxVisible": 7
-            })
-            .to_string(),
-        )
-        .unwrap();
-
         let created = create_coding_agent_core(CodingAgentCoreOptions {
             auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
                 model.provider.as_str(),
@@ -5585,8 +7016,7 @@ mod tests {
         let footer_state_handle = shell.footer_state_handle();
         let exit_requested = Arc::new(AtomicBool::new(false));
         let transition_request = Arc::new(Mutex::new(None));
-        let slash_command_context =
-            test_slash_command_context_with_agent_dir(&keybindings, cwd, Some(agent_dir));
+        let slash_command_context = test_slash_command_context(&keybindings, cwd);
 
         assert!(handle_interactive_slash_command(
             &mut shell,
@@ -5601,39 +7031,143 @@ mod tests {
             &exit_requested,
             &transition_request,
         ));
-
-        assert!(!core.auto_resize_images());
-        assert!(core.block_images());
-        assert_eq!(core.thinking_budgets().low, Some(123));
+        assert!(exit_requested.load(Ordering::Relaxed));
         assert_eq!(
-            current_runtime_settings(&slash_command_context)
-                .settings
-                .editor_padding_x,
-            2
-        );
-        assert_eq!(
-            current_runtime_settings(&slash_command_context)
-                .settings
-                .autocomplete_max_visible,
-            7
+            transition_request
+                .lock()
+                .expect("interactive transition request mutex poisoned")
+                .clone(),
+            Some(InteractiveTransitionRequest::Reload)
         );
 
-        let settings_text = render_runtime_settings_text(&slash_command_context);
-        assert!(
-            settings_text.contains("Auto resize: off"),
-            "output: {settings_text}"
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn settings_picker_transition_updates_runtime_settings_file() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "settings-picker-transition-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "settings-picker-transition-faux-1".into(),
+                name: Some("Settings Picker Transition Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("settings-picker-transition-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("settings-picker-transition-cwd");
+        let agent_dir = unique_temp_dir("settings-picker-transition-agent");
+        let terminal = LifecycleScriptedTerminal::new(vec![
+            (Duration::from_millis(5), String::from("\r")),
+            (Duration::from_millis(5), String::from("\x1b")),
+        ]);
+        let runtime = InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone())));
+
+        let plan = resolve_interactive_transition(
+            InteractiveTransitionRequest::SettingsPicker,
+            Some(InteractiveSessionContext {
+                manager: Some(SessionManager::in_memory(cwd.to_str().unwrap())),
+                session_file: None,
+                session_dir: None,
+                cwd: cwd.to_string_lossy().into_owned(),
+                model,
+                thinking_level: ThinkingLevel::Off,
+                scoped_models: Vec::new(),
+                available_models: Vec::new(),
+                runtime_settings: LoadedRuntimeSettings::default(),
+            }),
+            &cwd,
+            Some(agent_dir.as_path()),
+            &runtime,
+        )
+        .await
+        .expect("expected settings transition plan");
+
+        assert_eq!(
+            plan.initial_status_message.as_deref(),
+            Some("Updated settings")
         );
+        assert!(!plan.runtime_settings.settings.compaction.enabled);
+
+        let persisted = fs::read_to_string(agent_dir.join("settings.json"))
+            .expect("expected persisted settings.json");
         assert!(
-            settings_text.contains("Block images: on"),
-            "output: {settings_text}"
+            persisted.contains("\"enabled\": false"),
+            "settings: {persisted}"
         );
-        assert!(
-            settings_text.contains("Padding X: 2"),
-            "output: {settings_text}"
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn scoped_models_picker_transition_updates_scope_and_saves_settings() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "scoped-models-transition-faux".into(),
+            models: vec![
+                FauxModelDefinition {
+                    id: "alpha-model".into(),
+                    name: Some("Alpha Model".into()),
+                    reasoning: false,
+                },
+                FauxModelDefinition {
+                    id: "beta-model".into(),
+                    name: Some("Beta Model".into()),
+                    reasoning: false,
+                },
+            ],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let alpha = faux
+            .get_model(Some("alpha-model"))
+            .expect("expected alpha faux model");
+        let beta = faux
+            .get_model(Some("beta-model"))
+            .expect("expected beta faux model");
+        let cwd = unique_temp_dir("scoped-models-transition-cwd");
+        let agent_dir = unique_temp_dir("scoped-models-transition-agent");
+        let terminal = LifecycleScriptedTerminal::new(vec![
+            (Duration::from_millis(5), String::from("\r")),
+            (Duration::from_millis(5), String::from("\x13")),
+            (Duration::from_millis(5), String::from("\x1b")),
+        ]);
+        let runtime = InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone())));
+
+        let plan = resolve_interactive_transition(
+            InteractiveTransitionRequest::ScopedModelsPicker {
+                initial_search: None,
+            },
+            Some(InteractiveSessionContext {
+                manager: Some(SessionManager::in_memory(cwd.to_str().unwrap())),
+                session_file: None,
+                session_dir: None,
+                cwd: cwd.to_string_lossy().into_owned(),
+                model: alpha.clone(),
+                thinking_level: ThinkingLevel::Off,
+                scoped_models: Vec::new(),
+                available_models: vec![alpha.clone(), beta.clone()],
+                runtime_settings: LoadedRuntimeSettings::default(),
+            }),
+            &cwd,
+            Some(agent_dir.as_path()),
+            &runtime,
+        )
+        .await
+        .expect("expected scoped models transition plan");
+
+        assert_eq!(plan.scoped_models.len(), 1);
+        assert_eq!(plan.scoped_models[0].model.id, alpha.id);
+        assert_eq!(
+            plan.initial_status_message.as_deref(),
+            Some("Updated session model scope and saved to settings")
         );
+
+        let persisted = fs::read_to_string(agent_dir.join("settings.json"))
+            .expect("expected persisted settings.json");
         assert!(
-            settings_text.contains("Autocomplete max visible: 7"),
-            "output: {settings_text}"
+            persisted.contains(&format!("\"{}/{}\"", alpha.provider, alpha.id)),
+            "settings: {persisted}"
         );
 
         faux.unregister();
@@ -6155,6 +7689,9 @@ mod tests {
                 cwd: cwd.to_string_lossy().into_owned(),
                 model,
                 thinking_level: ThinkingLevel::Off,
+                scoped_models: Vec::new(),
+                available_models: Vec::new(),
+                runtime_settings: LoadedRuntimeSettings::default(),
             }),
             &cwd,
             None,
@@ -6336,6 +7873,9 @@ mod tests {
                 cwd: String::from("/tmp/pi-new-session-transition"),
                 model: model.clone(),
                 thinking_level: ThinkingLevel::Off,
+                scoped_models: Vec::new(),
+                available_models: Vec::new(),
+                runtime_settings: LoadedRuntimeSettings::default(),
             }),
             Path::new("/tmp/pi-new-session-transition"),
             None,

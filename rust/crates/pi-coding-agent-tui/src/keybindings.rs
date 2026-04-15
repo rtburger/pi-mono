@@ -94,6 +94,33 @@ pub static DEFAULT_APP_KEYBINDINGS: LazyLock<Vec<(String, KeybindingDefinition)>
                 definition(&[], "Resume a session"),
             ),
             (
+                "app.scopedModels.enableAll".to_owned(),
+                definition(&["ctrl+a"], "Enable all models in scoped model picker"),
+            ),
+            (
+                "app.scopedModels.clearAll".to_owned(),
+                definition(&["ctrl+x"], "Clear the scoped model picker selection"),
+            ),
+            (
+                "app.scopedModels.toggleProvider".to_owned(),
+                definition(
+                    &["ctrl+p"],
+                    "Toggle the selected provider in scoped model picker",
+                ),
+            ),
+            (
+                "app.scopedModels.save".to_owned(),
+                definition(&["ctrl+s"], "Save scoped models to settings"),
+            ),
+            (
+                "app.scopedModels.moveUp".to_owned(),
+                definition(&["alt+up"], "Move selected scoped model up"),
+            ),
+            (
+                "app.scopedModels.moveDown".to_owned(),
+                definition(&["alt+down"], "Move selected scoped model down"),
+            ),
+            (
                 "app.tree.foldOrUp".to_owned(),
                 definition(&["ctrl+left", "alt+left"], "Fold tree branch or move up"),
             ),
