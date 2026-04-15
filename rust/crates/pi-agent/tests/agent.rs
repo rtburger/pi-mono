@@ -1469,13 +1469,17 @@ async fn wrapper_forwards_before_and_after_tool_hooks() {
         .iter()
         .find_map(|message| match message {
             AgentMessage::Standard(Message::ToolResult {
-                content, is_error, ..
-            }) => Some((content.clone(), *is_error)),
+                content,
+                details,
+                is_error,
+                ..
+            }) => Some((content.clone(), details.clone(), *is_error)),
             _ => None,
         })
         .expect("expected tool result message");
 
-    assert!(tool_result.1);
+    assert_eq!(tool_result.1, Some(json!({ "audited": true })));
+    assert!(tool_result.2);
     assert_eq!(
         tool_result.0,
         vec![UserContent::Text {

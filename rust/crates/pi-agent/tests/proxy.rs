@@ -64,6 +64,7 @@ fn context() -> Context {
                 content: vec![UserContent::Text {
                     text: String::from("tool output"),
                 }],
+                details: None,
                 is_error: false,
                 timestamp: 3,
             },

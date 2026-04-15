@@ -181,6 +181,7 @@ fn groups_consecutive_tool_results_into_single_user_message() {
             content: vec![UserContent::Text {
                 text: "file text".into(),
             }],
+            details: None,
             is_error: false,
             timestamp: 3,
         },
@@ -190,6 +191,7 @@ fn groups_consecutive_tool_results_into_single_user_message() {
             content: vec![UserContent::Text {
                 text: "grep text".into(),
             }],
+            details: None,
             is_error: false,
             timestamp: 4,
         },
@@ -247,6 +249,7 @@ fn normalizes_foreign_tool_call_ids_for_anthropic_messages() {
                 content: vec![UserContent::Text {
                     text: "done".into(),
                 }],
+                details: None,
                 is_error: false,
                 timestamp: 2,
             },

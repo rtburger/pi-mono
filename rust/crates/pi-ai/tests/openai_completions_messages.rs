@@ -83,6 +83,7 @@ fn batches_tool_result_images_after_consecutive_tool_results() {
                         mime_type: "image/png".into(),
                     },
                 ],
+                details: None,
                 is_error: false,
                 timestamp: now + 1,
             },
@@ -98,6 +99,7 @@ fn batches_tool_result_images_after_consecutive_tool_results() {
                         mime_type: "image/png".into(),
                     },
                 ],
+                details: None,
                 is_error: false,
                 timestamp: now + 2,
             },
@@ -217,6 +219,7 @@ fn inserts_assistant_bridge_before_user_after_tool_results_when_required() {
                 content: vec![UserContent::Text {
                     text: "done".into(),
                 }],
+                details: None,
                 is_error: false,
                 timestamp: 1,
             },

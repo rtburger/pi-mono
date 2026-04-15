@@ -452,6 +452,7 @@ fn keeps_tool_result_images_inside_function_call_output() {
                         mime_type: "image/png".into(),
                     },
                 ],
+                details: None,
                 is_error: false,
                 timestamp: 3,
             },

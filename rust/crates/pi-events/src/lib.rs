@@ -116,6 +116,8 @@ pub struct ToolResultMessage {
     pub tool_call_id: String,
     pub tool_name: String,
     pub content: Vec<UserContent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
     pub is_error: bool,
     pub timestamp: u64,
 }
@@ -145,6 +147,8 @@ pub enum Message {
         tool_call_id: String,
         tool_name: String,
         content: Vec<UserContent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<serde_json::Value>,
         is_error: bool,
         timestamp: u64,
     },

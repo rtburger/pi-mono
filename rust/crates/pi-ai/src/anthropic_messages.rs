@@ -1412,6 +1412,7 @@ fn transform_messages_for_anthropic(model: &Model, messages: &[Message]) -> Vec<
                 tool_call_id,
                 tool_name,
                 content,
+                details,
                 is_error,
                 timestamp,
             } => {
@@ -1423,6 +1424,7 @@ fn transform_messages_for_anthropic(model: &Model, messages: &[Message]) -> Vec<
                     tool_call_id: normalized_tool_call_id,
                     tool_name,
                     content,
+                    details,
                     is_error,
                     timestamp,
                 });
@@ -1600,6 +1602,7 @@ fn flush_orphaned_tool_calls(
                 content: vec![UserContent::Text {
                     text: "No result provided".into(),
                 }],
+                details: None,
                 is_error: true,
                 timestamp: now_ms(),
             });

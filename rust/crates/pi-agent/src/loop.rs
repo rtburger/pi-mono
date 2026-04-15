@@ -1236,6 +1236,7 @@ fn build_tool_result_message(
         tool_call_id,
         tool_name,
         content: result.content,
+        details: Some(result.details),
         is_error,
         timestamp: now_ms(),
     }
@@ -1287,6 +1288,7 @@ fn tool_result_to_agent_message(tool_result: &ToolResultMessage) -> AgentMessage
         tool_call_id: tool_result.tool_call_id.clone(),
         tool_name: tool_result.tool_name.clone(),
         content: tool_result.content.clone(),
+        details: tool_result.details.clone(),
         is_error: tool_result.is_error,
         timestamp: tool_result.timestamp,
     })

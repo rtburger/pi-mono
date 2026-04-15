@@ -423,6 +423,7 @@ async fn runtime_registers_default_coding_tools_and_executes_tool_calls() {
             content: vec![UserContent::Text {
                 text: "Successfully wrote 5 bytes to notes.txt".into(),
             }],
+            details: Some(serde_json::Value::Null),
             is_error: false,
             timestamp: match tool_result {
                 Message::ToolResult { timestamp, .. } => *timestamp,
@@ -499,6 +500,10 @@ async fn runtime_executes_edit_tool_calls_with_legacy_old_text_arguments() {
             content: vec![UserContent::Text {
                 text: "Successfully replaced 1 block(s) in notes.txt.".into(),
             }],
+            details: Some(json!({
+                "diff": "-1 before\n+1 after",
+                "firstChangedLine": 1,
+            })),
             is_error: false,
             timestamp: match tool_result {
                 Message::ToolResult { timestamp, .. } => *timestamp,

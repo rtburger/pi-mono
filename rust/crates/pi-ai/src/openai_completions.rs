@@ -636,6 +636,7 @@ fn transform_messages_for_openai_completions(model: &Model, messages: &[Message]
                 tool_call_id,
                 tool_name,
                 content,
+                details,
                 is_error,
                 timestamp,
             } => {
@@ -647,6 +648,7 @@ fn transform_messages_for_openai_completions(model: &Model, messages: &[Message]
                     tool_call_id: normalized,
                     tool_name,
                     content,
+                    details,
                     is_error,
                     timestamp,
                 });
@@ -820,6 +822,7 @@ fn flush_orphaned_tool_calls(
                 content: vec![UserContent::Text {
                     text: "No result provided".into(),
                 }],
+                details: None,
                 is_error: true,
                 timestamp: now_ms(),
             });

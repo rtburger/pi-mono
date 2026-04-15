@@ -364,6 +364,7 @@ fn message_to_proxy_json(message: &Message) -> Value {
             content,
             is_error,
             timestamp,
+            ..
         } => json!({
             "role": "toolResult",
             "toolCallId": tool_call_id,
@@ -1072,6 +1073,7 @@ mod tests {
                         content: vec![UserContent::Text {
                             text: String::from("done"),
                         }],
+                        details: None,
                         is_error: false,
                         timestamp: 2,
                     },

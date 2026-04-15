@@ -83,6 +83,7 @@ fn convert_to_llm_converts_supported_coding_agent_messages() {
             tool_call_id: "call-1".into(),
             tool_name: "read".into(),
             content: vec![UserContent::Text { text: "ok".into() }],
+            details: None,
             is_error: false,
             timestamp: 7,
         }
@@ -144,6 +145,7 @@ fn convert_to_llm_converts_supported_coding_agent_messages() {
             tool_call_id: "call-1".into(),
             tool_name: "read".into(),
             content: vec![UserContent::Text { text: "ok".into() }],
+            details: None,
             is_error: false,
             timestamp: 7,
         }
@@ -189,6 +191,7 @@ fn filter_blocked_images_replaces_user_and_tool_result_images_with_placeholder()
                     mime_type: "image/jpeg".into(),
                 },
             ],
+            details: None,
             is_error: false,
             timestamp: 11,
         },
@@ -231,6 +234,7 @@ fn filter_blocked_images_replaces_user_and_tool_result_images_with_placeholder()
                 content: vec![UserContent::Text {
                     text: BLOCKED_IMAGE_PLACEHOLDER.into(),
                 }],
+                details: None,
                 is_error: false,
                 timestamp: 11,
             },

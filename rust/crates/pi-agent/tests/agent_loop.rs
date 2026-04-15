@@ -1117,13 +1117,17 @@ async fn after_hook_can_override_tool_result_fields() {
             AgentEvent::MessageEnd {
                 message:
                     AgentMessage::Standard(Message::ToolResult {
-                        content, is_error, ..
+                        content,
+                        details,
+                        is_error,
+                        ..
                     }),
-            } => Some((content.clone(), *is_error)),
+            } => Some((content.clone(), details.clone(), *is_error)),
             _ => None,
         })
         .expect("expected tool result message");
-    assert!(tool_result_message.1);
+    assert_eq!(tool_result_message.1, Some(json!({ "audited": true })));
+    assert!(tool_result_message.2);
     assert_eq!(
         tool_result_message.0,
         vec![UserContent::Text {

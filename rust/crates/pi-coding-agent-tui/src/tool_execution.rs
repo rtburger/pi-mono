@@ -111,7 +111,7 @@ impl From<ToolResultMessage> for ToolExecutionResult {
     fn from(message: ToolResultMessage) -> Self {
         Self {
             content: message.content,
-            details: Value::Null,
+            details: message.details.unwrap_or(Value::Null),
             is_error: message.is_error,
         }
     }

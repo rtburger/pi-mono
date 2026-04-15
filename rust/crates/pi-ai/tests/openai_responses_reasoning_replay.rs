@@ -244,6 +244,7 @@ async fn replays_same_provider_different_model_handoff_without_reasoning_items()
                     tool_call_id: "call_123|fc_123".into(),
                     tool_name: "double_number".into(),
                     content: vec![UserContent::Text { text: "42".into() }],
+                    details: None,
                     is_error: false,
                     timestamp: 3,
                 },
