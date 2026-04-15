@@ -2,6 +2,7 @@ use pi_ai::{StreamOptions, built_in_models};
 use pi_coding_agent_cli::{
     AppMode, AuthFileSource, ChainedAuthSource, EnvAuthSource, RunCommandOptions,
     finalize_system_prompt, parse_args, resolve_app_mode, run_command, run_interactive_command,
+    run_rpc_command,
 };
 use pi_coding_agent_core::{build_default_pi_system_prompt, refresh_auth_file_oauth};
 use pi_coding_agent_tui::migrate_keybindings_file;
@@ -19,15 +20,6 @@ const ENV_AGENT_DIR: &str = "PI_CODING_AGENT_DIR";
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let stdin_is_tty = io::stdin().is_terminal();
-    let stdin_content = if stdin_is_tty {
-        None
-    } else {
-        let mut buffer = String::new();
-        match io::stdin().read_to_string(&mut buffer) {
-            Ok(_) => Some(buffer),
-            Err(_) => None,
-        }
-    };
 
     let agent_dir = get_agent_dir();
     run_startup_migrations(&agent_dir);
@@ -36,6 +28,7 @@ async fn main() -> ExitCode {
 
     let args = env::args().skip(1).collect::<Vec<_>>();
     let parsed = parse_args(&args);
+    let app_mode = resolve_app_mode(&parsed, stdin_is_tty);
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let auth_source = Arc::new(ChainedAuthSource::new(vec![
         Arc::new(AuthFileSource::new(auth_path)),
@@ -51,10 +44,8 @@ async fn main() -> ExitCode {
         parsed.append_system_prompt.as_deref(),
     ));
 
-    if matches!(
-        resolve_app_mode(&parsed, stdin_is_tty),
-        AppMode::Interactive
-    ) && !parsed.help
+    if matches!(app_mode, AppMode::Interactive)
+        && !parsed.help
         && !parsed.version
         && parsed.list_models.is_none()
         && parsed.export.is_none()
@@ -62,7 +53,7 @@ async fn main() -> ExitCode {
         let exit_code = run_interactive_command(RunCommandOptions {
             args: args.clone(),
             stdin_is_tty,
-            stdin_content: stdin_content.clone(),
+            stdin_content: None,
             auth_source: auth_source.clone(),
             built_in_models: built_in_models.clone(),
             models_json_path: models_json_path.clone(),
@@ -80,6 +71,44 @@ async fn main() -> ExitCode {
             ExitCode::from(exit_code as u8)
         };
     }
+
+    if matches!(app_mode, AppMode::Rpc)
+        && !parsed.help
+        && !parsed.version
+        && parsed.list_models.is_none()
+        && parsed.export.is_none()
+    {
+        let exit_code = run_rpc_command(RunCommandOptions {
+            args,
+            stdin_is_tty,
+            stdin_content: None,
+            auth_source,
+            built_in_models,
+            models_json_path,
+            agent_dir: Some(agent_dir),
+            cwd,
+            default_system_prompt: finalized_default_system_prompt,
+            version,
+            stream_options: StreamOptions::default(),
+        })
+        .await;
+
+        return if exit_code == 0 {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(exit_code as u8)
+        };
+    }
+
+    let stdin_content = if stdin_is_tty {
+        None
+    } else {
+        let mut buffer = String::new();
+        match io::stdin().read_to_string(&mut buffer) {
+            Ok(_) => Some(buffer),
+            Err(_) => None,
+        }
+    };
 
     let result = run_command(RunCommandOptions {
         args,

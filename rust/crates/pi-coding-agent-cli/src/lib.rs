@@ -20,5 +20,5 @@ pub use pi_coding_agent_core::{AuthFileSource, ChainedAuthSource};
 pub use print_mode::{PrintModeOptions, PrintModeRunResult, run_print_mode};
 pub use runner::{
     RunCommandOptions, RunCommandResult, finalize_system_prompt, run_command,
-    run_interactive_command, run_interactive_command_with_terminal,
+    run_interactive_command, run_interactive_command_with_terminal, run_rpc_command,
 };

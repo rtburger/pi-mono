@@ -58,7 +58,7 @@ use std::{
 };
 use tokio::time::sleep;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const NO_MODELS_ENV_HINT: &str = "  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.";
 const API_KEY_MODEL_REQUIREMENT: &str =
@@ -90,6 +90,7 @@ pub struct RunCommandResult {
 type InteractiveTerminalFactory = Arc<dyn Fn() -> Box<dyn Terminal + Send> + Send + Sync>;
 type SharedInputHandler = Arc<Mutex<Box<dyn FnMut(String) + Send>>>;
 type SharedResizeHandler = Arc<Mutex<Box<dyn FnMut() + Send>>>;
+type TextEmitter = Arc<dyn Fn(String) + Send + Sync>;
 
 #[derive(Clone)]
 struct InteractiveRuntime {
@@ -775,6 +776,27 @@ pub async fn run_interactive_command_with_terminal(
         InteractiveRuntime::new(interactive_terminal_factory),
     )
     .await
+}
+
+pub async fn run_rpc_command(options: RunCommandOptions) -> i32 {
+    let stdout = Arc::new(Mutex::new(std::io::stdout()));
+    let stderr = Arc::new(Mutex::new(std::io::stderr()));
+    let stdout_emitter: TextEmitter = Arc::new(move |text| {
+        use std::io::Write as _;
+
+        let mut stdout = stdout.lock().expect("rpc stdout mutex poisoned");
+        let _ = stdout.write_all(text.as_bytes());
+        let _ = stdout.flush();
+    });
+    let stderr_emitter: TextEmitter = Arc::new(move |text| {
+        use std::io::Write as _;
+
+        let mut stderr = stderr.lock().expect("rpc stderr mutex poisoned");
+        let _ = stderr.write_all(text.as_bytes());
+        let _ = stderr.flush();
+    });
+
+    run_rpc_command_live(options, stdout_emitter, stderr_emitter).await
 }
 
 async fn run_interactive_command_with_runtime(
@@ -3253,6 +3275,22 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
     }
 
     let app_mode = resolve_app_mode(&parsed, stdin_is_tty);
+    if app_mode == AppMode::Rpc {
+        return run_rpc_command_buffered(RpcPreparedOptions {
+            parsed,
+            initial_stderr: stderr,
+            stdin_content,
+            auth_source,
+            built_in_models,
+            models_json_path,
+            agent_dir,
+            cwd,
+            default_system_prompt,
+            stream_options,
+        })
+        .await;
+    }
+
     let Some(print_mode) = to_print_output_mode(app_mode) else {
         push_line(&mut stderr, &unsupported_app_mode_message(app_mode));
         return RunCommandResult {
@@ -3450,6 +3488,1614 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         stdout,
         stderr,
     }
+}
+
+struct RpcPreparedOptions {
+    parsed: Args,
+    initial_stderr: String,
+    stdin_content: Option<String>,
+    auth_source: Arc<dyn AuthSource>,
+    built_in_models: Vec<Model>,
+    models_json_path: Option<PathBuf>,
+    agent_dir: Option<PathBuf>,
+    cwd: PathBuf,
+    default_system_prompt: String,
+    stream_options: StreamOptions,
+}
+
+struct RpcState {
+    core: CodingAgentCore,
+    session_manager: Option<Arc<Mutex<SessionManager>>>,
+    cwd: PathBuf,
+    scoped_models: Vec<ScopedModel>,
+    runtime_settings: LoadedRuntimeSettings,
+    auto_compaction_enabled: bool,
+    auto_retry_enabled: bool,
+    is_compacting: Arc<AtomicBool>,
+    event_unsubscribe: Option<AgentUnsubscribe>,
+    bash_abort_tx: Option<tokio::sync::watch::Sender<bool>>,
+}
+
+#[derive(Clone)]
+struct RpcSnapshot {
+    core: CodingAgentCore,
+    session_manager: Option<Arc<Mutex<SessionManager>>>,
+    cwd: PathBuf,
+    scoped_models: Vec<ScopedModel>,
+    runtime_settings: LoadedRuntimeSettings,
+    auto_compaction_enabled: bool,
+    is_compacting: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct RpcShared {
+    options: Arc<RpcPreparedOptions>,
+    state: Arc<Mutex<RpcState>>,
+    stdout_emitter: TextEmitter,
+    stderr_emitter: TextEmitter,
+}
+
+impl RpcShared {
+    fn emit_stdout(&self, text: impl Into<String>) {
+        (self.stdout_emitter)(text.into());
+    }
+
+    fn emit_stderr(&self, text: impl Into<String>) {
+        (self.stderr_emitter)(text.into());
+    }
+
+    fn emit_json(&self, value: &Value) {
+        let line = serde_json::to_string(value).expect("rpc json serialization must succeed");
+        self.emit_stdout(format!("{line}\n"));
+    }
+
+    fn emit_response(&self, id: Option<&str>, command: &str, data: Option<Value>) {
+        self.emit_json(&rpc_success_response(id, command, data));
+    }
+
+    fn emit_error(&self, id: Option<&str>, command: &str, message: impl Into<String>) {
+        self.emit_json(&rpc_error_response(id, command, message));
+    }
+
+    fn snapshot(&self) -> RpcSnapshot {
+        let state = self.state.lock().expect("rpc state mutex poisoned");
+        RpcSnapshot {
+            core: state.core.clone(),
+            session_manager: state.session_manager.clone(),
+            cwd: state.cwd.clone(),
+            scoped_models: state.scoped_models.clone(),
+            runtime_settings: state.runtime_settings.clone(),
+            auto_compaction_enabled: state.auto_compaction_enabled,
+            is_compacting: state.is_compacting.clone(),
+        }
+    }
+
+    fn current_core(&self) -> CodingAgentCore {
+        self.state
+            .lock()
+            .expect("rpc state mutex poisoned")
+            .core
+            .clone()
+    }
+
+    fn replace_state(&self, mut next: RpcState) {
+        attach_rpc_event_subscription(&mut next, self.stdout_emitter.clone());
+
+        let mut state = self.state.lock().expect("rpc state mutex poisoned");
+        if let Some(unsubscribe) = state.event_unsubscribe.take() {
+            let _ = unsubscribe();
+        }
+        if let Some(bash_abort_tx) = state.bash_abort_tx.take() {
+            let _ = bash_abort_tx.send(true);
+        }
+        *state = next;
+    }
+
+    fn abort_active(&self) {
+        let snapshot = self.snapshot();
+        snapshot.core.abort();
+        if let Some(bash_abort_tx) = self
+            .state
+            .lock()
+            .expect("rpc state mutex poisoned")
+            .bash_abort_tx
+            .clone()
+        {
+            let _ = bash_abort_tx.send(true);
+        }
+    }
+}
+
+async fn run_rpc_command_live(
+    options: RunCommandOptions,
+    stdout_emitter: TextEmitter,
+    stderr_emitter: TextEmitter,
+) -> i32 {
+    let RunCommandOptions {
+        args,
+        auth_source,
+        built_in_models,
+        models_json_path,
+        agent_dir,
+        cwd,
+        default_system_prompt,
+        stream_options,
+        ..
+    } = options;
+
+    let parsed = parse_args(&args);
+    let initial_stderr = render_parse_diagnostics(&parsed.diagnostics);
+    if !initial_stderr.is_empty() {
+        stderr_emitter(initial_stderr.clone());
+    }
+    if parsed
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.kind == DiagnosticKind::Error)
+    {
+        return 1;
+    }
+    if parsed.resume {
+        stderr_emitter(String::from(
+            "--resume session picker is only supported in interactive mode in the Rust CLI\n",
+        ));
+        return 1;
+    }
+    if let Some(message) = unsupported_flag_message(&parsed) {
+        stderr_emitter(format!("{message}\n"));
+        return 1;
+    }
+
+    let prepared = RpcPreparedOptions {
+        parsed,
+        initial_stderr: String::new(),
+        stdin_content: None,
+        auth_source,
+        built_in_models,
+        models_json_path,
+        agent_dir,
+        cwd,
+        default_system_prompt,
+        stream_options,
+    };
+
+    run_rpc_processor(prepared, false, stdout_emitter, stderr_emitter).await
+}
+
+async fn run_rpc_command_buffered(options: RpcPreparedOptions) -> RunCommandResult {
+    let stdout = Arc::new(Mutex::new(String::new()));
+    let stderr = Arc::new(Mutex::new(options.initial_stderr.clone()));
+    let stdout_emitter: TextEmitter = Arc::new({
+        let stdout = stdout.clone();
+        move |text| {
+            stdout
+                .lock()
+                .expect("rpc stdout buffer mutex poisoned")
+                .push_str(&text);
+        }
+    });
+    let stderr_emitter: TextEmitter = Arc::new({
+        let stderr = stderr.clone();
+        move |text| {
+            stderr
+                .lock()
+                .expect("rpc stderr buffer mutex poisoned")
+                .push_str(&text);
+        }
+    });
+
+    let exit_code = run_rpc_processor(options, true, stdout_emitter, stderr_emitter).await;
+
+    RunCommandResult {
+        exit_code,
+        stdout: stdout
+            .lock()
+            .expect("rpc stdout buffer mutex poisoned")
+            .clone(),
+        stderr: stderr
+            .lock()
+            .expect("rpc stderr buffer mutex poisoned")
+            .clone(),
+    }
+}
+
+async fn run_rpc_processor(
+    options: RpcPreparedOptions,
+    wait_for_background_tasks: bool,
+    stdout_emitter: TextEmitter,
+    stderr_emitter: TextEmitter,
+) -> i32 {
+    let buffered_lines = options.stdin_content.as_ref().map(|stdin_content| {
+        stdin_content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>()
+    });
+
+    let shared = match create_rpc_shared(options, stdout_emitter, stderr_emitter.clone()) {
+        Ok(shared) => shared,
+        Err(error_output) => {
+            if !error_output.is_empty() {
+                stderr_emitter(error_output);
+            }
+            return 1;
+        }
+    };
+
+    let mut background_tasks = Vec::<tokio::task::JoinHandle<()>>::new();
+    if let Some(buffered_lines) = buffered_lines {
+        for line in buffered_lines {
+            handle_rpc_input_line(shared.clone(), &line, Some(&mut background_tasks)).await;
+        }
+    } else {
+        use std::io::BufRead as _;
+
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            let line = line.trim().to_owned();
+            if line.is_empty() {
+                continue;
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                handle_rpc_input_line(shared, &line, None).await;
+            });
+        }
+    }
+
+    if wait_for_background_tasks {
+        for task in background_tasks {
+            let _ = task.await;
+        }
+        shared.current_core().wait_for_idle().await;
+    } else {
+        shared.abort_active();
+    }
+
+    0
+}
+
+fn create_rpc_shared(
+    options: RpcPreparedOptions,
+    stdout_emitter: TextEmitter,
+    stderr_emitter: TextEmitter,
+) -> Result<RpcShared, String> {
+    if !options.parsed.file_args.is_empty() {
+        return Err(String::from(
+            "Error: @file arguments are not supported in RPC mode\n",
+        ));
+    }
+
+    let mut stderr = String::new();
+    let runtime_settings = options
+        .agent_dir
+        .as_deref()
+        .map(|agent_dir| load_runtime_settings(&options.cwd, agent_dir))
+        .unwrap_or_default();
+    stderr.push_str(&render_settings_warnings(&runtime_settings.warnings));
+
+    let scoped_models = resolve_rpc_scoped_models(&options, &runtime_settings, &mut stderr);
+    let (mut state, bootstrap_output) = build_rpc_state(
+        &options,
+        &options.cwd,
+        runtime_settings,
+        scoped_models,
+        None,
+        None,
+    )?;
+    stderr.push_str(&bootstrap_output);
+    attach_rpc_event_subscription(&mut state, stdout_emitter.clone());
+
+    if !stderr.is_empty() {
+        stderr_emitter(stderr);
+    }
+
+    Ok(RpcShared {
+        options: Arc::new(options),
+        state: Arc::new(Mutex::new(state)),
+        stdout_emitter,
+        stderr_emitter,
+    })
+}
+
+fn resolve_rpc_scoped_models(
+    options: &RpcPreparedOptions,
+    runtime_settings: &LoadedRuntimeSettings,
+    stderr: &mut String,
+) -> Vec<ScopedModel> {
+    if let Some(patterns) = options.parsed.models.as_ref() {
+        let registry = ModelRegistry::new(
+            options.auth_source.clone(),
+            options.built_in_models.clone(),
+            options.models_json_path.clone(),
+        );
+        let resolved = resolve_model_scope(patterns, &registry.get_available());
+        stderr.push_str(&render_scope_warnings(&resolved.warnings));
+        return resolved.scoped_models;
+    }
+
+    if let Some(patterns) = runtime_settings.settings.enabled_models.as_ref() {
+        if patterns.is_empty() {
+            return Vec::new();
+        }
+        let registry = ModelRegistry::new(
+            options.auth_source.clone(),
+            options.built_in_models.clone(),
+            options.models_json_path.clone(),
+        );
+        let resolved = resolve_model_scope(patterns, &registry.get_available());
+        stderr.push_str(&render_scope_warnings(&resolved.warnings));
+        return resolved.scoped_models;
+    }
+
+    Vec::new()
+}
+
+fn build_rpc_state(
+    options: &RpcPreparedOptions,
+    cwd: &Path,
+    runtime_settings: LoadedRuntimeSettings,
+    scoped_models: Vec<ScopedModel>,
+    manager_override: Option<SessionManager>,
+    bootstrap_defaults: Option<BootstrapDefaults>,
+) -> Result<(RpcState, String), String> {
+    let session_support = match manager_override {
+        Some(manager_override) => Some(build_session_support(manager_override)),
+        None => create_session_support(
+            &options.parsed,
+            cwd,
+            options.agent_dir.as_deref(),
+            None,
+            None,
+        )?,
+    };
+
+    let overlay_auth = OverlayAuthSource::new(options.auth_source.clone());
+    apply_runtime_api_key_override(
+        &options.parsed,
+        &overlay_auth,
+        &options.built_in_models,
+        options.models_json_path.as_deref(),
+        &scoped_models,
+    )?;
+
+    let mut stream_options = options.stream_options.clone();
+    if let Some(session_support) = session_support.as_ref() {
+        stream_options.session_id = Some(session_support.session_id.clone());
+    }
+
+    let default_system_prompt = resolve_interactive_default_system_prompt(
+        &options.default_system_prompt,
+        cwd,
+        options.agent_dir.as_deref(),
+        &options.parsed,
+    );
+    let created = create_coding_agent_core(CodingAgentCoreOptions {
+        auth_source: Arc::new(overlay_auth),
+        built_in_models: options.built_in_models.clone(),
+        models_json_path: options.models_json_path.clone(),
+        cwd: Some(cwd.to_path_buf()),
+        tools: None,
+        system_prompt: resolve_system_prompt(
+            &default_system_prompt,
+            options.parsed.system_prompt.as_deref(),
+            options.parsed.append_system_prompt.as_deref(),
+        ),
+        bootstrap: SessionBootstrapOptions {
+            cli_provider: options.parsed.provider.clone(),
+            cli_model: options.parsed.model.clone(),
+            cli_thinking_level: options.parsed.thinking,
+            scoped_models: scoped_models.clone(),
+            default_provider: bootstrap_defaults
+                .as_ref()
+                .map(|defaults| defaults.provider.clone()),
+            default_model_id: bootstrap_defaults
+                .as_ref()
+                .map(|defaults| defaults.model_id.clone()),
+            default_thinking_level: bootstrap_defaults
+                .as_ref()
+                .map(|defaults| defaults.thinking_level),
+            existing_session: session_support
+                .as_ref()
+                .map(|session_support| session_support.existing_session.clone())
+                .unwrap_or_default(),
+        },
+        stream_options,
+    });
+
+    let created = match created {
+        Ok(created) => created,
+        Err(CodingAgentCoreError::NoModelAvailable) => {
+            return Err(render_no_models_message(
+                options.models_json_path.as_deref(),
+            ));
+        }
+        Err(error) => {
+            return Err(format!("Error: {error}\n"));
+        }
+    };
+
+    if let Some(session_support) = session_support.as_ref() {
+        apply_session_support(&created.core, session_support)?;
+    }
+
+    created
+        .core
+        .set_auto_resize_images(runtime_settings.settings.images.auto_resize_images);
+    created
+        .core
+        .set_block_images(runtime_settings.settings.images.block_images);
+    created.core.set_thinking_budgets(map_thinking_budgets(
+        &runtime_settings.settings.thinking_budgets,
+    ));
+
+    let bootstrap_output = render_bootstrap_diagnostics(&created.diagnostics);
+    if created
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.level == BootstrapDiagnosticLevel::Error)
+    {
+        return Err(bootstrap_output);
+    }
+
+    Ok((
+        RpcState {
+            core: created.core,
+            session_manager: session_support
+                .as_ref()
+                .map(|support| support.manager.clone()),
+            cwd: cwd.to_path_buf(),
+            scoped_models,
+            runtime_settings: runtime_settings.clone(),
+            auto_compaction_enabled: runtime_settings.settings.compaction.enabled,
+            auto_retry_enabled: true,
+            is_compacting: Arc::new(AtomicBool::new(false)),
+            event_unsubscribe: None,
+            bash_abort_tx: None,
+        },
+        bootstrap_output,
+    ))
+}
+
+fn attach_rpc_event_subscription(state: &mut RpcState, stdout_emitter: TextEmitter) {
+    let unsubscribe = state.core.agent().subscribe(move |event, _signal| {
+        let stdout_emitter = stdout_emitter.clone();
+        Box::pin(async move {
+            let line = serde_json::to_string(&rpc_agent_event_to_json(&event))
+                .expect("rpc event serialization must succeed");
+            stdout_emitter(format!("{line}\n"));
+        })
+    });
+    state.event_unsubscribe = Some(unsubscribe);
+}
+
+async fn handle_rpc_input_line(
+    shared: RpcShared,
+    line: &str,
+    background_tasks: Option<&mut Vec<tokio::task::JoinHandle<()>>>,
+) {
+    let parsed = match serde_json::from_str::<Value>(line) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            shared.emit_error(None, "parse", format!("Failed to parse command: {error}"));
+            return;
+        }
+    };
+
+    let Some(command) = parsed.as_object() else {
+        shared.emit_error(None, "parse", "RPC command must be a JSON object");
+        return;
+    };
+    if command
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|command_type| command_type == "extension_ui_response")
+    {
+        return;
+    }
+
+    let id = optional_string_field(command, "id");
+    let Some(command_type) = optional_string_field(command, "type") else {
+        shared.emit_error(id.as_deref(), "parse", "RPC command is missing type");
+        return;
+    };
+
+    match command_type.as_str() {
+        "prompt" => {
+            let message = match required_string_field(command, "message") {
+                Ok(message) => message,
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "prompt", error);
+                    return;
+                }
+            };
+            let images = match parse_rpc_images(command, "images") {
+                Ok(images) => images,
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "prompt", error);
+                    return;
+                }
+            };
+            let streaming_behavior = optional_string_field(command, "streamingBehavior");
+            let snapshot = shared.snapshot();
+            if snapshot.core.state().is_streaming {
+                if streaming_behavior.as_deref() == Some("steer") {
+                    queue_rpc_message(&snapshot.core, "steer", message, images);
+                    shared.emit_response(id.as_deref(), "prompt", None);
+                    return;
+                }
+                if streaming_behavior.as_deref() == Some("followUp") {
+                    queue_rpc_message(&snapshot.core, "follow_up", message, images);
+                    shared.emit_response(id.as_deref(), "prompt", None);
+                    return;
+                }
+            }
+
+            let task = spawn_rpc_prompt_task(shared.clone(), id.clone(), message, images);
+            if let Some(background_tasks) = background_tasks {
+                background_tasks.push(task);
+            }
+            shared.emit_response(id.as_deref(), "prompt", None);
+        }
+        "steer" => {
+            let message = match required_string_field(command, "message") {
+                Ok(message) => message,
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "steer", error);
+                    return;
+                }
+            };
+            let images = match parse_rpc_images(command, "images") {
+                Ok(images) => images,
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "steer", error);
+                    return;
+                }
+            };
+            queue_rpc_message(&shared.current_core(), "steer", message, images);
+            shared.emit_response(id.as_deref(), "steer", None);
+        }
+        "follow_up" => {
+            let message = match required_string_field(command, "message") {
+                Ok(message) => message,
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "follow_up", error);
+                    return;
+                }
+            };
+            let images = match parse_rpc_images(command, "images") {
+                Ok(images) => images,
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "follow_up", error);
+                    return;
+                }
+            };
+            queue_rpc_message(&shared.current_core(), "follow_up", message, images);
+            shared.emit_response(id.as_deref(), "follow_up", None);
+        }
+        "abort" => {
+            shared.current_core().abort();
+            shared.emit_response(id.as_deref(), "abort", None);
+        }
+        "new_session" => {
+            let snapshot = shared.snapshot();
+            if snapshot.core.state().is_streaming {
+                shared.emit_error(
+                    id.as_deref(),
+                    "new_session",
+                    "Cannot create a new session while a request is running",
+                );
+                return;
+            }
+            let parent_session = optional_string_field(command, "parentSession");
+            let mut manager = match recreate_session_manager_from_rpc(&snapshot) {
+                Ok(manager) => manager,
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "new_session", error);
+                    return;
+                }
+            };
+            manager.new_session(NewSessionOptions {
+                id: None,
+                parent_session,
+            });
+            let next_cwd = PathBuf::from(manager.get_cwd());
+            match build_rpc_state(
+                &shared.options,
+                &next_cwd,
+                snapshot.runtime_settings.clone(),
+                snapshot.scoped_models.clone(),
+                Some(manager),
+                Some(BootstrapDefaults::from_model(
+                    &snapshot.core.state().model,
+                    snapshot.core.state().thinking_level,
+                )),
+            ) {
+                Ok((next_state, bootstrap_output)) => {
+                    if !bootstrap_output.is_empty() {
+                        shared.emit_stderr(bootstrap_output);
+                    }
+                    shared.replace_state(next_state);
+                    shared.emit_response(
+                        id.as_deref(),
+                        "new_session",
+                        Some(json!({ "cancelled": false })),
+                    );
+                }
+                Err(error) => shared.emit_error(id.as_deref(), "new_session", error.trim()),
+            }
+        }
+        "get_state" => {
+            shared.emit_response(
+                id.as_deref(),
+                "get_state",
+                Some(rpc_session_state_json(&shared.snapshot())),
+            );
+        }
+        "set_model" => {
+            let provider = match required_string_field(command, "provider") {
+                Ok(provider) => provider,
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "set_model", error);
+                    return;
+                }
+            };
+            let model_id = match required_string_field(command, "modelId") {
+                Ok(model_id) => model_id,
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "set_model", error);
+                    return;
+                }
+            };
+            let snapshot = shared.snapshot();
+            let available_models = snapshot.core.model_registry().get_available();
+            let Some(model) = available_models
+                .into_iter()
+                .find(|model| model.provider == provider && model.id == model_id)
+            else {
+                shared.emit_error(
+                    id.as_deref(),
+                    "set_model",
+                    format!("Model not found: {provider}/{model_id}"),
+                );
+                return;
+            };
+            match apply_interactive_model_state(
+                &snapshot.core,
+                &model,
+                None,
+                snapshot.session_manager.as_ref(),
+            ) {
+                Ok(()) => shared.emit_response(
+                    id.as_deref(),
+                    "set_model",
+                    Some(model_to_rpc_json(&snapshot.core.state().model)),
+                ),
+                Err(error) => shared.emit_error(id.as_deref(), "set_model", error),
+            }
+        }
+        "cycle_model" => {
+            let snapshot = shared.snapshot();
+            match cycle_interactive_model(
+                &snapshot.core,
+                snapshot.core.model_registry().as_ref(),
+                &snapshot.scoped_models,
+                snapshot.session_manager.as_ref(),
+                "forward",
+            ) {
+                Ok(Some(result)) => shared.emit_response(
+                    id.as_deref(),
+                    "cycle_model",
+                    Some(json!({
+                        "model": model_to_rpc_json(&result.model),
+                        "thinkingLevel": thinking_level_label(result.thinking_level),
+                        "isScoped": !snapshot.scoped_models.is_empty(),
+                    })),
+                ),
+                Ok(None) => shared.emit_response(id.as_deref(), "cycle_model", Some(Value::Null)),
+                Err(error) => shared.emit_error(id.as_deref(), "cycle_model", error),
+            }
+        }
+        "get_available_models" => {
+            let models = shared.current_core().model_registry().get_available();
+            shared.emit_response(
+                id.as_deref(),
+                "get_available_models",
+                Some(json!({
+                    "models": models.iter().map(model_to_rpc_json).collect::<Vec<_>>()
+                })),
+            );
+        }
+        "set_thinking_level" => {
+            let level = match command
+                .get("level")
+                .and_then(Value::as_str)
+                .and_then(parse_thinking_level)
+            {
+                Some(level) => level,
+                None => {
+                    shared.emit_error(
+                        id.as_deref(),
+                        "set_thinking_level",
+                        "Invalid thinking level",
+                    );
+                    return;
+                }
+            };
+            let snapshot = shared.snapshot();
+            let model = snapshot.core.state().model;
+            match apply_interactive_model_state(
+                &snapshot.core,
+                &model,
+                Some(level),
+                snapshot.session_manager.as_ref(),
+            ) {
+                Ok(()) => shared.emit_response(id.as_deref(), "set_thinking_level", None),
+                Err(error) => shared.emit_error(id.as_deref(), "set_thinking_level", error),
+            }
+        }
+        "cycle_thinking_level" => {
+            let snapshot = shared.snapshot();
+            match cycle_rpc_thinking_level(&snapshot.core, snapshot.session_manager.as_ref()) {
+                Ok(Some(level)) => shared.emit_response(
+                    id.as_deref(),
+                    "cycle_thinking_level",
+                    Some(json!({ "level": thinking_level_label(level) })),
+                ),
+                Ok(None) => {
+                    shared.emit_response(id.as_deref(), "cycle_thinking_level", Some(Value::Null))
+                }
+                Err(error) => shared.emit_error(id.as_deref(), "cycle_thinking_level", error),
+            }
+        }
+        "set_steering_mode" => {
+            let mode = match command
+                .get("mode")
+                .and_then(Value::as_str)
+                .and_then(queue_mode_from_str)
+            {
+                Some(mode) => mode,
+                None => {
+                    shared.emit_error(id.as_deref(), "set_steering_mode", "Invalid queue mode");
+                    return;
+                }
+            };
+            shared.current_core().agent().set_steering_mode(mode);
+            shared.emit_response(id.as_deref(), "set_steering_mode", None);
+        }
+        "set_follow_up_mode" => {
+            let mode = match command
+                .get("mode")
+                .and_then(Value::as_str)
+                .and_then(queue_mode_from_str)
+            {
+                Some(mode) => mode,
+                None => {
+                    shared.emit_error(id.as_deref(), "set_follow_up_mode", "Invalid queue mode");
+                    return;
+                }
+            };
+            shared.current_core().agent().set_follow_up_mode(mode);
+            shared.emit_response(id.as_deref(), "set_follow_up_mode", None);
+        }
+        "compact" => {
+            let snapshot = shared.snapshot();
+            let Some(session_manager) = snapshot.session_manager.as_ref() else {
+                shared.emit_error(
+                    id.as_deref(),
+                    "compact",
+                    "Session compaction is unavailable",
+                );
+                return;
+            };
+            if snapshot.core.state().is_streaming {
+                shared.emit_error(
+                    id.as_deref(),
+                    "compact",
+                    "Wait for the current response to finish before compacting",
+                );
+                return;
+            }
+            if snapshot.is_compacting.swap(true, Ordering::Relaxed) {
+                shared.emit_error(id.as_deref(), "compact", "Compaction is already running");
+                return;
+            }
+            let custom_instructions = optional_string_field(command, "customInstructions");
+            let settings = runtime_compaction_settings(&snapshot.runtime_settings);
+            let result = run_interactive_compaction(
+                &snapshot.core,
+                session_manager,
+                &settings,
+                custom_instructions.as_deref(),
+            )
+            .await;
+            snapshot.is_compacting.store(false, Ordering::Relaxed);
+            match result {
+                Ok(Some(result)) => shared.emit_response(
+                    id.as_deref(),
+                    "compact",
+                    Some(compaction_result_to_json(&result)),
+                ),
+                Ok(None) => shared.emit_error(id.as_deref(), "compact", "Nothing to compact"),
+                Err(error) => shared.emit_error(id.as_deref(), "compact", error),
+            }
+        }
+        "set_auto_compaction" => {
+            let enabled = command
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            {
+                let mut state = shared.state.lock().expect("rpc state mutex poisoned");
+                state.auto_compaction_enabled = enabled;
+                state.runtime_settings.settings.compaction.enabled = enabled;
+            }
+            shared.emit_response(id.as_deref(), "set_auto_compaction", None);
+        }
+        "set_auto_retry" => {
+            let enabled = command
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            shared
+                .state
+                .lock()
+                .expect("rpc state mutex poisoned")
+                .auto_retry_enabled = enabled;
+            shared.emit_response(id.as_deref(), "set_auto_retry", None);
+        }
+        "abort_retry" => {
+            shared.emit_response(id.as_deref(), "abort_retry", None);
+        }
+        "bash" => {
+            let command_text = match required_string_field(command, "command") {
+                Ok(command_text) => command_text,
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "bash", error);
+                    return;
+                }
+            };
+            let cwd = shared.snapshot().cwd;
+            let abort_rx = {
+                let mut state = shared.state.lock().expect("rpc state mutex poisoned");
+                if state.bash_abort_tx.is_some() {
+                    shared.emit_error(id.as_deref(), "bash", "A bash command is already running");
+                    return;
+                }
+                let (abort_tx, abort_rx) = tokio::sync::watch::channel(false);
+                state.bash_abort_tx = Some(abort_tx);
+                abort_rx
+            };
+
+            let tool = pi_coding_agent_tools::create_bash_tool(cwd);
+            let result = tool
+                .execute(
+                    String::from("rpc-bash"),
+                    json!({ "command": command_text }),
+                    Some(abort_rx),
+                )
+                .await;
+            shared
+                .state
+                .lock()
+                .expect("rpc state mutex poisoned")
+                .bash_abort_tx = None;
+            match result {
+                Ok(result) => shared.emit_response(
+                    id.as_deref(),
+                    "bash",
+                    Some(agent_tool_result_to_rpc_bash_json(&result)),
+                ),
+                Err(error) => shared.emit_error(id.as_deref(), "bash", error.to_string()),
+            }
+        }
+        "abort_bash" => {
+            if let Some(abort_tx) = shared
+                .state
+                .lock()
+                .expect("rpc state mutex poisoned")
+                .bash_abort_tx
+                .clone()
+            {
+                let _ = abort_tx.send(true);
+            }
+            shared.emit_response(id.as_deref(), "abort_bash", None);
+        }
+        "get_session_stats" => {
+            shared.emit_response(
+                id.as_deref(),
+                "get_session_stats",
+                Some(rpc_session_stats_json(&shared.snapshot())),
+            );
+        }
+        "export_html" => {
+            let snapshot = shared.snapshot();
+            let Some(session_manager) = snapshot.session_manager.as_ref() else {
+                shared.emit_error(
+                    id.as_deref(),
+                    "export_html",
+                    "Session export is unavailable",
+                );
+                return;
+            };
+            let output_path = optional_string_field(command, "outputPath");
+            match export_interactive_session(session_manager, &snapshot.cwd, output_path.as_deref())
+            {
+                Ok(path) => shared.emit_response(
+                    id.as_deref(),
+                    "export_html",
+                    Some(json!({ "path": path })),
+                ),
+                Err(error) => shared.emit_error(id.as_deref(), "export_html", error),
+            }
+        }
+        "switch_session" => {
+            let snapshot = shared.snapshot();
+            if snapshot.core.state().is_streaming {
+                shared.emit_error(
+                    id.as_deref(),
+                    "switch_session",
+                    "Cannot switch sessions while a request is running",
+                );
+                return;
+            }
+            let session_path = match required_string_field(command, "sessionPath") {
+                Ok(session_path) => session_path,
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "switch_session", error);
+                    return;
+                }
+            };
+            let session_dir = snapshot
+                .session_manager
+                .as_ref()
+                .and_then(current_rpc_session_dir);
+            let manager = match SessionManager::open(
+                &resolve_session_path(&snapshot.cwd, &session_path),
+                session_dir.as_deref(),
+                None,
+            ) {
+                Ok(manager) => manager,
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "switch_session", error.to_string());
+                    return;
+                }
+            };
+            let next_cwd = PathBuf::from(manager.get_cwd());
+            let next_runtime_settings = shared
+                .options
+                .agent_dir
+                .as_deref()
+                .map(|agent_dir| load_runtime_settings(&next_cwd, agent_dir))
+                .unwrap_or(snapshot.runtime_settings.clone());
+            match build_rpc_state(
+                &shared.options,
+                &next_cwd,
+                next_runtime_settings,
+                snapshot.scoped_models.clone(),
+                Some(manager),
+                None,
+            ) {
+                Ok((next_state, bootstrap_output)) => {
+                    if !bootstrap_output.is_empty() {
+                        shared.emit_stderr(bootstrap_output);
+                    }
+                    shared.replace_state(next_state);
+                    shared.emit_response(
+                        id.as_deref(),
+                        "switch_session",
+                        Some(json!({ "cancelled": false })),
+                    );
+                }
+                Err(error) => shared.emit_error(id.as_deref(), "switch_session", error.trim()),
+            }
+        }
+        "fork" => {
+            let snapshot = shared.snapshot();
+            if snapshot.core.state().is_streaming {
+                shared.emit_error(
+                    id.as_deref(),
+                    "fork",
+                    "Cannot fork while a request is running",
+                );
+                return;
+            }
+            let entry_id = match required_string_field(command, "entryId") {
+                Ok(entry_id) => entry_id,
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "fork", error);
+                    return;
+                }
+            };
+            let mut manager = match recreate_session_manager_from_rpc(&snapshot) {
+                Ok(manager) => manager,
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "fork", error);
+                    return;
+                }
+            };
+            let candidates = collect_fork_candidates(&manager);
+            let Some(selected) = candidates
+                .into_iter()
+                .find(|candidate| candidate.entry_id == entry_id)
+            else {
+                shared.emit_error(id.as_deref(), "fork", "Invalid entry ID for forking");
+                return;
+            };
+            let bootstrap_defaults = if let Some(parent_id) = selected.parent_id.as_deref() {
+                if let Err(error) = manager.create_branched_session(parent_id) {
+                    shared.emit_error(id.as_deref(), "fork", error.to_string());
+                    return;
+                }
+                None
+            } else {
+                manager.new_session(NewSessionOptions {
+                    id: None,
+                    parent_session: manager.get_session_file().map(ToOwned::to_owned),
+                });
+                Some(BootstrapDefaults::from_model(
+                    &snapshot.core.state().model,
+                    snapshot.core.state().thinking_level,
+                ))
+            };
+            let next_cwd = PathBuf::from(manager.get_cwd());
+            match build_rpc_state(
+                &shared.options,
+                &next_cwd,
+                snapshot.runtime_settings.clone(),
+                snapshot.scoped_models.clone(),
+                Some(manager),
+                bootstrap_defaults,
+            ) {
+                Ok((next_state, bootstrap_output)) => {
+                    if !bootstrap_output.is_empty() {
+                        shared.emit_stderr(bootstrap_output);
+                    }
+                    shared.replace_state(next_state);
+                    shared.emit_response(
+                        id.as_deref(),
+                        "fork",
+                        Some(json!({ "text": selected.text, "cancelled": false })),
+                    );
+                }
+                Err(error) => shared.emit_error(id.as_deref(), "fork", error.trim()),
+            }
+        }
+        "get_fork_messages" => {
+            let snapshot = shared.snapshot();
+            let messages = snapshot
+                .session_manager
+                .as_ref()
+                .map(|session_manager| {
+                    let session_manager = session_manager
+                        .lock()
+                        .expect("rpc session manager mutex poisoned");
+                    collect_fork_candidates(&session_manager)
+                        .into_iter()
+                        .map(|candidate| {
+                            json!({
+                                "entryId": candidate.entry_id,
+                                "text": candidate.text,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            shared.emit_response(
+                id.as_deref(),
+                "get_fork_messages",
+                Some(json!({ "messages": messages })),
+            );
+        }
+        "get_last_assistant_text" => {
+            shared.emit_response(
+                id.as_deref(),
+                "get_last_assistant_text",
+                Some(json!({ "text": last_assistant_message_text(&shared.current_core()) })),
+            );
+        }
+        "set_session_name" => {
+            let name = match required_string_field(command, "name") {
+                Ok(name) if !name.trim().is_empty() => name,
+                _ => {
+                    shared.emit_error(
+                        id.as_deref(),
+                        "set_session_name",
+                        "Session name cannot be empty",
+                    );
+                    return;
+                }
+            };
+            let snapshot = shared.snapshot();
+            let Some(session_manager) = snapshot.session_manager.as_ref() else {
+                shared.emit_error(
+                    id.as_deref(),
+                    "set_session_name",
+                    "Session naming is unavailable",
+                );
+                return;
+            };
+            match session_manager
+                .lock()
+                .expect("rpc session manager mutex poisoned")
+                .append_session_info(&name)
+            {
+                Ok(_) => shared.emit_response(id.as_deref(), "set_session_name", None),
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "set_session_name", error.to_string())
+                }
+            }
+        }
+        "get_messages" => {
+            let state = shared.current_core().state();
+            shared.emit_response(
+                id.as_deref(),
+                "get_messages",
+                Some(json!({
+                    "messages": state
+                        .messages
+                        .iter()
+                        .map(rpc_agent_message_to_json)
+                        .collect::<Vec<_>>()
+                })),
+            );
+        }
+        "get_commands" => {
+            shared.emit_response(
+                id.as_deref(),
+                "get_commands",
+                Some(json!({ "commands": Vec::<Value>::new() })),
+            );
+        }
+        other => shared.emit_error(id.as_deref(), other, format!("Unknown command: {other}")),
+    }
+}
+
+fn optional_string_field(command: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    command
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn required_string_field(
+    command: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<String, String> {
+    optional_string_field(command, key)
+        .ok_or_else(|| format!("Missing required string field: {key}"))
+}
+
+fn parse_rpc_images(
+    command: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Vec<UserContent>, String> {
+    let Some(images) = command.get(key) else {
+        return Ok(Vec::new());
+    };
+    let Some(images) = images.as_array() else {
+        return Err(format!("Field {key} must be an array"));
+    };
+
+    images
+        .iter()
+        .map(|image| {
+            let Some(image) = image.as_object() else {
+                return Err(String::from("Image entries must be objects"));
+            };
+            let data = required_string_field(image, "data")?;
+            let mime_type = optional_string_field(image, "mimeType")
+                .or_else(|| optional_string_field(image, "mime_type"))
+                .ok_or_else(|| String::from("Image entries must include mimeType"))?;
+            Ok(UserContent::Image { data, mime_type })
+        })
+        .collect()
+}
+
+fn build_rpc_user_message(text: String, images: Vec<UserContent>) -> Message {
+    let mut content = Vec::with_capacity(images.len() + 1);
+    content.push(UserContent::Text { text });
+    content.extend(images);
+    Message::User {
+        content,
+        timestamp: now_ms(),
+    }
+}
+
+fn queue_rpc_message(core: &CodingAgentCore, kind: &str, text: String, images: Vec<UserContent>) {
+    let message = build_rpc_user_message(text, images);
+    if kind == "follow_up" {
+        core.agent().follow_up(message);
+    } else {
+        core.agent().steer(message);
+    }
+}
+
+fn spawn_rpc_prompt_task(
+    shared: RpcShared,
+    id: Option<String>,
+    message: String,
+    images: Vec<UserContent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let core = shared.current_core();
+        let result = if images.is_empty() {
+            core.prompt_text(message)
+                .await
+                .map_err(|error| error.to_string())
+        } else {
+            core.prompt_message(build_rpc_user_message(message, images))
+                .await
+                .map_err(|error| error.to_string())
+        };
+        if let Err(error) = result {
+            shared.emit_error(id.as_deref(), "prompt", error);
+        }
+    })
+}
+
+fn queue_mode_from_str(value: &str) -> Option<pi_agent::QueueMode> {
+    match value {
+        "all" => Some(pi_agent::QueueMode::All),
+        "one-at-a-time" => Some(pi_agent::QueueMode::OneAtATime),
+        _ => None,
+    }
+}
+
+fn queue_mode_label(mode: pi_agent::QueueMode) -> &'static str {
+    match mode {
+        pi_agent::QueueMode::All => "all",
+        pi_agent::QueueMode::OneAtATime => "one-at-a-time",
+    }
+}
+
+fn cycle_rpc_thinking_level(
+    core: &CodingAgentCore,
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
+) -> Result<Option<ThinkingLevel>, String> {
+    let state = core.state();
+    if !state.model.reasoning {
+        return Ok(None);
+    }
+
+    let levels = if supports_xhigh(&state.model) {
+        vec![
+            ThinkingLevel::Off,
+            ThinkingLevel::Minimal,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::XHigh,
+        ]
+    } else {
+        vec![
+            ThinkingLevel::Off,
+            ThinkingLevel::Minimal,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+        ]
+    };
+    let current_index = levels
+        .iter()
+        .position(|level| *level == state.thinking_level)
+        .unwrap_or(0);
+    let next_level = levels[(current_index + 1) % levels.len()];
+    apply_interactive_model_state(core, &state.model, Some(next_level), session_manager)?;
+    Ok(Some(next_level))
+}
+
+fn recreate_session_manager_from_rpc(snapshot: &RpcSnapshot) -> Result<SessionManager, String> {
+    if let Some(session_manager) = snapshot.session_manager.as_ref() {
+        let (session_file, session_dir, cwd) = {
+            let session_manager = session_manager
+                .lock()
+                .expect("rpc session manager mutex poisoned");
+            (
+                session_manager.get_session_file().map(str::to_owned),
+                (!session_manager.get_session_dir().is_empty())
+                    .then(|| session_manager.get_session_dir().to_owned()),
+                session_manager.get_cwd().to_owned(),
+            )
+        };
+
+        if let Some(session_file) = session_file {
+            return SessionManager::open(&session_file, session_dir.as_deref(), None)
+                .map_err(|error| error.to_string());
+        }
+
+        return Ok(snapshot_session_manager(&cwd, &snapshot.core.state()));
+    }
+
+    Ok(snapshot_session_manager(
+        &snapshot.cwd.to_string_lossy(),
+        &snapshot.core.state(),
+    ))
+}
+
+fn current_rpc_session_dir(session_manager: &Arc<Mutex<SessionManager>>) -> Option<String> {
+    let session_manager = session_manager
+        .lock()
+        .expect("rpc session manager mutex poisoned");
+    (!session_manager.get_session_dir().is_empty())
+        .then(|| session_manager.get_session_dir().to_owned())
+}
+
+fn rpc_success_response(id: Option<&str>, command: &str, data: Option<Value>) -> Value {
+    let mut response = serde_json::Map::new();
+    if let Some(id) = id {
+        response.insert(String::from("id"), Value::String(id.to_owned()));
+    }
+    response.insert(
+        String::from("type"),
+        Value::String(String::from("response")),
+    );
+    response.insert(String::from("command"), Value::String(command.to_owned()));
+    response.insert(String::from("success"), Value::Bool(true));
+    if let Some(data) = data {
+        response.insert(String::from("data"), data);
+    }
+    Value::Object(response)
+}
+
+fn rpc_error_response(id: Option<&str>, command: &str, message: impl Into<String>) -> Value {
+    let mut response = serde_json::Map::new();
+    if let Some(id) = id {
+        response.insert(String::from("id"), Value::String(id.to_owned()));
+    }
+    response.insert(
+        String::from("type"),
+        Value::String(String::from("response")),
+    );
+    response.insert(String::from("command"), Value::String(command.to_owned()));
+    response.insert(String::from("success"), Value::Bool(false));
+    response.insert(String::from("error"), Value::String(message.into()));
+    Value::Object(response)
+}
+
+fn rpc_session_state_json(snapshot: &RpcSnapshot) -> Value {
+    let state = snapshot.core.state();
+    json!({
+        "model": model_to_rpc_json(&state.model),
+        "thinkingLevel": thinking_level_label(state.thinking_level),
+        "isStreaming": state.is_streaming,
+        "isCompacting": snapshot.is_compacting.load(Ordering::Relaxed),
+        "steeringMode": queue_mode_label(snapshot.core.agent().steering_mode()),
+        "followUpMode": queue_mode_label(snapshot.core.agent().follow_up_mode()),
+        "sessionFile": snapshot.session_manager.as_ref().and_then(|session_manager| {
+            session_manager
+                .lock()
+                .expect("rpc session manager mutex poisoned")
+                .get_session_file()
+                .map(str::to_owned)
+        }),
+        "sessionId": snapshot.session_manager.as_ref().map(|session_manager| {
+            session_manager
+                .lock()
+                .expect("rpc session manager mutex poisoned")
+                .get_session_id()
+                .to_owned()
+        }).or_else(|| snapshot.core.agent().session_id()).unwrap_or_else(|| String::from("In-memory")),
+        "sessionName": current_session_name(snapshot.session_manager.as_ref()),
+        "autoCompactionEnabled": snapshot.auto_compaction_enabled,
+        "messageCount": state.messages.len(),
+        "pendingMessageCount": if snapshot.core.agent().has_queued_messages() { 1 } else { 0 },
+    })
+}
+
+fn rpc_session_stats_json(snapshot: &RpcSnapshot) -> Value {
+    let state = snapshot.core.state();
+    let mut user_messages = 0usize;
+    let mut assistant_messages = 0usize;
+    let mut tool_results = 0usize;
+    let mut tool_calls = 0usize;
+    let mut total_input = 0u64;
+    let mut total_output = 0u64;
+    let mut total_cache_read = 0u64;
+    let mut total_cache_write = 0u64;
+    let mut total_cost = 0.0f64;
+
+    for agent_message in &state.messages {
+        let Some(message) = agent_message.as_standard_message() else {
+            continue;
+        };
+        match message {
+            Message::User { .. } => user_messages += 1,
+            Message::Assistant { content, usage, .. } => {
+                assistant_messages += 1;
+                tool_calls += content
+                    .iter()
+                    .filter(|content| matches!(content, AssistantContent::ToolCall { .. }))
+                    .count();
+                total_input += usage.input;
+                total_output += usage.output;
+                total_cache_read += usage.cache_read;
+                total_cache_write += usage.cache_write;
+                total_cost += usage.cost.total;
+            }
+            Message::ToolResult { .. } => tool_results += 1,
+        }
+    }
+
+    json!({
+        "sessionFile": snapshot.session_manager.as_ref().and_then(|session_manager| {
+            session_manager
+                .lock()
+                .expect("rpc session manager mutex poisoned")
+                .get_session_file()
+                .map(str::to_owned)
+        }),
+        "sessionId": snapshot.session_manager.as_ref().map(|session_manager| {
+            session_manager
+                .lock()
+                .expect("rpc session manager mutex poisoned")
+                .get_session_id()
+                .to_owned()
+        }).or_else(|| snapshot.core.agent().session_id()).unwrap_or_else(|| String::from("In-memory")),
+        "userMessages": user_messages,
+        "assistantMessages": assistant_messages,
+        "toolCalls": tool_calls,
+        "toolResults": tool_results,
+        "totalMessages": state.messages.len(),
+        "tokens": {
+            "input": total_input,
+            "output": total_output,
+            "cacheRead": total_cache_read,
+            "cacheWrite": total_cache_write,
+            "total": total_input + total_output + total_cache_read + total_cache_write,
+        },
+        "cost": total_cost,
+    })
+}
+
+fn model_to_rpc_json(model: &Model) -> Value {
+    json!({
+        "id": model.id,
+        "name": model.name,
+        "api": model.api,
+        "provider": model.provider,
+        "baseUrl": model.base_url,
+        "reasoning": model.reasoning,
+        "input": model.input,
+        "cost": model.cost,
+        "contextWindow": model.context_window,
+        "maxTokens": model.max_tokens,
+        "compat": model.compat,
+    })
+}
+
+fn compaction_result_to_json(result: &CompactionResult) -> Value {
+    json!({
+        "summary": result.summary,
+        "firstKeptEntryId": result.first_kept_entry_id,
+        "tokensBefore": result.tokens_before,
+        "details": result.details,
+    })
+}
+
+fn agent_tool_result_to_rpc_bash_json(result: &pi_agent::AgentToolResult) -> Value {
+    let output = result
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            UserContent::Text { text } => Some(text.as_str()),
+            UserContent::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let full_output_path = result
+        .details
+        .get("fullOutputPath")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    json!({
+        "output": output,
+        "exitCode": 0,
+        "cancelled": false,
+        "truncated": full_output_path.is_some(),
+        "fullOutputPath": full_output_path,
+    })
+}
+
+fn rpc_agent_event_to_json(event: &pi_agent::AgentEvent) -> Value {
+    match event {
+        pi_agent::AgentEvent::AgentStart => json!({ "type": "agent_start" }),
+        pi_agent::AgentEvent::AgentEnd { messages } => json!({
+            "type": "agent_end",
+            "messages": messages.iter().map(rpc_agent_message_to_json).collect::<Vec<_>>(),
+        }),
+        pi_agent::AgentEvent::TurnStart => json!({ "type": "turn_start" }),
+        pi_agent::AgentEvent::TurnEnd {
+            message,
+            tool_results,
+        } => json!({
+            "type": "turn_end",
+            "message": serde_json::to_value(message)
+                .expect("assistant message serialization must succeed"),
+            "toolResults": tool_results,
+        }),
+        pi_agent::AgentEvent::MessageStart { message } => json!({
+            "type": "message_start",
+            "message": rpc_agent_message_to_json(message),
+        }),
+        pi_agent::AgentEvent::MessageUpdate {
+            message,
+            assistant_event,
+        } => json!({
+            "type": "message_update",
+            "message": rpc_agent_message_to_json(message),
+            "assistantEvent": assistant_event,
+        }),
+        pi_agent::AgentEvent::MessageEnd { message } => json!({
+            "type": "message_end",
+            "message": rpc_agent_message_to_json(message),
+        }),
+        pi_agent::AgentEvent::ToolExecutionStart {
+            tool_call_id,
+            tool_name,
+            args,
+        } => json!({
+            "type": "tool_execution_start",
+            "toolCallId": tool_call_id,
+            "toolName": tool_name,
+            "args": args,
+        }),
+        pi_agent::AgentEvent::ToolExecutionUpdate {
+            tool_call_id,
+            tool_name,
+            args,
+            partial_result,
+        } => json!({
+            "type": "tool_execution_update",
+            "toolCallId": tool_call_id,
+            "toolName": tool_name,
+            "args": args,
+            "partialResult": {
+                "content": partial_result.content,
+                "details": partial_result.details,
+            },
+        }),
+        pi_agent::AgentEvent::ToolExecutionEnd {
+            tool_call_id,
+            tool_name,
+            result,
+            is_error,
+        } => json!({
+            "type": "tool_execution_end",
+            "toolCallId": tool_call_id,
+            "toolName": tool_name,
+            "result": {
+                "content": result.content,
+                "details": result.details,
+            },
+            "isError": is_error,
+        }),
+    }
+}
+
+fn rpc_agent_message_to_json(message: &pi_agent::AgentMessage) -> Value {
+    match message {
+        pi_agent::AgentMessage::Standard(message) => {
+            serde_json::to_value(message).expect("standard rpc message serialization must succeed")
+        }
+        pi_agent::AgentMessage::Custom(message) => json!({
+            "role": message.role,
+            "payload": message.payload,
+            "timestamp": message.timestamp,
+        }),
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn apply_runtime_api_key_override(
@@ -6070,6 +7716,7 @@ fn render_help() -> String {
         "Supported today:",
         "  - non-interactive text mode (-p / piped stdin)",
         "  - non-interactive json mode (--mode json)",
+        "  - rpc mode (--mode rpc)",
         "  - interactive mode",
         "  - --provider, --model, --models, --api-key, --system-prompt, --append-system-prompt, --thinking",
         "  - --continue, --resume, --session, --fork, --no-session, --session-dir",
@@ -6077,8 +7724,9 @@ fn render_help() -> String {
         "  - --export <session.jsonl> [out.html]",
         "  - @file text/image preprocessing",
         "",
-        "Not yet supported:",
-        "  - rpc mode",
+        "RPC mode limitations:",
+        "  - @file arguments are rejected",
+        "  - extension UI and package resources are not loaded yet",
     ]
     .join("\n")
 }
