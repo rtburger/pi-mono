@@ -25,8 +25,7 @@ const ANTHROPIC_CALLBACK_HOST: &str = "127.0.0.1";
 const ANTHROPIC_CALLBACK_PORT: u16 = 53692;
 const ANTHROPIC_CALLBACK_PATH: &str = "/callback";
 const ANTHROPIC_REDIRECT_URI: &str = "http://localhost:53692/callback";
-const ANTHROPIC_SCOPES: &str =
-    "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+const ANTHROPIC_SCOPES: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
 const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_CODEX_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
@@ -159,7 +158,10 @@ impl OAuthLoginCallbacks {
     }
 
     pub fn is_aborted(&self) -> bool {
-        self.signal.as_ref().map(|signal| *signal.borrow()).unwrap_or(false)
+        self.signal
+            .as_ref()
+            .map(|signal| *signal.borrow())
+            .unwrap_or(false)
     }
 }
 
@@ -289,7 +291,10 @@ fn replace_or_insert_provider(
     providers: &mut Vec<Arc<dyn OAuthProvider>>,
     replacement: Arc<dyn OAuthProvider>,
 ) {
-    if let Some(index) = providers.iter().position(|provider| provider.id() == replacement.id()) {
+    if let Some(index) = providers
+        .iter()
+        .position(|provider| provider.id() == replacement.id())
+    {
         providers[index] = replacement;
     } else {
         providers.push(replacement);
@@ -350,12 +355,8 @@ pub async fn refresh_oauth_token(
     provider_id: &str,
     credentials: &OAuthCredentials,
 ) -> Result<OAuthCredentials, String> {
-    refresh_oauth_token_with_overrides(
-        provider_id,
-        credentials,
-        &OAuthRefreshOverrides::default(),
-    )
-    .await
+    refresh_oauth_token_with_overrides(provider_id, credentials, &OAuthRefreshOverrides::default())
+        .await
 }
 
 pub async fn refresh_oauth_token_with_overrides(
@@ -419,7 +420,9 @@ pub async fn refresh_anthropic_token(refresh_token: &str) -> Result<OAuthCredent
     refresh_anthropic_token_with_url(refresh_token, ANTHROPIC_TOKEN_URL).await
 }
 
-pub async fn login_openai_codex(callbacks: OAuthLoginCallbacks) -> Result<OAuthCredentials, String> {
+pub async fn login_openai_codex(
+    callbacks: OAuthLoginCallbacks,
+) -> Result<OAuthCredentials, String> {
     login_openai_codex_with_originator(callbacks, "pi").await
 }
 
@@ -762,7 +765,9 @@ async fn refresh_openai_codex_token_with_url(
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("OpenAI Codex token refresh failed: {status}: {body}"));
+        return Err(format!(
+            "OpenAI Codex token refresh failed: {status}: {body}"
+        ));
     }
 
     let payload = serde_json::from_str::<OpenAiCodexTokenResponse>(&body)
@@ -792,7 +797,9 @@ async fn exchange_openai_codex_authorization_code(
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("OpenAI Codex token exchange failed: {status}: {body}"));
+        return Err(format!(
+            "OpenAI Codex token exchange failed: {status}: {body}"
+        ));
     }
 
     let payload = serde_json::from_str::<OpenAiCodexTokenResponse>(&body)
@@ -899,7 +906,10 @@ struct CallbackAuthorization {
 }
 
 enum CallbackHandlerResult {
-    Continue { status: u16, body: String },
+    Continue {
+        status: u16,
+        body: String,
+    },
     Complete {
         status: u16,
         body: String,
@@ -1193,19 +1203,24 @@ fn handle_openai_codex_callback(url: &Url, expected_state: &str) -> CallbackHand
 }
 
 fn oauth_success_html(message: &str) -> String {
-    render_oauth_page("Authentication successful", "Authentication successful", message, None)
+    render_oauth_page(
+        "Authentication successful",
+        "Authentication successful",
+        message,
+        None,
+    )
 }
 
 fn oauth_error_html(message: &str, details: Option<&str>) -> String {
-    render_oauth_page("Authentication failed", "Authentication failed", message, details)
+    render_oauth_page(
+        "Authentication failed",
+        "Authentication failed",
+        message,
+        details,
+    )
 }
 
-fn render_oauth_page(
-    title: &str,
-    heading: &str,
-    message: &str,
-    details: Option<&str>,
-) -> String {
+fn render_oauth_page(title: &str, heading: &str, message: &str, details: Option<&str>) -> String {
     let title = escape_html(title);
     let heading = escape_html(heading);
     let message = escape_html(message);
@@ -1404,7 +1419,10 @@ mod tests {
             Box::pin(async { Err("not implemented".into()) })
         }
 
-        fn refresh_token<'a>(&'a self, credentials: OAuthCredentials) -> OAuthCredentialsFuture<'a> {
+        fn refresh_token<'a>(
+            &'a self,
+            credentials: OAuthCredentials,
+        ) -> OAuthCredentialsFuture<'a> {
             Box::pin(async move {
                 Ok(OAuthCredentials::new(
                     credentials.refresh,
