@@ -1,5 +1,6 @@
 pub mod anthropic_messages;
 pub mod models;
+pub mod oauth;
 pub mod openai_codex_responses;
 pub mod openai_completions;
 pub mod openai_responses;
@@ -10,6 +11,15 @@ mod unicode;
 pub use models::{
     built_in_models, calculate_cost, get_model, get_models, get_providers, models_are_equal,
     supports_xhigh,
+};
+pub use oauth::{
+    AnthropicOAuthProvider, OAuthApiKeyResult, OAuthAuthInfo, OAuthCredentials,
+    OAuthCredentialsFuture, OAuthLoginCallbacks, OAuthPrompt, OAuthProvider, OAuthProviderId,
+    OAuthProviderInfo, OpenAiCodexOAuthProvider, get_oauth_api_key, get_oauth_provider,
+    get_oauth_provider_info_list, get_oauth_providers, login_anthropic, login_openai_codex,
+    login_openai_codex_with_originator, refresh_anthropic_token, refresh_oauth_token,
+    refresh_openai_codex_token, register_oauth_provider, reset_oauth_providers,
+    unregister_oauth_provider,
 };
 pub use overflow::{is_context_overflow, overflow_patterns};
 

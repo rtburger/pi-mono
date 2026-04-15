@@ -1,4 +1,8 @@
 use crate::config_value::resolve_config_value_uncached;
+use pi_ai::oauth::{
+    OAuthCredentials, OAuthRefreshOverrides, get_oauth_provider,
+    refresh_oauth_token_with_overrides,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::{
@@ -85,20 +89,20 @@ impl AuthFileSource {
 
     fn load(&self) -> Option<AuthFileData> {
         let content = fs::read_to_string(&self.path).ok()?;
-        serde_json::from_str(&content).ok()
+        let root = serde_json::from_str::<Value>(&content).ok()?;
+        root.as_object().cloned()
     }
 
     async fn get_api_key_for_request_impl(&self, provider: &str) -> Option<String> {
         let mut data = self.load()?;
-        let credential = data.remove(provider)?;
-        match credential {
+        let entry = data.remove(provider)?;
+        match serde_json::from_value::<AuthFileCredential>(entry.clone()).ok()? {
             AuthFileCredential::ApiKey { key } => resolve_config_value_uncached(&key),
-            AuthFileCredential::OAuth {
-                access, expires, ..
-            } => {
-                let access = access.filter(|value| !value.is_empty())?;
+            AuthFileCredential::OAuth { access, expires } => {
+                access.filter(|value| !value.is_empty())?;
+                let credential = AuthFileOAuthCredentialView::from_value(&entry)?;
                 if expires.is_none_or(|expires| expires > now_ms()) {
-                    return oauth_api_key(provider, &access);
+                    return oauth_api_key(provider, &credential.to_oauth_credentials());
                 }
                 refresh_auth_file_provider_api_key(&self.path, provider).await
             }
@@ -113,17 +117,16 @@ impl AuthSource for AuthFileSource {
 
     fn get_api_key(&self, provider: &str) -> Option<String> {
         let mut data = self.load()?;
-        let credential = data.remove(provider)?;
-        match credential {
+        let entry = data.remove(provider)?;
+        match serde_json::from_value::<AuthFileCredential>(entry.clone()).ok()? {
             AuthFileCredential::ApiKey { key } => resolve_config_value_uncached(&key),
-            AuthFileCredential::OAuth {
-                access, expires, ..
-            } => {
-                let access = access.filter(|value| !value.is_empty())?;
+            AuthFileCredential::OAuth { access, expires } => {
+                access.filter(|value| !value.is_empty())?;
                 if expires.is_some_and(|expires| expires <= now_ms()) {
                     return None;
                 }
-                oauth_api_key(provider, &access)
+                let credential = AuthFileOAuthCredentialView::from_value(&entry)?;
+                oauth_api_key(provider, &credential.to_oauth_credentials())
             }
         }
     }
@@ -193,15 +196,15 @@ async fn refresh_auth_file_provider_api_key(path: &Path, provider: &str) -> Opti
     }
 
     let credential = AuthFileOAuthCredentialView::from_value(entry)?;
-    let refresh_token = credential
-        .refresh
-        .as_deref()
-        .filter(|value| !value.is_empty())?;
-    let refreshed =
-        refresh_auth_provider(provider, refresh_token, &OAuthRefreshOverrides::default())
-            .await
-            .ok()?;
-    let api_key = oauth_api_key(provider, &refreshed.access)?;
+    credential.refresh_token()?;
+    let refreshed = refresh_auth_provider(
+        provider,
+        &credential.to_oauth_credentials(),
+        &OAuthRefreshOverrides::default(),
+    )
+    .await
+    .ok()?;
+    let api_key = oauth_api_key(provider, &refreshed)?;
     apply_refreshed_oauth_credentials(entry, refreshed);
 
     let serialized = serde_json::to_string_pretty(&root).ok()?;
@@ -209,7 +212,7 @@ async fn refresh_auth_file_provider_api_key(path: &Path, provider: &str) -> Opti
     Some(api_key)
 }
 
-type AuthFileData = HashMap<String, AuthFileCredential>;
+type AuthFileData = Map<String, Value>;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
@@ -228,7 +231,10 @@ struct AuthFileOAuthCredentialView {
     #[serde(rename = "type")]
     credential_type: String,
     refresh: Option<String>,
+    access: Option<String>,
     expires: Option<i64>,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
 }
 
 impl AuthFileOAuthCredentialView {
@@ -236,75 +242,30 @@ impl AuthFileOAuthCredentialView {
         let credential = serde_json::from_value::<Self>(value.clone()).ok()?;
         (credential.credential_type == "oauth").then_some(credential)
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RefreshedOAuthCredentials {
-    refresh: String,
-    access: String,
-    expires: i64,
-    account_id: Option<String>,
-}
+    fn access_token(&self) -> Option<&str> {
+        self.access.as_deref().filter(|value| !value.is_empty())
+    }
 
-impl RefreshedOAuthCredentials {
-    fn new(refresh: String, access: String, expires: i64) -> Self {
-        Self {
-            refresh,
-            access,
-            expires,
-            account_id: None,
+    fn refresh_token(&self) -> Option<&str> {
+        self.refresh.as_deref().filter(|value| !value.is_empty())
+    }
+
+    fn to_oauth_credentials(&self) -> OAuthCredentials {
+        OAuthCredentials {
+            refresh: self.refresh.clone().unwrap_or_default(),
+            access: self.access.clone().unwrap_or_default(),
+            expires: self.expires.unwrap_or_default(),
+            extra: self.extra.clone(),
         }
     }
-
-    fn with_account_id(mut self, account_id: impl Into<String>) -> Self {
-        self.account_id = Some(account_id.into());
-        self
-    }
-
-    fn into_value(self) -> Value {
-        let mut object = Map::new();
-        object.insert("type".into(), Value::String("oauth".into()));
-        object.insert("refresh".into(), Value::String(self.refresh));
-        object.insert("access".into(), Value::String(self.access));
-        object.insert(
-            "expires".into(),
-            Value::Number(serde_json::Number::from(self.expires)),
-        );
-        if let Some(account_id) = self.account_id {
-            object.insert("accountId".into(), Value::String(account_id));
-        }
-        Value::Object(object)
-    }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct AnthropicTokenResponse {
-    access_token: String,
-    refresh_token: String,
-    expires_in: i64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct OpenAiCodexTokenResponse {
-    access_token: String,
-    refresh_token: String,
-    expires_in: i64,
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-struct OAuthRefreshOverrides<'a> {
-    anthropic_token_url: Option<&'a str>,
-    openai_codex_token_url: Option<&'a str>,
-}
-
-const OAUTH_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
-const ANTHROPIC_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
-const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const OPENAI_CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const OPENAI_CODEX_AUTH_CLAIM: &str = "https://api.openai.com/auth";
 const AUTH_FILE_LOCK_RETRIES: usize = 10;
 const AUTH_FILE_LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
+
+#[cfg(test)]
+const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
 struct AuthFileLock {
     path: PathBuf,
@@ -344,30 +305,23 @@ async fn acquire_auth_file_lock(path: &Path) -> Result<AuthFileLock, String> {
 fn auth_file_api_key(provider: &str, entry: &Value) -> Option<String> {
     match serde_json::from_value::<AuthFileCredential>(entry.clone()).ok()? {
         AuthFileCredential::ApiKey { key } => resolve_config_value_uncached(&key),
-        AuthFileCredential::OAuth {
-            access, expires, ..
-        } => {
-            let access = access.filter(|value| !value.is_empty())?;
+        AuthFileCredential::OAuth { expires, .. } => {
+            let credential = AuthFileOAuthCredentialView::from_value(entry)?;
+            credential.access_token()?;
             if expires.is_some_and(|expires| expires <= now_ms()) {
                 return None;
             }
-            oauth_api_key(provider, &access)
+            oauth_api_key(provider, &credential.to_oauth_credentials())
         }
     }
 }
 
 async fn refresh_auth_provider(
     provider: &str,
-    refresh_token: &str,
+    credentials: &OAuthCredentials,
     overrides: &OAuthRefreshOverrides<'_>,
-) -> Result<RefreshedOAuthCredentials, String> {
-    match provider {
-        "anthropic" => refresh_anthropic_token(refresh_token, overrides.anthropic_token_url).await,
-        "openai-codex" => {
-            refresh_openai_codex_token(refresh_token, overrides.openai_codex_token_url).await
-        }
-        _ => Err(format!("Unsupported OAuth provider: {provider}")),
-    }
+) -> Result<OAuthCredentials, String> {
+    refresh_oauth_token_with_overrides(provider, credentials, overrides).await
 }
 
 async fn refresh_auth_file_oauth_inner(
@@ -411,15 +365,17 @@ async fn refresh_auth_file_oauth_inner(
             continue;
         }
 
-        let Some(refresh_token) = credential
-            .refresh
-            .as_deref()
-            .filter(|value| !value.is_empty())
-        else {
+        if credential.refresh_token().is_none() {
             continue;
-        };
+        }
 
-        let refreshed = match refresh_auth_provider(provider, refresh_token, overrides).await {
+        let refreshed = match refresh_auth_provider(
+            provider,
+            &credential.to_oauth_credentials(),
+            overrides,
+        )
+        .await
+        {
             Ok(refreshed) => Ok(refreshed),
             Err(error) if error.starts_with("Unsupported OAuth provider:") => continue,
             Err(error) => Err(error),
@@ -450,136 +406,28 @@ async fn refresh_auth_file_oauth_inner(
     errors
 }
 
-fn apply_refreshed_oauth_credentials(entry: &mut Value, refreshed: RefreshedOAuthCredentials) {
-    *entry = refreshed.into_value();
+fn apply_refreshed_oauth_credentials(entry: &mut Value, refreshed: OAuthCredentials) {
+    *entry = oauth_credentials_to_value(refreshed);
 }
 
-fn oauth_http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .timeout(OAUTH_HTTP_TIMEOUT)
-        .build()
-        .map_err(|error| format!("Failed to create HTTP client: {error}"))
-}
-
-async fn refresh_anthropic_token(
-    refresh_token: &str,
-    token_url_override: Option<&str>,
-) -> Result<RefreshedOAuthCredentials, String> {
-    let token_url = token_url_override.unwrap_or(ANTHROPIC_TOKEN_URL);
-    let client = oauth_http_client()?;
-    let response = client
-        .post(token_url)
-        .header("accept", "application/json")
-        .json(&serde_json::json!({
-            "grant_type": "refresh_token",
-            "client_id": ANTHROPIC_CLIENT_ID,
-            "refresh_token": refresh_token,
-        }))
-        .send()
-        .await
-        .map_err(|error| format!("Anthropic token refresh request failed: {error}"))?;
-
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!(
-            "Anthropic token refresh request failed: {status}: {body}"
-        ));
+fn oauth_credentials_to_value(credentials: OAuthCredentials) -> Value {
+    let mut object = Map::new();
+    object.insert("type".into(), Value::String("oauth".into()));
+    object.insert("refresh".into(), Value::String(credentials.refresh));
+    object.insert("access".into(), Value::String(credentials.access));
+    object.insert(
+        "expires".into(),
+        Value::Number(serde_json::Number::from(credentials.expires)),
+    );
+    for (key, value) in credentials.extra {
+        object.insert(key, value);
     }
-
-    let payload = serde_json::from_str::<AnthropicTokenResponse>(&body)
-        .map_err(|error| format!("Anthropic token refresh returned invalid JSON: {error}"))?;
-
-    Ok(RefreshedOAuthCredentials::new(
-        payload.refresh_token,
-        payload.access_token,
-        now_ms()
-            .saturating_add(payload.expires_in.saturating_mul(1000))
-            .saturating_sub(5 * 60 * 1000),
-    ))
+    Value::Object(object)
 }
 
-async fn refresh_openai_codex_token(
-    refresh_token: &str,
-    token_url_override: Option<&str>,
-) -> Result<RefreshedOAuthCredentials, String> {
-    let token_url = token_url_override.unwrap_or(OPENAI_CODEX_TOKEN_URL);
-    let client = oauth_http_client()?;
-    let response = client
-        .post(token_url)
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("client_id", OPENAI_CODEX_CLIENT_ID),
-        ])
-        .send()
-        .await
-        .map_err(|error| format!("OpenAI Codex token refresh request failed: {error}"))?;
-
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!(
-            "OpenAI Codex token refresh failed: {status}: {body}"
-        ));
-    }
-
-    let payload = serde_json::from_str::<OpenAiCodexTokenResponse>(&body)
-        .map_err(|error| format!("OpenAI Codex token refresh returned invalid JSON: {error}"))?;
-    let account_id = extract_openai_codex_account_id(&payload.access_token)
-        .ok_or_else(|| "Failed to extract accountId from token".to_string())?;
-
-    Ok(RefreshedOAuthCredentials::new(
-        payload.refresh_token,
-        payload.access_token,
-        now_ms().saturating_add(payload.expires_in.saturating_mul(1000)),
-    )
-    .with_account_id(account_id))
-}
-
-fn extract_openai_codex_account_id(token: &str) -> Option<String> {
-    let payload = token.split('.').nth(1)?;
-    let decoded = decode_base64_token_component(payload)?;
-    let json = serde_json::from_slice::<Value>(&decoded).ok()?;
-    json.get(OPENAI_CODEX_AUTH_CLAIM)?
-        .get("chatgpt_account_id")?
-        .as_str()
-        .map(ToOwned::to_owned)
-}
-
-fn decode_base64_token_component(input: &str) -> Option<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut accumulator = 0u32;
-    let mut bits = 0u8;
-
-    for byte in input.bytes() {
-        let value = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
-            b'=' => break,
-            _ => return None,
-        } as u32;
-
-        accumulator = (accumulator << 6) | value;
-        bits += 6;
-
-        while bits >= 8 {
-            bits -= 8;
-            output.push(((accumulator >> bits) & 0xff) as u8);
-        }
-    }
-
-    Some(output)
-}
-
-fn oauth_api_key(provider: &str, access: &str) -> Option<String> {
-    match provider {
-        "anthropic" | "openai-codex" => Some(access.to_string()),
-        _ => None,
-    }
+fn oauth_api_key(provider: &str, credentials: &OAuthCredentials) -> Option<String> {
+    get_oauth_provider(provider)
+        .and_then(|provider| provider.get_api_key(credentials).ok())
 }
 
 fn now_ms() -> i64 {
