@@ -6,6 +6,7 @@ pub mod messages;
 pub mod model_registry;
 pub mod model_resolver;
 pub mod runtime;
+pub mod session_manager;
 pub mod skill_block;
 pub mod system_prompt;
 
@@ -35,6 +36,12 @@ pub use model_resolver::{
 };
 pub use runtime::{
     CodingAgentCore, CodingAgentCoreOptions, CreateCodingAgentCoreResult, create_coding_agent_core,
+};
+pub use session_manager::{
+    CURRENT_SESSION_VERSION, FileEntry, NewSessionOptions, SessionContext, SessionEntry,
+    SessionHeader, SessionInfo, SessionManager, SessionManagerError, SessionModelSelection,
+    SessionTreeNode, build_session_context, find_most_recent_session, get_default_session_dir,
+    get_latest_compaction_entry, get_sessions_dir, load_entries_from_file, parse_session_entries,
 };
 pub use skill_block::{ParsedSkillBlock, parse_skill_block};
 pub use system_prompt::{
