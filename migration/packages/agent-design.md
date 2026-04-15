@@ -148,7 +148,8 @@ The Rust workspace already has a non-empty `pi-agent` crate with the intended mo
 - `AgentMessage::is_assistant()` now follows the message role string, so custom messages with role `assistant` are treated the same way as standard assistant messages during continue validation.
 - Error tool results now use empty-object details (`{}`) instead of null, matching the TS blocked/validation-failure tool result shape.
 - `Agent::continue()` now accepts transcripts whose last message is a tool result and preserves that tool-result turn in the LLM context, matching the TS continue-from-tool-result e2e scenario.
+- Batch prompt shape is now pinned as well: `Agent::prompt_messages(...)` preserves multiple prompt messages in order and forwards them to the streamer unchanged, matching the TS `prompt([...])` batch path.
 
 ## Recommended next step
 
-Validate the remaining batch-prompt shape (`prompt_messages` / TS `prompt([...])`) and compare it against a small TS-derived regression before moving to the next unresolved slice.
+Inspect the remaining `agent_loop` batch/continue edge cases, if any, then move on to the next unresolved pi-agent slice.

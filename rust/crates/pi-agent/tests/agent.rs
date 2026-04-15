@@ -509,6 +509,62 @@ async fn prompt_text_with_images_preserves_text_then_images() {
 }
 
 #[tokio::test]
+async fn prompt_messages_preserves_batch_order_like_typescript_prompt_array() {
+    let seen_context_messages = Arc::new(Mutex::new(Vec::new()));
+    let streamer = Arc::new({
+        let seen_context_messages = seen_context_messages.clone();
+        move |_model: Model,
+              context: Context,
+              _options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            seen_context_messages
+                .lock()
+                .unwrap()
+                .push(context.messages.clone());
+
+            let message = assistant_message("ok", StopReason::Stop, 20);
+            Ok(Box::pin(try_stream! {
+                yield AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                };
+            }))
+        }
+    });
+
+    let agent = Agent::with_parts(AgentState::new(model()), streamer, StreamOptions::default());
+
+    let prompts: Vec<AgentMessage> = vec![
+        user_message("first", 10).into(),
+        user_message("second", 11).into(),
+    ];
+
+    agent.prompt_messages(prompts).await.unwrap();
+
+    let contexts = seen_context_messages.lock().unwrap().clone();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].len(), 2);
+    assert!(matches!(
+        &contexts[0][0],
+        Message::User { content, timestamp }
+            if *timestamp == 10
+                && content == &vec![UserContent::Text { text: String::from("first") }]
+    ));
+    assert!(matches!(
+        &contexts[0][1],
+        Message::User { content, timestamp }
+            if *timestamp == 11
+                && content == &vec![UserContent::Text { text: String::from("second") }]
+    ));
+
+    let state = agent.state();
+    assert_eq!(state.messages.len(), 3);
+    assert!(message_has_user_text(&state.messages[0], "first"));
+    assert!(message_has_user_text(&state.messages[1], "second"));
+    assert!(is_standard_assistant_message(&state.messages[2]));
+}
+
+#[tokio::test]
 async fn queue_helpers_do_not_touch_transcript_until_drained() {
     let agent = Agent::new(AgentState::new(model()));
 
