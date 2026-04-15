@@ -6,6 +6,7 @@ mod list_models;
 pub mod print_mode;
 pub mod runner;
 mod session_picker;
+mod tree_picker;
 
 pub use args::{
     AppMode, Args, Diagnostic, DiagnosticKind, ListModels, Mode, PrintOutputMode, ToolName,

@@ -10,6 +10,7 @@ use crate::{
     parse_args, process_file_arguments, resolve_app_mode, run_print_mode,
     session_picker::SessionPickerComponent,
     to_print_output_mode,
+    tree_picker::{TreePickerComponent, TreePickerItem},
 };
 use pi_agent::{AgentUnsubscribe, ThinkingLevel};
 use pi_ai::{
@@ -55,6 +56,7 @@ const NO_MODELS_ENV_HINT: &str = "  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_AP
 const API_KEY_MODEL_REQUIREMENT: &str =
     "--api-key requires a model to be specified via --model, --provider/--model, or --models";
 const FINALIZED_SYSTEM_PROMPT_PREFIX: &str = "\0pi-final-system-prompt\n";
+const ROOT_TREE_ENTRY_ID: &str = "root";
 
 pub struct RunCommandOptions {
     pub args: Vec<String>,
@@ -108,11 +110,12 @@ struct SessionSupport {
     session_id: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum InteractiveTransitionRequest {
     NewSession,
     ResumePicker,
     ForkPicker,
+    TreePicker,
 }
 
 #[derive(Debug, Clone)]
@@ -354,6 +357,59 @@ async fn select_resume_session(
             return Ok(match outcome {
                 ResumePickerOutcome::Selected(path) => Some(path),
                 ResumePickerOutcome::Cancelled => None,
+            });
+        }
+
+        tui.drain_terminal_events()
+            .map_err(|error| error.to_string())?;
+        sleep(Duration::from_millis(16)).await;
+    }
+}
+
+#[derive(Debug, Clone)]
+enum TreePickerOutcome {
+    Selected(String),
+    Cancelled,
+}
+
+async fn select_tree_entry(
+    tui: &mut Tui<LiveInteractiveTerminal>,
+    keybindings: &KeybindingsManager,
+    items: Vec<TreePickerItem>,
+    initial_selected_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let outcome = Arc::new(Mutex::new(None::<TreePickerOutcome>));
+    let mut picker = TreePickerComponent::new(keybindings, items, initial_selected_id);
+
+    let outcome_for_select = Arc::clone(&outcome);
+    picker.set_on_select(move |entry_id| {
+        *outcome_for_select
+            .lock()
+            .expect("tree picker outcome mutex poisoned") =
+            Some(TreePickerOutcome::Selected(entry_id));
+    });
+
+    let outcome_for_cancel = Arc::clone(&outcome);
+    picker.set_on_cancel(move || {
+        *outcome_for_cancel
+            .lock()
+            .expect("tree picker outcome mutex poisoned") = Some(TreePickerOutcome::Cancelled);
+    });
+
+    let picker_id = tui.add_child(Box::new(picker));
+    let _ = tui.set_focus_child(picker_id);
+    tui.start().map_err(|error| error.to_string())?;
+
+    loop {
+        if let Some(outcome) = outcome
+            .lock()
+            .expect("tree picker outcome mutex poisoned")
+            .take()
+        {
+            tui.clear();
+            return Ok(match outcome {
+                TreePickerOutcome::Selected(entry_id) => Some(entry_id),
+                TreePickerOutcome::Cancelled => None,
             });
         }
 
@@ -1434,6 +1490,69 @@ async fn resolve_interactive_transition(
                 prefill_input: Some(selected.text),
                 initial_status_message: Some(String::from("Branched to new session")),
                 bootstrap_defaults,
+            })
+        }
+        InteractiveTransitionRequest::TreePicker => {
+            let session_context =
+                session_context.ok_or_else(|| String::from("Session data unavailable"))?;
+            let mut manager = restore_session_manager(session_context)?;
+            if manager.get_entries().is_empty() {
+                return Ok(InteractiveTransitionPlan {
+                    cwd: PathBuf::from(manager.get_cwd()),
+                    manager: Some(manager),
+                    prefill_input: None,
+                    initial_status_message: Some(String::from("No entries in session")),
+                    bootstrap_defaults: None,
+                });
+            }
+
+            let current_selection = manager
+                .get_leaf_id()
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| String::from(ROOT_TREE_ENTRY_ID));
+            let items = build_tree_picker_items(&manager);
+            let keybindings = create_keybindings_manager(agent_dir);
+            let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
+            let mut tui = Tui::new(terminal);
+            let selected_entry = match select_tree_entry(
+                &mut tui,
+                &keybindings,
+                items,
+                Some(current_selection.as_str()),
+            )
+            .await?
+            {
+                Some(entry_id) => entry_id,
+                None => {
+                    return Ok(InteractiveTransitionPlan {
+                        cwd: PathBuf::from(manager.get_cwd()),
+                        manager: Some(manager),
+                        prefill_input: None,
+                        initial_status_message: None,
+                        bootstrap_defaults: None,
+                    });
+                }
+            };
+
+            let initial_status_message = if selected_entry == current_selection {
+                String::from("Already at this point")
+            } else {
+                if selected_entry == ROOT_TREE_ENTRY_ID {
+                    manager.reset_leaf();
+                } else {
+                    manager
+                        .branch(&selected_entry)
+                        .map_err(|error| error.to_string())?;
+                }
+                String::from("Navigated to selected point")
+            };
+
+            Ok(InteractiveTransitionPlan {
+                cwd: PathBuf::from(manager.get_cwd()),
+                manager: Some(manager),
+                prefill_input: None,
+                initial_status_message: Some(initial_status_message),
+                bootstrap_defaults: None,
             })
         }
     }
@@ -2544,6 +2663,20 @@ fn request_interactive_transition(
         }
     }
 
+    if matches!(transition, InteractiveTransitionRequest::TreePicker) {
+        let Some(session_manager) = session_manager else {
+            status_handle.set_message("Session tree is not available in this interactive mode.");
+            return true;
+        };
+        let session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        if session_manager.get_entries().is_empty() {
+            status_handle.set_message("No entries in session");
+            return true;
+        }
+    }
+
     *transition_request
         .lock()
         .expect("interactive transition request mutex poisoned") = Some(transition);
@@ -3030,42 +3163,28 @@ fn render_changelog_text() -> Result<String, String> {
     Ok(selected.join("\n\n").trim().to_owned())
 }
 
-fn render_session_tree_text(session_manager: &SessionManager) -> String {
-    let mut output = String::new();
-    push_line(&mut output, "Session Tree");
-    push_line(&mut output, "");
-    push_line(
-        &mut output,
-        &format!(
-            "Current leaf: {}",
-            session_manager.get_leaf_id().unwrap_or("root")
-        ),
-    );
-    push_line(&mut output, "");
+fn build_tree_picker_items(session_manager: &SessionManager) -> Vec<TreePickerItem> {
+    let current_leaf = session_manager.get_leaf_id();
+    let mut items = vec![TreePickerItem {
+        entry_id: String::from(ROOT_TREE_ENTRY_ID),
+        display: if current_leaf.is_none() {
+            String::from("* root")
+        } else {
+            String::from("  root")
+        },
+        search_text: String::from("root session root"),
+    }];
 
     let tree = session_manager.get_tree();
-    if tree.is_empty() {
-        push_line(&mut output, "(empty)");
-    } else {
-        for (index, node) in tree.iter().enumerate() {
-            render_session_tree_node(
-                &mut output,
-                node,
-                "",
-                index + 1 == tree.len(),
-                session_manager.get_leaf_id(),
-            );
-        }
+    for (index, node) in tree.iter().enumerate() {
+        collect_tree_picker_items(&mut items, node, "", index + 1 == tree.len(), current_leaf);
     }
 
-    push_line(&mut output, "");
-    push_line(&mut output, "Use /tree <entry-id> to switch branches.");
-    push_line(&mut output, "Use /tree root to switch to the root.");
-    output.trim_end().to_owned()
+    items
 }
 
-fn render_session_tree_node(
-    output: &mut String,
+fn collect_tree_picker_items(
+    items: &mut Vec<TreePickerItem>,
     node: &pi_coding_agent_core::SessionTreeNode,
     prefix: &str,
     is_last: bool,
@@ -3073,8 +3192,8 @@ fn render_session_tree_node(
 ) {
     if matches!(node.entry, SessionEntry::Label { .. }) {
         for (index, child) in node.children.iter().enumerate() {
-            render_session_tree_node(
-                output,
+            collect_tree_picker_items(
+                items,
                 child,
                 prefix,
                 index + 1 == node.children.len(),
@@ -3102,10 +3221,16 @@ fn render_session_tree_node(
         .map(|label| format!(" [{label}]"))
         .unwrap_or_default();
     if let Some(description) = describe_session_tree_entry(&node.entry) {
-        push_line(
-            output,
-            &format!("{prefix}{branch}{marker} {description}{label_suffix}"),
-        );
+        items.push(TreePickerItem {
+            entry_id: node.entry.id().to_owned(),
+            display: format!("{prefix}{branch}{marker} {description}{label_suffix}"),
+            search_text: sanitize_display_text(&format!(
+                "{} {} {}",
+                node.entry.id(),
+                description,
+                node.label.as_deref().unwrap_or_default()
+            )),
+        });
     }
 
     let next_prefix = if prefix.is_empty() {
@@ -3121,8 +3246,8 @@ fn render_session_tree_node(
     };
 
     for (index, child) in node.children.iter().enumerate() {
-        render_session_tree_node(
-            output,
+        collect_tree_picker_items(
+            items,
             child,
             &next_prefix,
             index + 1 == node.children.len(),
@@ -3636,6 +3761,22 @@ fn install_interactive_submit_handler(
         );
     });
 
+    let tree_core = core.clone();
+    let tree_status_handle = status_handle.clone();
+    let tree_transition_request = transition_request.clone();
+    let tree_exit_requested = exit_requested.clone();
+    let tree_session_manager = session_manager.clone();
+    shell.on_action("app.session.tree", move || {
+        request_interactive_transition(
+            InteractiveTransitionRequest::TreePicker,
+            &tree_core,
+            tree_session_manager.as_ref(),
+            &tree_status_handle,
+            &tree_transition_request,
+            &tree_exit_requested,
+        );
+    });
+
     shell.set_on_submit_with_shell(move |shell, value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -3790,13 +3931,14 @@ fn handle_interactive_slash_command(
 
         let target = text.strip_prefix("/tree").unwrap_or_default().trim();
         if target.is_empty() {
-            let rendered = render_session_tree_text(
-                &session_manager
-                    .lock()
-                    .expect("session manager mutex poisoned"),
+            return request_interactive_transition(
+                InteractiveTransitionRequest::TreePicker,
+                core,
+                Some(session_manager),
+                status_handle,
+                transition_request,
+                exit_requested,
             );
-            append_transcript_custom_message(shell, "tree", rendered);
-            return true;
         }
 
         if core.state().is_streaming {
@@ -5036,7 +5178,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_commands_render_settings_hotkeys_tree_and_changelog() {
+    fn slash_commands_render_settings_hotkeys_and_changelog() {
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             provider: "slash-render-commands-faux".into(),
             models: vec![FauxModelDefinition {
@@ -5091,13 +5233,7 @@ mod tests {
         let transition_request = Arc::new(Mutex::new(None));
         let slash_command_context = test_slash_command_context(&keybindings, cwd);
 
-        for command in [
-            "/settings",
-            "/scoped-models",
-            "/hotkeys",
-            "/tree",
-            "/changelog",
-        ] {
+        for command in ["/settings", "/scoped-models", "/hotkeys", "/changelog"] {
             assert!(handle_interactive_slash_command(
                 &mut shell,
                 command,
@@ -5120,7 +5256,6 @@ mod tests {
             rendered.contains("Keyboard Shortcuts"),
             "output: {rendered}"
         );
-        assert!(rendered.contains("Session Tree"), "output: {rendered}");
         assert!(rendered.contains("## ["), "output: {rendered}");
 
         faux.unregister();
@@ -5630,6 +5765,179 @@ mod tests {
                 .messages
                 .iter()
                 .any(|message| matches!(message.role(), "compactionSummary"))
+        );
+
+        faux.unregister();
+    }
+
+    #[test]
+    fn tree_slash_command_requests_tree_picker_transition() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "slash-tree-picker-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "slash-tree-picker-faux-1".into(),
+                name: Some("Slash Tree Picker Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("slash-tree-picker-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("slash-tree-picker-cwd");
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(cwd.clone()),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
+        let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
+        manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("root"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        let session_manager = Arc::new(Mutex::new(manager));
+        let status_handle = shell.status_handle();
+        let footer_state_handle = shell.footer_state_handle();
+        let exit_requested = Arc::new(AtomicBool::new(false));
+        let transition_request = Arc::new(Mutex::new(None));
+        let slash_command_context = test_slash_command_context(&keybindings, cwd);
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/tree",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            Some(&session_manager),
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+
+        assert!(exit_requested.load(Ordering::Relaxed));
+        assert_eq!(
+            transition_request
+                .lock()
+                .expect("interactive transition request mutex poisoned")
+                .clone(),
+            Some(InteractiveTransitionRequest::TreePicker)
+        );
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn tree_picker_transition_switches_session_context() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "tree-picker-transition-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "tree-picker-transition-faux-1".into(),
+                name: Some("Tree Picker Transition Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("tree-picker-transition-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("tree-picker-transition-cwd");
+        let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
+        let root_user_id = manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("root"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        manager
+            .append_message(Message::Assistant {
+                content: vec![AssistantContent::Text {
+                    text: String::from("assistant root"),
+                    text_signature: None,
+                }],
+                api: String::from("faux:test"),
+                provider: String::from("tree-picker-transition-faux"),
+                model: String::from("tree-picker-transition-faux-1"),
+                response_id: None,
+                usage: Default::default(),
+                stop_reason: pi_events::StopReason::Stop,
+                error_message: None,
+                timestamp: 2,
+            })
+            .unwrap();
+        let primary_user_id = manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("primary branch"),
+                }],
+                timestamp: 3,
+            })
+            .unwrap();
+        manager.branch(&root_user_id).unwrap();
+        manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("alternate branch"),
+                }],
+                timestamp: 4,
+            })
+            .unwrap();
+
+        let terminal = LifecycleScriptedTerminal::new(vec![
+            (Duration::from_millis(5), String::from("\x1b[A")),
+            (Duration::from_millis(5), String::from("\r")),
+        ]);
+        let runtime = InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone())));
+
+        let plan = resolve_interactive_transition(
+            InteractiveTransitionRequest::TreePicker,
+            Some(InteractiveSessionContext {
+                manager: Some(manager),
+                session_file: None,
+                session_dir: None,
+                cwd: cwd.to_string_lossy().into_owned(),
+                model,
+                thinking_level: ThinkingLevel::Off,
+            }),
+            &cwd,
+            None,
+            &runtime,
+        )
+        .await
+        .expect("expected tree transition plan");
+
+        let manager = plan.manager.expect("expected session manager");
+        assert_eq!(manager.get_leaf_id(), Some(primary_user_id.as_str()));
+        assert_eq!(
+            plan.initial_status_message.as_deref(),
+            Some("Navigated to selected point")
         );
 
         faux.unregister();
