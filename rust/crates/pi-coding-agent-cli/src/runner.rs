@@ -4,15 +4,19 @@ use crate::{
     parse_args, process_file_arguments, resolve_app_mode, run_print_mode,
     session_picker::SessionPickerComponent, to_print_output_mode,
 };
-use pi_agent::ThinkingLevel;
-use pi_ai::{StreamOptions, ThinkingBudgets, models_are_equal, supports_xhigh};
+use pi_agent::{AgentUnsubscribe, ThinkingLevel};
+use pi_ai::{
+    StreamOptions, ThinkingBudgets, is_context_overflow, models_are_equal, supports_xhigh,
+};
 use pi_coding_agent_core::{
     AuthSource, BootstrapDiagnosticLevel, CodingAgentCore, CodingAgentCoreError,
-    CodingAgentCoreOptions, CustomMessage, CustomMessageContent, ExistingSessionSelection,
-    FooterDataProvider, ModelRegistry, NewSessionOptions, ScopedModel, SessionBootstrapOptions,
-    SessionEntry, SessionHeader, SessionInfo, SessionManager, create_coding_agent_core,
-    find_exact_model_reference_match, get_default_session_dir, parse_thinking_level,
-    resolve_cli_model, resolve_model_scope, resolve_prompt_input, restore_model_from_session,
+    CodingAgentCoreOptions, CompactionResult, CompactionSettings, ContextUsageEstimate,
+    CustomMessage, CustomMessageContent, ExistingSessionSelection, FooterDataProvider,
+    ModelRegistry, NewSessionOptions, ScopedModel, SessionBootstrapOptions, SessionEntry,
+    SessionHeader, SessionInfo, SessionManager, calculate_context_tokens, compact,
+    create_coding_agent_core, estimate_context_tokens, find_exact_model_reference_match,
+    get_default_session_dir, parse_thinking_level, prepare_compaction, resolve_cli_model,
+    resolve_model_scope, resolve_prompt_input, restore_model_from_session, should_compact,
 };
 use pi_coding_agent_tui::{
     CustomMessageComponent, DEFAULT_APP_KEYBINDINGS, ExternalEditorCommandRunner,
@@ -1134,6 +1138,16 @@ async fn run_interactive_iteration(
         &created.core,
         interactive_session_manager.as_ref(),
     );
+    footer_state_handle.update(|footer_state| {
+        footer_state.auto_compact_enabled = runtime_settings.settings.compaction.enabled;
+    });
+    let auto_compaction_binding = install_interactive_auto_compaction(
+        &created.core,
+        interactive_session_manager.as_ref(),
+        &status_handle,
+        &footer_state_handle,
+        &runtime_settings,
+    );
     install_interactive_submit_handler(
         &mut shell,
         created.core.clone(),
@@ -1153,6 +1167,7 @@ async fn run_interactive_iteration(
     if let Err(error) = tui.start() {
         let _ = tui.stop();
         eprintln!("Error: {error}");
+        drop(auto_compaction_binding);
         drop(binding);
         return InteractiveIterationOutcome {
             exit_code: 1,
@@ -1187,6 +1202,7 @@ async fn run_interactive_iteration(
         .terminal_mut()
         .drain_input(Duration::from_millis(1000), Duration::from_millis(50));
     let _ = tui.stop();
+    drop(auto_compaction_binding);
     drop(binding);
     drop(tui);
     drop(created);
@@ -1831,6 +1847,270 @@ fn map_thinking_budgets(settings: &ThinkingBudgetsSettings) -> ThinkingBudgets {
     }
 }
 
+fn runtime_compaction_settings(runtime_settings: &LoadedRuntimeSettings) -> CompactionSettings {
+    CompactionSettings {
+        enabled: runtime_settings.settings.compaction.enabled,
+        reserve_tokens: runtime_settings.settings.compaction.reserve_tokens,
+        keep_recent_tokens: runtime_settings.settings.compaction.keep_recent_tokens,
+    }
+}
+
+async fn run_interactive_compaction(
+    core: &CodingAgentCore,
+    session_manager: &Arc<Mutex<SessionManager>>,
+    settings: &CompactionSettings,
+    custom_instructions: Option<&str>,
+) -> Result<Option<CompactionResult>, String> {
+    let state = core.state();
+    let model = state.model.clone();
+    let auth = core
+        .model_registry()
+        .get_api_key_and_headers(&model)
+        .map_err(|error| error.to_string())?;
+    let Some(api_key) = auth.api_key else {
+        return Err(format!("No API key found for {}.", model.provider));
+    };
+
+    let path_entries = {
+        let session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        let leaf_id = session_manager.get_leaf_id().map(str::to_owned);
+        session_manager.get_branch(leaf_id.as_deref())
+    };
+
+    let Some(preparation) = prepare_compaction(&path_entries, settings.clone()) else {
+        return Ok(None);
+    };
+
+    let result = compact(
+        &preparation,
+        &model,
+        &api_key,
+        auth.headers,
+        custom_instructions,
+    )
+    .await?;
+
+    let session_context = {
+        let mut session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        session_manager
+            .append_compaction(
+                result.summary.clone(),
+                result.first_kept_entry_id.clone(),
+                result.tokens_before,
+                result.details.clone(),
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        session_manager.build_session_context()
+    };
+
+    let next_messages = session_context.messages;
+    core.agent().update_state(move |state| {
+        state.messages = next_messages.clone();
+    });
+
+    Ok(Some(result))
+}
+
+fn strip_trailing_error_assistant(core: &CodingAgentCore) {
+    core.agent().update_state(|state| {
+        let should_strip = state
+            .messages
+            .last()
+            .and_then(|message| message.as_standard_message())
+            .is_some_and(|message| {
+                matches!(
+                    message,
+                    Message::Assistant {
+                        stop_reason: pi_events::StopReason::Error,
+                        ..
+                    }
+                )
+            });
+        if should_strip {
+            state.messages.pop();
+        }
+    });
+}
+
+async fn maybe_run_auto_compaction(
+    core: &CodingAgentCore,
+    session_manager: &Arc<Mutex<SessionManager>>,
+    footer_state_handle: &FooterStateHandle,
+    settings: &CompactionSettings,
+    overflow_recovery_attempted: &AtomicBool,
+) -> Result<Option<String>, String> {
+    if !settings.enabled {
+        return Ok(None);
+    }
+
+    let state = core.state();
+    let Some(assistant) = state
+        .messages
+        .iter()
+        .rev()
+        .filter_map(|message| message.as_standard_message())
+        .find_map(standard_message_to_assistant)
+    else {
+        return Ok(None);
+    };
+
+    if assistant.stop_reason == pi_events::StopReason::Aborted {
+        return Ok(None);
+    }
+
+    let same_model =
+        assistant.provider == state.model.provider && assistant.model == state.model.id;
+    if !same_model {
+        return Ok(None);
+    }
+
+    let context_window = state.model.context_window;
+    if is_context_overflow(&assistant, Some(context_window)) {
+        if overflow_recovery_attempted.swap(true, Ordering::Relaxed) {
+            return Ok(Some(String::from(
+                "Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+            )));
+        }
+
+        let compacted = run_interactive_compaction(core, session_manager, settings, None).await?;
+        if compacted.is_none() {
+            return Ok(None);
+        }
+
+        strip_trailing_error_assistant(core);
+        update_interactive_footer_state(footer_state_handle, core, Some(session_manager));
+        core.continue_turn()
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(Some(String::from(
+            "Recovering from context overflow with compaction...",
+        )));
+    }
+
+    let context_tokens = if assistant.stop_reason == pi_events::StopReason::Error {
+        let ContextUsageEstimate {
+            tokens,
+            last_usage_index,
+            ..
+        } = estimate_context_tokens(&state.messages);
+        if last_usage_index.is_none() {
+            return Ok(None);
+        }
+        tokens
+    } else {
+        calculate_context_tokens(&assistant.usage)
+    };
+
+    if !should_compact(context_tokens, context_window, settings) {
+        return Ok(None);
+    }
+
+    let compacted = run_interactive_compaction(core, session_manager, settings, None).await?;
+    if compacted.is_none() {
+        return Ok(None);
+    }
+
+    update_interactive_footer_state(footer_state_handle, core, Some(session_manager));
+    if core.agent().has_queued_messages() {
+        core.continue_turn()
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(Some(String::from(
+        "Automatically compacted session context",
+    )))
+}
+
+fn standard_message_to_assistant(message: &Message) -> Option<pi_events::AssistantMessage> {
+    match message {
+        Message::Assistant {
+            content,
+            api,
+            provider,
+            model,
+            response_id,
+            usage,
+            stop_reason,
+            error_message,
+            timestamp,
+        } => Some(pi_events::AssistantMessage {
+            role: String::from("assistant"),
+            content: content.clone(),
+            api: api.clone(),
+            provider: provider.clone(),
+            model: model.clone(),
+            response_id: response_id.clone(),
+            usage: usage.clone(),
+            stop_reason: stop_reason.clone(),
+            error_message: error_message.clone(),
+            timestamp: *timestamp,
+        }),
+        Message::User { .. } | Message::ToolResult { .. } => None,
+    }
+}
+
+fn install_interactive_auto_compaction(
+    core: &CodingAgentCore,
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
+    status_handle: &StatusHandle,
+    footer_state_handle: &FooterStateHandle,
+    runtime_settings: &LoadedRuntimeSettings,
+) -> Option<AgentUnsubscribe> {
+    let session_manager = session_manager?.clone();
+    let core = core.clone();
+    let status_handle = status_handle.clone();
+    let footer_state_handle = footer_state_handle.clone();
+    let settings = runtime_compaction_settings(runtime_settings);
+    let compaction_running = Arc::new(AtomicBool::new(false));
+    let overflow_recovery_attempted = Arc::new(AtomicBool::new(false));
+
+    Some(core.agent().subscribe(move |event, _signal| {
+        let core = core.clone();
+        let session_manager = session_manager.clone();
+        let status_handle = status_handle.clone();
+        let footer_state_handle = footer_state_handle.clone();
+        let settings = settings.clone();
+        let compaction_running = compaction_running.clone();
+        let overflow_recovery_attempted = overflow_recovery_attempted.clone();
+        Box::pin(async move {
+            match event {
+                pi_agent::AgentEvent::MessageStart { message }
+                    if matches!(message.as_standard_message(), Some(Message::User { .. })) =>
+                {
+                    overflow_recovery_attempted.store(false, Ordering::Relaxed);
+                }
+                pi_agent::AgentEvent::AgentEnd { .. } => {
+                    if compaction_running.swap(true, Ordering::Relaxed) {
+                        return;
+                    }
+
+                    let result = maybe_run_auto_compaction(
+                        &core,
+                        &session_manager,
+                        &footer_state_handle,
+                        &settings,
+                        &overflow_recovery_attempted,
+                    )
+                    .await;
+                    compaction_running.store(false, Ordering::Relaxed);
+
+                    match result {
+                        Ok(Some(message)) => status_handle.set_message(message),
+                        Ok(None) => {}
+                        Err(error) => status_handle.set_message(format!("Error: {error}")),
+                    }
+                }
+                _ => {}
+            }
+        })
+    }))
+}
+
 fn build_interactive_slash_commands(
     model_registry: Arc<ModelRegistry>,
     scoped_models: Vec<ScopedModel>,
@@ -2381,6 +2661,37 @@ fn render_runtime_settings_text(context: &InteractiveSlashCommandContext) -> Str
             } else {
                 "off"
             }
+        ),
+    );
+    push_line(&mut output, "");
+    push_line(&mut output, "Compaction");
+    push_line(
+        &mut output,
+        &format!(
+            "Enabled: {}",
+            if context.runtime_settings.settings.compaction.enabled {
+                "on"
+            } else {
+                "off"
+            }
+        ),
+    );
+    push_line(
+        &mut output,
+        &format!(
+            "Reserve tokens: {}",
+            context.runtime_settings.settings.compaction.reserve_tokens
+        ),
+    );
+    push_line(
+        &mut output,
+        &format!(
+            "Keep recent tokens: {}",
+            context
+                .runtime_settings
+                .settings
+                .compaction
+                .keep_recent_tokens
         ),
     );
     push_line(&mut output, "");
@@ -3544,8 +3855,46 @@ fn handle_interactive_slash_command(
     }
 
     if text == "/compact" || text.starts_with("/compact ") {
-        status_handle
-            .set_message("Session compaction is not implemented in the Rust interactive CLI yet.");
+        let Some(session_manager) = session_manager else {
+            status_handle
+                .set_message("Session compaction is not available in this interactive mode.");
+            return true;
+        };
+        if core.state().is_streaming {
+            status_handle.set_message("Wait for the current response to finish before compacting.");
+            return true;
+        }
+
+        let custom_instructions = text.strip_prefix("/compact").unwrap_or_default().trim();
+        let custom_instructions =
+            (!custom_instructions.is_empty()).then_some(custom_instructions.to_owned());
+        let core = core.clone();
+        let session_manager = session_manager.clone();
+        let status_handle = status_handle.clone();
+        let footer_state_handle = footer_state_handle.clone();
+        let settings = runtime_compaction_settings(&slash_command_context.runtime_settings);
+        status_handle.set_message("Compacting session context...");
+        tokio::spawn(async move {
+            match run_interactive_compaction(
+                &core,
+                &session_manager,
+                &settings,
+                custom_instructions.as_deref(),
+            )
+            .await
+            {
+                Ok(Some(_)) => {
+                    update_interactive_footer_state(
+                        &footer_state_handle,
+                        &core,
+                        Some(&session_manager),
+                    );
+                    status_handle.set_message("Compacted session context");
+                }
+                Ok(None) => status_handle.set_message("Nothing to compact"),
+                Err(error) => status_handle.set_message(format!("Error: {error}")),
+            }
+        });
         return true;
     }
 
@@ -4623,6 +4972,150 @@ mod tests {
             "content: {exported}"
         );
         assert!(exported.contains("export me"), "content: {exported}");
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn interactive_compaction_helper_appends_compaction_entry_and_rebuilds_state() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "interactive-compaction-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "interactive-compaction-faux-1".into(),
+                name: Some("Interactive Compaction Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        faux.set_responses(vec![
+            FauxResponse::text(
+                "## Goal\nCompact the conversation\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- [x] Captured earlier work\n\n### In Progress\n- [ ] Continue after compaction\n\n### Blocked\n- (none)\n\n## Key Decisions\n- **Compaction**: Keep recent context\n\n## Next Steps\n1. Continue the task\n\n## Critical Context\n- (none)",
+            ),
+            FauxResponse::text(
+                "## Original Request\nContinue the task\n\n## Early Progress\n- Kept the recent context\n\n## Context for Suffix\n- The latest messages remain in state",
+            ),
+        ]);
+        let model = faux
+            .get_model(Some("interactive-compaction-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("interactive-compaction-cwd");
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(cwd.clone()),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
+        manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("first turn"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        manager
+            .append_message(Message::Assistant {
+                content: vec![AssistantContent::Text {
+                    text: String::from("first answer"),
+                    text_signature: None,
+                }],
+                api: String::from("faux:test"),
+                provider: String::from("interactive-compaction-faux"),
+                model: String::from("interactive-compaction-faux-1"),
+                response_id: None,
+                usage: pi_events::Usage {
+                    input: 20_000,
+                    output: 1,
+                    cache_read: 0,
+                    cache_write: 0,
+                    total_tokens: 20_001,
+                    cost: Default::default(),
+                },
+                stop_reason: pi_events::StopReason::Stop,
+                error_message: None,
+                timestamp: 2,
+            })
+            .unwrap();
+        manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("second turn"),
+                }],
+                timestamp: 3,
+            })
+            .unwrap();
+        manager
+            .append_message(Message::Assistant {
+                content: vec![AssistantContent::Text {
+                    text: String::from("second answer"),
+                    text_signature: None,
+                }],
+                api: String::from("faux:test"),
+                provider: String::from("interactive-compaction-faux"),
+                model: String::from("interactive-compaction-faux-1"),
+                response_id: None,
+                usage: Default::default(),
+                stop_reason: pi_events::StopReason::Stop,
+                error_message: None,
+                timestamp: 4,
+            })
+            .unwrap();
+        let initial_context = manager.build_session_context();
+        core.agent().update_state(move |state| {
+            state.messages = initial_context.messages.clone();
+        });
+        let session_manager = Arc::new(Mutex::new(manager));
+
+        let result = run_interactive_compaction(
+            &core,
+            &session_manager,
+            &CompactionSettings {
+                enabled: true,
+                reserve_tokens: 16_384,
+                keep_recent_tokens: 4,
+            },
+            None,
+        )
+        .await
+        .expect("expected compaction result")
+        .expect("expected compaction to run");
+
+        assert!(result.summary.contains("## Goal"));
+        let entries = session_manager
+            .lock()
+            .expect("session manager mutex poisoned")
+            .get_entries()
+            .to_vec();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| matches!(entry, SessionEntry::Compaction { .. }))
+        );
+
+        let state = core.state();
+        assert!(matches!(
+            state
+                .messages
+                .first()
+                .and_then(|message| message.as_standard_message()),
+            None
+        ));
+        assert!(
+            state
+                .messages
+                .iter()
+                .any(|message| matches!(message.role(), "compactionSummary"))
+        );
 
         faux.unregister();
     }

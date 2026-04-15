@@ -24,6 +24,9 @@ fn defaults_runtime_settings_when_settings_are_missing() {
 
     assert!(loaded.settings.images.auto_resize_images);
     assert!(!loaded.settings.images.block_images);
+    assert!(loaded.settings.compaction.enabled);
+    assert_eq!(loaded.settings.compaction.reserve_tokens, 16_384);
+    assert_eq!(loaded.settings.compaction.keep_recent_tokens, 20_000);
     assert_eq!(loaded.settings.thinking_budgets.minimal, None);
     assert_eq!(loaded.settings.thinking_budgets.low, None);
     assert_eq!(loaded.settings.thinking_budgets.medium, None);
@@ -39,13 +42,13 @@ fn project_settings_override_global_runtime_settings() {
     let agent_dir = unique_temp_dir("project-override-agent");
     fs::write(
         agent_dir.join("settings.json"),
-        r#"{"images":{"autoResize":false,"blockImages":true},"thinkingBudgets":{"low":2048,"high":16384}}"#,
+        r#"{"images":{"autoResize":false,"blockImages":true},"compaction":{"enabled":false,"reserveTokens":8192},"thinkingBudgets":{"low":2048,"high":16384}}"#,
     )
     .unwrap();
     fs::create_dir_all(cwd.join(".pi")).unwrap();
     fs::write(
         cwd.join(".pi").join("settings.json"),
-        r#"{"images":{"autoResize":true,"blockImages":false},"thinkingBudgets":{"high":4096}}"#,
+        r#"{"images":{"autoResize":true,"blockImages":false},"compaction":{"enabled":true,"keepRecentTokens":4096},"thinkingBudgets":{"high":4096}}"#,
     )
     .unwrap();
 
@@ -53,6 +56,9 @@ fn project_settings_override_global_runtime_settings() {
 
     assert!(loaded.settings.images.auto_resize_images);
     assert!(!loaded.settings.images.block_images);
+    assert!(loaded.settings.compaction.enabled);
+    assert_eq!(loaded.settings.compaction.reserve_tokens, 8192);
+    assert_eq!(loaded.settings.compaction.keep_recent_tokens, 4096);
     assert_eq!(loaded.settings.thinking_budgets.low, Some(2048));
     assert_eq!(loaded.settings.thinking_budgets.high, Some(4096));
     assert!(loaded.warnings.is_empty());
@@ -108,6 +114,8 @@ fn reports_invalid_json_as_scope_warning_and_uses_defaults() {
 
     assert!(loaded.settings.images.auto_resize_images);
     assert!(!loaded.settings.images.block_images);
+    assert_eq!(loaded.settings.compaction.reserve_tokens, 16_384);
+    assert_eq!(loaded.settings.compaction.keep_recent_tokens, 20_000);
     assert_eq!(loaded.settings.thinking_budgets, Default::default());
     assert_eq!(loaded.settings.editor_padding_x, 0);
     assert_eq!(loaded.settings.autocomplete_max_visible, 5);

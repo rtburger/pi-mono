@@ -43,6 +43,23 @@ impl Default for ImageSettings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionSettings {
+    pub enabled: bool,
+    pub reserve_tokens: u64,
+    pub keep_recent_tokens: u64,
+}
+
+impl Default for CompactionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            reserve_tokens: 16_384,
+            keep_recent_tokens: 20_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ThinkingBudgetsSettings {
     pub minimal: Option<u64>,
@@ -54,6 +71,7 @@ pub struct ThinkingBudgetsSettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSettings {
     pub images: ImageSettings,
+    pub compaction: CompactionSettings,
     pub thinking_budgets: ThinkingBudgetsSettings,
     pub editor_padding_x: usize,
     pub autocomplete_max_visible: usize,
@@ -63,6 +81,7 @@ impl Default for RuntimeSettings {
     fn default() -> Self {
         Self {
             images: ImageSettings::default(),
+            compaction: CompactionSettings::default(),
             thinking_budgets: ThinkingBudgetsSettings::default(),
             editor_padding_x: 0,
             autocomplete_max_visible: 5,
@@ -82,6 +101,8 @@ struct RawSettings {
     #[serde(default)]
     images: RawImageSettings,
     #[serde(default)]
+    compaction: RawCompactionSettings,
+    #[serde(default)]
     thinking_budgets: RawThinkingBudgetsSettings,
     editor_padding_x: Option<f64>,
     autocomplete_max_visible: Option<f64>,
@@ -92,6 +113,14 @@ struct RawSettings {
 struct RawImageSettings {
     auto_resize: Option<bool>,
     block_images: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RawCompactionSettings {
+    enabled: Option<bool>,
+    reserve_tokens: Option<u64>,
+    keep_recent_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -130,6 +159,15 @@ fn apply_settings_file(loaded: &mut LoadedRuntimeSettings, scope: SettingsScope,
     }
     if let Some(block_images) = parsed.images.block_images {
         loaded.settings.images.block_images = block_images;
+    }
+    if let Some(enabled) = parsed.compaction.enabled {
+        loaded.settings.compaction.enabled = enabled;
+    }
+    if let Some(reserve_tokens) = parsed.compaction.reserve_tokens {
+        loaded.settings.compaction.reserve_tokens = reserve_tokens;
+    }
+    if let Some(keep_recent_tokens) = parsed.compaction.keep_recent_tokens {
+        loaded.settings.compaction.keep_recent_tokens = keep_recent_tokens;
     }
 
     if let Some(minimal) = parsed.thinking_budgets.minimal {

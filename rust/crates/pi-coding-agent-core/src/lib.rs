@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod bootstrap;
+pub mod compaction;
 pub mod config_value;
 pub mod footer_data;
 pub mod messages;
@@ -17,6 +18,12 @@ pub use auth::{
 pub use bootstrap::{
     BootstrapDiagnostic, BootstrapDiagnosticLevel, ExistingSessionSelection,
     SessionBootstrapOptions, SessionBootstrapResult, bootstrap_session,
+};
+pub use compaction::{
+    BranchSummaryOptions, CollectEntriesResult, CompactionPreparation, CompactionResult,
+    CompactionSettings, ContextUsageEstimate, calculate_context_tokens,
+    collect_entries_for_branch_summary, compact, estimate_context_tokens, estimate_tokens,
+    generate_branch_summary, latest_compaction_timestamp, prepare_compaction, should_compact,
 };
 pub use footer_data::{BranchChangeSubscription, FooterDataProvider, FooterDataSnapshot};
 pub use messages::{
