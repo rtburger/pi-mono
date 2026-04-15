@@ -1,14 +1,15 @@
 use crate::{
     AppMode, Args, Diagnostic, DiagnosticKind, ListModels, OverlayAuthSource, PrintModeOptions,
     PrintOutputMode, ProcessFileOptions, build_initial_message, list_models::render_list_models,
-    parse_args, process_file_arguments, resolve_app_mode, run_print_mode, to_print_output_mode,
+    parse_args, process_file_arguments, resolve_app_mode, run_print_mode,
+    session_picker::SessionPickerComponent, to_print_output_mode,
 };
 use pi_agent::ThinkingLevel;
 use pi_ai::{StreamOptions, ThinkingBudgets, models_are_equal, supports_xhigh};
 use pi_coding_agent_core::{
     AuthSource, BootstrapDiagnosticLevel, CodingAgentCore, CodingAgentCoreError,
     CodingAgentCoreOptions, ExistingSessionSelection, FooterDataProvider, ModelRegistry,
-    ScopedModel, SessionBootstrapOptions, SessionEntry, SessionHeader, SessionManager,
+    ScopedModel, SessionBootstrapOptions, SessionEntry, SessionHeader, SessionInfo, SessionManager,
     create_coding_agent_core, find_exact_model_reference_match, get_default_session_dir,
     parse_thinking_level, resolve_cli_model, resolve_model_scope, resolve_prompt_input,
 };
@@ -94,28 +95,22 @@ fn create_session_support(
     parsed: &Args,
     cwd: &Path,
     agent_dir: Option<&Path>,
+    resume_session_path: Option<&str>,
 ) -> Result<Option<SessionSupport>, String> {
     let should_use_session_manager = parsed.no_session
         || parsed.continue_session
         || parsed.session.is_some()
         || parsed.fork.is_some()
         || parsed.session_dir.is_some()
+        || resume_session_path.is_some()
         || agent_dir.is_some();
     if !should_use_session_manager {
         return Ok(None);
     }
 
-    if parsed.resume {
-        return Err(String::from(
-            "--resume is not supported in the Rust CLI yet. Use --continue or --session <path>.",
-        ));
-    }
-
     let cwd_string = cwd.to_string_lossy().into_owned();
     let session_dir = resolve_session_dir(parsed, cwd, agent_dir);
-    let session_manager = if parsed.no_session {
-        SessionManager::in_memory(&cwd_string)
-    } else if let Some(session) = parsed.session.as_deref() {
+    let session_manager = if let Some(session) = parsed.session.as_deref() {
         SessionManager::open(
             &resolve_session_path(cwd, session),
             session_dir.as_deref(),
@@ -129,6 +124,15 @@ fn create_session_support(
             session_dir.as_deref(),
         )
         .map_err(|error| error.to_string())?
+    } else if let Some(resume_session_path) = resume_session_path {
+        SessionManager::open(
+            &resolve_session_path(cwd, resume_session_path),
+            session_dir.as_deref(),
+            None,
+        )
+        .map_err(|error| error.to_string())?
+    } else if parsed.no_session {
+        SessionManager::in_memory(&cwd_string)
     } else if parsed.continue_session {
         SessionManager::continue_recent(&cwd_string, session_dir.as_deref())
             .map_err(|error| error.to_string())?
@@ -197,6 +201,59 @@ fn build_session_support(session_manager: SessionManager) -> SessionSupport {
         has_thinking_entry,
         existing_session,
         session_id,
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ResumePickerOutcome {
+    Selected(String),
+    Cancelled,
+}
+
+async fn select_resume_session(
+    tui: &mut Tui<LiveInteractiveTerminal>,
+    keybindings: &KeybindingsManager,
+    current_sessions: Vec<SessionInfo>,
+    all_sessions: Vec<SessionInfo>,
+) -> Result<Option<String>, String> {
+    let outcome = Arc::new(Mutex::new(None::<ResumePickerOutcome>));
+    let mut picker = SessionPickerComponent::new(keybindings, current_sessions, all_sessions);
+
+    let outcome_for_select = Arc::clone(&outcome);
+    picker.set_on_select(move |path| {
+        *outcome_for_select
+            .lock()
+            .expect("resume picker outcome mutex poisoned") =
+            Some(ResumePickerOutcome::Selected(path));
+    });
+
+    let outcome_for_cancel = Arc::clone(&outcome);
+    picker.set_on_cancel(move || {
+        *outcome_for_cancel
+            .lock()
+            .expect("resume picker outcome mutex poisoned") = Some(ResumePickerOutcome::Cancelled);
+    });
+
+    let picker_id = tui.add_child(Box::new(picker));
+    let _ = tui.set_focus_child(picker_id);
+    tui.start().map_err(|error| error.to_string())?;
+
+    loop {
+        if let Some(outcome) = outcome
+            .lock()
+            .expect("resume picker outcome mutex poisoned")
+            .take()
+        {
+            tui.clear();
+            return Ok(match outcome {
+                ResumePickerOutcome::Selected(path) => Some(path),
+                ResumePickerOutcome::Cancelled => None,
+            });
+        }
+
+        tui.drain_terminal_events()
+            .map_err(|error| error.to_string())?;
+        sleep(Duration::from_millis(16)).await;
     }
 }
 
@@ -622,9 +679,57 @@ async fn run_interactive_command_with_runtime(
         Vec::new()
     };
     let interactive_scoped_models = scoped_models.clone();
-    let session_support = match create_session_support(&parsed, &cwd, agent_dir.as_deref()) {
+
+    let mut keybindings = match &agent_dir {
+        Some(agent_dir) => KeybindingsManager::create(agent_dir),
+        None => KeybindingsManager::new(BTreeMap::new(), None),
+    };
+    keybindings.reload();
+
+    let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
+    let mut tui = Tui::new(terminal.clone());
+    let mut resume_picker_was_shown = false;
+    let should_show_resume_picker = parsed.resume
+        && !parsed.no_session
+        && parsed.session.is_none()
+        && parsed.fork.is_none()
+        && !parsed.continue_session;
+    let selected_resume_session = if should_show_resume_picker {
+        let cwd_string = cwd.to_string_lossy().into_owned();
+        let session_dir = resolve_session_dir(&parsed, &cwd, agent_dir.as_deref());
+        let agent_dir_string = agent_dir
+            .as_deref()
+            .map(|agent_dir| agent_dir.to_string_lossy().into_owned());
+        let current_sessions = SessionManager::list(&cwd_string, session_dir.as_deref());
+        let all_sessions = SessionManager::list_all(agent_dir_string.as_deref());
+        resume_picker_was_shown = true;
+
+        match select_resume_session(&mut tui, &keybindings, current_sessions, all_sessions).await {
+            Ok(Some(path)) => Some(path),
+            Ok(None) => {
+                let _ = tui.stop();
+                println!("No session selected");
+                return 0;
+            }
+            Err(error) => {
+                let _ = tui.stop();
+                eprintln!("Error: {error}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+
+    let session_support = match create_session_support(
+        &parsed,
+        &cwd,
+        agent_dir.as_deref(),
+        selected_resume_session.as_deref(),
+    ) {
         Ok(session_support) => session_support,
         Err(error) => {
+            let _ = tui.stop();
             eprintln!("Error: {error}");
             return 1;
         }
@@ -640,6 +745,7 @@ async fn run_interactive_command_with_runtime(
     ) {
         Ok(files) => files,
         Err(error) => {
+            let _ = tui.stop();
             eprintln!("Error: {error}");
             return 1;
         }
@@ -661,6 +767,7 @@ async fn run_interactive_command_with_runtime(
         models_json_path.as_deref(),
         &scoped_models,
     ) {
+        let _ = tui.stop();
         eprintln!("Error: {error}");
         return 1;
     }
@@ -698,10 +805,12 @@ async fn run_interactive_command_with_runtime(
     let created = match created {
         Ok(created) => created,
         Err(CodingAgentCoreError::NoModelAvailable) => {
+            let _ = tui.stop();
             eprint!("{}", render_no_models_message(models_json_path.as_deref()));
             return 1;
         }
         Err(error) => {
+            let _ = tui.stop();
             eprintln!("Error: {error}");
             return 1;
         }
@@ -710,6 +819,7 @@ async fn run_interactive_command_with_runtime(
     if let Some(session_support) = session_support.as_ref()
         && let Err(error) = apply_session_support(&created.core, session_support)
     {
+        let _ = tui.stop();
         eprintln!("Error: {error}");
         return 1;
     }
@@ -733,18 +843,13 @@ async fn run_interactive_command_with_runtime(
         .iter()
         .any(|diagnostic| diagnostic.level == BootstrapDiagnosticLevel::Error)
     {
+        let _ = tui.stop();
         return 1;
     }
 
     let interactive_session_manager = session_support
         .as_ref()
         .map(|support| support.manager.clone());
-
-    let mut keybindings = match &agent_dir {
-        Some(agent_dir) => KeybindingsManager::create(agent_dir),
-        None => KeybindingsManager::new(BTreeMap::new(), None),
-    };
-    keybindings.reload();
 
     let mut shell = StartupShellComponent::new(
         "Pi",
@@ -772,8 +877,6 @@ async fn run_interactive_command_with_runtime(
     });
 
     let footer_provider = FooterDataProvider::new(&cwd);
-    let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
-    let mut tui = Tui::new(terminal.clone());
     let render_handle = tui.render_handle();
     if let Some(command) = runtime.extension_editor_command {
         shell.set_extension_editor_command(command);
@@ -802,9 +905,13 @@ async fn run_interactive_command_with_runtime(
     let _ = tui.terminal_mut().set_title("pi");
 
     if let Err(error) = tui.start() {
+        let _ = tui.stop();
         eprintln!("Error: {error}");
         drop(binding);
         return 1;
+    }
+    if resume_picker_was_shown {
+        let _ = tui.request_render(false);
     }
 
     spawn_initial_interactive_messages(created.core.clone(), initial_message, messages);
@@ -907,6 +1014,18 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         };
     }
 
+    if parsed.resume {
+        push_line(
+            &mut stderr,
+            "--resume session picker is only supported in interactive mode in the Rust CLI",
+        );
+        return RunCommandResult {
+            exit_code: 1,
+            stdout,
+            stderr,
+        };
+    }
+
     if let Some(message) = unsupported_flag_message(&parsed) {
         push_line(&mut stderr, &message);
         return RunCommandResult {
@@ -944,7 +1063,7 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
     } else {
         Vec::new()
     };
-    let session_support = match create_session_support(&parsed, &cwd, agent_dir.as_deref()) {
+    let session_support = match create_session_support(&parsed, &cwd, agent_dir.as_deref(), None) {
         Ok(session_support) => session_support,
         Err(error) => {
             push_line(&mut stderr, &format!("Error: {error}"));
@@ -1783,11 +1902,6 @@ fn unsupported_flag_message(parsed: &Args) -> Option<String> {
             "--export is not supported in the Rust CLI yet",
         ));
     }
-    if parsed.resume {
-        return Some(String::from(
-            "--resume is not supported in the Rust CLI yet. Use --continue or --session <path>.",
-        ));
-    }
     if parsed.no_tools
         || parsed.tools.is_some()
         || parsed.extensions.is_some()
@@ -1825,12 +1939,11 @@ fn render_help() -> String {
         "  - non-interactive json mode (--mode json)",
         "  - interactive mode",
         "  - --provider, --model, --models, --api-key, --system-prompt, --append-system-prompt, --thinking",
-        "  - --continue, --session, --fork, --no-session, --session-dir",
+        "  - --continue, --resume, --session, --fork, --no-session, --session-dir",
         "  - --list-models [search]",
         "  - @file text/image preprocessing",
         "",
         "Not yet supported:",
-        "  - --resume session picker",
         "  - rpc mode",
         "  - export",
     ]

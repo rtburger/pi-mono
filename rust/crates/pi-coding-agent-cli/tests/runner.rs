@@ -843,6 +843,175 @@ async fn run_command_rejects_interactive_mode_for_now() {
 }
 
 #[tokio::test]
+async fn run_command_rejects_resume_session_picker_outside_interactive_mode() {
+    let result = run_command(RunCommandOptions {
+        args: vec![String::from("-p"), String::from("--resume")],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: Arc::new(EnvAuthSource::new()),
+        built_in_models: Vec::new(),
+        models_json_path: None,
+        agent_dir: None,
+        cwd: unique_temp_dir("runner-resume-print"),
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 1);
+    assert!(result.stdout.is_empty());
+    assert!(
+        result.stderr.contains(
+            "--resume session picker is only supported in interactive mode in the Rust CLI"
+        )
+    );
+}
+
+#[tokio::test]
+async fn run_interactive_command_supports_resume_session_picker() {
+    let provider = unique_name("interactive-provider");
+    let model_id = unique_name("interactive-model");
+    let (api, recorded) = register_recording_provider("interactive-resume");
+    let built_in_model = model(&api, &provider, &model_id);
+    let cwd = unique_temp_dir("runner-interactive-resume-cwd");
+    let session_dir = cwd.join("sessions");
+    let agent_dir = unique_temp_dir("runner-interactive-resume-agent");
+    let auth_source = Arc::new(MemoryAuthStorage::with_api_keys([(
+        provider.as_str(),
+        "token",
+    )]));
+
+    let seeded = run_command(RunCommandOptions {
+        args: vec![
+            String::from("-p"),
+            String::from("--provider"),
+            provider.clone(),
+            String::from("--model"),
+            model_id.clone(),
+            String::from("--session-dir"),
+            session_dir.to_string_lossy().into_owned(),
+            String::from("first turn"),
+        ],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: auth_source.clone(),
+        built_in_models: vec![built_in_model.clone()],
+        models_json_path: None,
+        agent_dir: Some(agent_dir.clone()),
+        cwd: cwd.clone(),
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(seeded.exit_code, 0, "stderr: {}", seeded.stderr);
+    assert_eq!(seeded.stdout, "interactive-resume\n");
+
+    let terminal = ScriptedTerminal::new(vec![
+        (
+            Duration::from_millis(20),
+            TerminalAction::Input(String::from("\r")),
+        ),
+        (
+            Duration::from_millis(60),
+            TerminalAction::Input(String::from("n")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("e")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("x")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("t")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("\r")),
+        ),
+        (
+            Duration::from_millis(100),
+            TerminalAction::Input(String::from("\x04")),
+        ),
+    ]);
+    let inspector = terminal.clone();
+
+    let exit_code = run_interactive_command_with_terminal(
+        RunCommandOptions {
+            args: vec![
+                String::from("--resume"),
+                String::from("--provider"),
+                provider.clone(),
+                String::from("--model"),
+                model_id.clone(),
+                String::from("--session-dir"),
+                session_dir.to_string_lossy().into_owned(),
+            ],
+            stdin_is_tty: true,
+            stdin_content: None,
+            auth_source,
+            built_in_models: vec![built_in_model],
+            models_json_path: None,
+            agent_dir: Some(agent_dir),
+            cwd: cwd.clone(),
+            default_system_prompt: String::new(),
+            version: String::from("0.1.0"),
+            stream_options: StreamOptions::default(),
+        },
+        Arc::new(move || Box::new(terminal.clone())),
+    )
+    .await;
+
+    assert_eq!(exit_code, 0);
+    let output = strip_terminal_control_sequences(&inspector.output());
+    assert!(output.contains("Resume session"), "output: {output}");
+    assert!(output.contains("interactive-resume"), "output: {output}");
+    assert!(output.contains("next"), "output: {output}");
+
+    let request = recorded.lock().unwrap().clone();
+    let context = request.context.expect("expected recorded context");
+    assert_eq!(context.messages.len(), 3, "context: {context:?}");
+    match &context.messages[0] {
+        pi_events::Message::User { content, .. } => {
+            assert_eq!(
+                content,
+                &vec![UserContent::Text {
+                    text: String::from("first turn"),
+                }]
+            );
+        }
+        other => panic!("expected restored user message, got {other:?}"),
+    }
+    match &context.messages[1] {
+        pi_events::Message::Assistant { content, .. } => {
+            assert!(matches!(
+                content.as_slice(),
+                [AssistantContent::Text { text, .. }] if text == "interactive-resume"
+            ));
+        }
+        other => panic!("expected restored assistant message, got {other:?}"),
+    }
+    match &context.messages[2] {
+        pi_events::Message::User { content, .. } => {
+            assert_eq!(
+                content,
+                &vec![UserContent::Text {
+                    text: String::from("next"),
+                }]
+            );
+        }
+        other => panic!("expected follow-up user message, got {other:?}"),
+    }
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
 async fn run_interactive_command_renders_live_transcript_and_exits() {
     let provider = unique_name("interactive-provider");
     let model_id = unique_name("interactive-model");
