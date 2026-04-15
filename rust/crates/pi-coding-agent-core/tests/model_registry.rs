@@ -1,5 +1,8 @@
 use pi_coding_agent_core::{MemoryAuthStorage, ModelRegistry, RequestAuth};
-use pi_events::Model;
+use pi_events::{
+    Model, ModelCost, ModelRouting, OpenAiCompletionsCompatConfig, OpenAiCompletionsMaxTokensField,
+    OpenAiThinkingFormat,
+};
 use serde_json::json;
 use std::{
     env, fs,
@@ -21,8 +24,15 @@ fn mock_model(provider: &str, id: &str, name: &str) -> Model {
         base_url: format!("https://{provider}.example.com/v1"),
         reasoning: false,
         input: vec!["text".into()],
+        cost: ModelCost {
+            input: 1.0,
+            output: 2.0,
+            cache_read: 0.5,
+            cache_write: 0.25,
+        },
         context_window: 128_000,
         max_tokens: 16_384,
+        compat: None,
     }
 }
 
@@ -202,6 +212,133 @@ fn model_override_applies_to_built_in_model() {
     assert_eq!(model.name, "Overridden GPT-4o");
     assert_eq!(model.max_tokens, 4096);
     assert_eq!(model.base_url, "https://proxy.example.com/v1");
+}
+
+#[test]
+fn custom_models_capture_cost_and_compat() {
+    let temp_dir = unique_temp_dir("custom-cost-compat");
+    let models_json_path = temp_dir.join("models.json");
+    write_models_json(
+        &models_json_path,
+        json!({
+            "providers": {
+                "openrouter": {
+                    "baseUrl": "https://openrouter.ai/api/v1",
+                    "apiKey": "OPENROUTER_API_KEY",
+                    "api": "openai-completions",
+                    "compat": {
+                        "thinkingFormat": "openrouter",
+                        "openRouterRouting": {
+                            "order": ["anthropic"]
+                        }
+                    },
+                    "models": [
+                        {
+                            "id": "anthropic/claude-sonnet-4-5",
+                            "name": "Claude Sonnet via OpenRouter",
+                            "cost": {
+                                "input": 0.5,
+                                "output": 1.5,
+                                "cacheRead": 0.1,
+                                "cacheWrite": 0.2
+                            },
+                            "compat": {
+                                "requiresToolResultName": true
+                            }
+                        }
+                    ]
+                }
+            }
+        }),
+    );
+
+    let registry = ModelRegistry::new(
+        Arc::new(MemoryAuthStorage::new()),
+        built_in_models(),
+        Some(models_json_path),
+    );
+    let model = registry
+        .find("openrouter", "anthropic/claude-sonnet-4-5")
+        .unwrap();
+
+    assert_eq!(
+        model.cost,
+        ModelCost {
+            input: 0.5,
+            output: 1.5,
+            cache_read: 0.1,
+            cache_write: 0.2,
+        }
+    );
+    assert_eq!(
+        model.compat,
+        Some(OpenAiCompletionsCompatConfig {
+            thinking_format: Some(OpenAiThinkingFormat::OpenRouter),
+            open_router_routing: Some(ModelRouting {
+                only: None,
+                order: Some(vec!["anthropic".into()]),
+            }),
+            requires_tool_result_name: Some(true),
+            ..OpenAiCompletionsCompatConfig::default()
+        })
+    );
+}
+
+#[test]
+fn model_overrides_merge_cost_and_provider_compat() {
+    let temp_dir = unique_temp_dir("override-cost-compat");
+    let models_json_path = temp_dir.join("models.json");
+    write_models_json(
+        &models_json_path,
+        json!({
+            "providers": {
+                "openai": {
+                    "baseUrl": "https://proxy.example.com/v1",
+                    "compat": {
+                        "maxTokensField": "max_tokens",
+                        "vercelGatewayRouting": {
+                            "order": ["openai"]
+                        }
+                    },
+                    "modelOverrides": {
+                        "gpt-4o": {
+                            "cost": {
+                                "output": 9.0
+                            },
+                            "compat": {
+                                "supportsStore": false,
+                                "vercelGatewayRouting": {
+                                    "only": ["openai"]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }),
+    );
+
+    let registry = ModelRegistry::new(
+        Arc::new(MemoryAuthStorage::new()),
+        built_in_models(),
+        Some(models_json_path),
+    );
+    let model = registry.find("openai", "gpt-4o").unwrap();
+
+    assert_eq!(model.cost.input, 1.0);
+    assert_eq!(model.cost.output, 9.0);
+    assert_eq!(
+        model.compat,
+        Some(OpenAiCompletionsCompatConfig {
+            max_tokens_field: Some(OpenAiCompletionsMaxTokensField::MaxTokens),
+            supports_store: Some(false),
+            vercel_gateway_routing: Some(ModelRouting {
+                only: Some(vec!["openai".into()]),
+                order: Some(vec!["openai".into()]),
+            }),
+            ..OpenAiCompletionsCompatConfig::default()
+        })
+    );
 }
 
 #[test]

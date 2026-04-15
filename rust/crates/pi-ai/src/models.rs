@@ -1,4 +1,4 @@
-use pi_events::{Model, Usage, UsageCost};
+use pi_events::{Model, ModelCost, Usage, UsageCost};
 use serde::Deserialize;
 use std::{collections::BTreeMap, sync::OnceLock};
 
@@ -12,7 +12,6 @@ struct BuiltInModelCatalog {
     providers: Vec<String>,
     provider_models: BTreeMap<String, Vec<Model>>,
     model_headers: BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>,
-    model_costs: BTreeMap<String, BTreeMap<String, RawModelCost>>,
     all_models: Vec<Model>,
 }
 
@@ -29,18 +28,9 @@ struct RawModel {
     headers: BTreeMap<String, String>,
     reasoning: bool,
     input: Vec<String>,
-    cost: RawModelCost,
+    cost: ModelCost,
     context_window: u64,
     max_tokens: u64,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawModelCost {
-    input: f64,
-    output: f64,
-    cache_read: f64,
-    cache_write: f64,
 }
 
 type RawCatalog = BTreeMap<String, BTreeMap<String, RawModel>>;
@@ -88,15 +78,10 @@ pub fn get_provider_headers(provider: &str) -> Option<BTreeMap<String, String>> 
 }
 
 pub fn calculate_cost(model: &Model, usage: &mut Usage) -> UsageCost {
-    calculate_cost_for(model.provider.as_str(), model.id.as_str(), usage)
+    calculate_cost_with(model.cost, usage)
 }
 
-pub(crate) fn calculate_cost_for(provider: &str, model_id: &str, usage: &mut Usage) -> UsageCost {
-    let Some(cost) = model_cost(provider, model_id) else {
-        usage.cost = UsageCost::default();
-        return usage.cost.clone();
-    };
-
+pub(crate) fn calculate_cost_with(cost: ModelCost, usage: &mut Usage) -> UsageCost {
     usage.cost.input = (cost.input / 1_000_000.0) * usage.input as f64;
     usage.cost.output = (cost.output / 1_000_000.0) * usage.output as f64;
     usage.cost.cache_read = (cost.cache_read / 1_000_000.0) * usage.cache_read as f64;
@@ -133,7 +118,6 @@ fn load_catalog() -> BuiltInModelCatalog {
     let mut providers = Vec::with_capacity(raw_catalog.len());
     let mut provider_models = BTreeMap::new();
     let mut model_headers = BTreeMap::new();
-    let mut model_costs = BTreeMap::new();
     let mut all_models = Vec::new();
 
     for (provider, models) in raw_catalog {
@@ -144,15 +128,12 @@ fn load_catalog() -> BuiltInModelCatalog {
         providers.push(provider.clone());
         let mut provider_entries = Vec::with_capacity(models.len());
         let mut provider_header_entries = BTreeMap::new();
-        let mut provider_cost_entries = BTreeMap::new();
 
         for raw_model in models.into_values() {
             let model_id = raw_model.id.clone();
             if !raw_model.headers.is_empty() {
                 provider_header_entries.insert(model_id.clone(), raw_model.headers.clone());
             }
-            provider_cost_entries.insert(model_id.clone(), raw_model.cost);
-
             let model = Model {
                 id: raw_model.id,
                 name: raw_model.name,
@@ -161,8 +142,10 @@ fn load_catalog() -> BuiltInModelCatalog {
                 base_url: raw_model.base_url,
                 reasoning: raw_model.reasoning,
                 input: raw_model.input,
+                cost: raw_model.cost,
                 context_window: raw_model.context_window,
                 max_tokens: raw_model.max_tokens,
+                compat: None,
             };
             provider_entries.push(model.clone());
             all_models.push(model);
@@ -171,9 +154,6 @@ fn load_catalog() -> BuiltInModelCatalog {
         if !provider_header_entries.is_empty() {
             model_headers.insert(provider.clone(), provider_header_entries);
         }
-        if !provider_cost_entries.is_empty() {
-            model_costs.insert(provider.clone(), provider_cost_entries);
-        }
         provider_models.insert(provider, provider_entries);
     }
 
@@ -181,15 +161,6 @@ fn load_catalog() -> BuiltInModelCatalog {
         providers,
         provider_models,
         model_headers,
-        model_costs,
         all_models,
     }
-}
-
-fn model_cost(provider: &str, model_id: &str) -> Option<RawModelCost> {
-    catalog()
-        .model_costs
-        .get(provider)
-        .and_then(|models| models.get(model_id))
-        .copied()
 }

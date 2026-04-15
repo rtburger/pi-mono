@@ -800,8 +800,15 @@ mod tests {
             base_url: "http://localhost".into(),
             reasoning: false,
             input: vec!["text".into()],
+            cost: pi_events::ModelCost {
+                input: 1.0,
+                output: 1.0,
+                cache_read: 0.1,
+                cache_write: 0.1,
+            },
             context_window: 8192,
             max_tokens: 2048,
+            compat: None,
         }
     }
 

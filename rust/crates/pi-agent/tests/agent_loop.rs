@@ -98,8 +98,15 @@ fn model() -> Model {
         base_url: "http://localhost".into(),
         reasoning: false,
         input: vec!["text".into()],
+        cost: pi_events::ModelCost {
+            input: 1.0,
+            output: 1.0,
+            cache_read: 0.1,
+            cache_write: 0.1,
+        },
         context_window: 8192,
         max_tokens: 2048,
+        compat: None,
     }
 }
 
@@ -1648,8 +1655,15 @@ async fn default_streamer_maps_reasoning_effort_through_simple_options() {
         base_url: "https://api.anthropic.com/v1".into(),
         reasoning: true,
         input: vec!["text".into()],
+        cost: pi_events::ModelCost {
+            input: 1.0,
+            output: 1.0,
+            cache_read: 0.1,
+            cache_write: 0.1,
+        },
         context_window: 200_000,
         max_tokens: 40_000,
+        compat: None,
     };
 
     let stream = agent_loop(
@@ -1696,8 +1710,15 @@ async fn default_streamer_forwards_custom_thinking_budgets() {
         base_url: "https://api.anthropic.com/v1".into(),
         reasoning: true,
         input: vec!["text".into()],
+        cost: pi_events::ModelCost {
+            input: 1.0,
+            output: 1.0,
+            cache_read: 0.1,
+            cache_write: 0.1,
+        },
         context_window: 200_000,
         max_tokens: 60_000,
+        compat: None,
     };
 
     let stream = agent_loop(

@@ -1,13 +1,13 @@
 use crate::{
     AiProvider, AssistantEventStream, StreamOptions,
-    models::{calculate_cost_for, get_model_headers, get_provider_headers},
+    models::{calculate_cost_with, get_model_headers, get_provider_headers},
     register_provider,
 };
 use async_stream::stream;
 use futures::StreamExt;
 use pi_events::{
-    AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason,
-    ToolDefinition, Usage, UserContent,
+    AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, ModelCost,
+    StopReason, ToolDefinition, Usage, UserContent,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -868,6 +868,7 @@ pub(crate) enum OpenAiResponsesBlockKind {
 #[derive(Debug, Clone)]
 pub(crate) struct OpenAiResponsesStreamState {
     output: AssistantMessage,
+    model_cost: ModelCost,
     current_block_index: Option<usize>,
     current_block_kind: Option<OpenAiResponsesBlockKind>,
     current_tool_json: String,
@@ -880,6 +881,7 @@ impl OpenAiResponsesStreamState {
         output.timestamp = now_ms();
         Self {
             output,
+            model_cost: model.cost,
             current_block_index: None,
             current_block_kind: None,
             current_tool_json: String::new(),
@@ -1214,7 +1216,7 @@ impl OpenAiResponsesStreamState {
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned)
                     .or(self.output.response_id.clone());
-                apply_usage_from_response(&mut self.output, &response);
+                apply_usage_from_response(&mut self.output, &response, self.model_cost);
                 self.output.stop_reason =
                     map_response_status(response.get("status").and_then(Value::as_str));
                 if self
@@ -1243,7 +1245,7 @@ impl OpenAiResponsesStreamState {
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned)
                     .or(self.output.response_id.clone());
-                apply_usage_from_response(&mut self.output, &response);
+                apply_usage_from_response(&mut self.output, &response, self.model_cost);
                 self.output.stop_reason = StopReason::Error;
                 self.output.error_message = Some(
                     response
@@ -1555,6 +1557,7 @@ fn parse_streaming_json_map(input: &str) -> BTreeMap<String, Value> {
 fn apply_usage_from_response(
     output: &mut AssistantMessage,
     response: &serde_json::Map<String, Value>,
+    model_cost: ModelCost,
 ) {
     let usage = response
         .get("usage")
@@ -1586,11 +1589,7 @@ fn apply_usage_from_response(
             .unwrap_or(input_tokens + output_tokens),
         ..Usage::default()
     };
-    calculate_cost_for(
-        output.provider.as_str(),
-        output.model.as_str(),
-        &mut output.usage,
-    );
+    calculate_cost_with(model_cost, &mut output.usage);
 }
 
 fn map_response_status(status: Option<&str>) -> StopReason {

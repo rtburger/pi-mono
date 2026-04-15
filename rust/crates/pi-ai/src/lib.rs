@@ -26,8 +26,8 @@ pub use overflow::{is_context_overflow, overflow_patterns};
 use async_stream::stream;
 use futures::{Stream, StreamExt};
 use pi_events::{
-    AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason, Usage,
-    UserContent,
+    AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, ModelCost,
+    StopReason, Usage, UserContent,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -549,8 +549,10 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxRegis
             base_url: "http://localhost:0".into(),
             reasoning: definition.reasoning,
             input: vec!["text".into(), "image".into()],
+            cost: ModelCost::default(),
             context_window: 128_000,
             max_tokens: 16_384,
+            compat: None,
         })
         .collect();
     let state = Arc::new(Mutex::new(FauxState::default()));

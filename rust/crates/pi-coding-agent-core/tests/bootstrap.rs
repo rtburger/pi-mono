@@ -15,8 +15,15 @@ fn mock_model(provider: &str, id: &str, name: &str, reasoning: bool) -> Model {
         base_url: format!("https://{provider}.example.com/v1"),
         reasoning,
         input: vec!["text".into()],
+        cost: pi_events::ModelCost {
+            input: 1.0,
+            output: 1.0,
+            cache_read: 0.1,
+            cache_write: 0.1,
+        },
         context_window: 128_000,
         max_tokens: 16_384,
+        compat: None,
     }
 }
 

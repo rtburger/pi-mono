@@ -154,6 +154,85 @@ pub enum Message {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCost {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRouting {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<String>>,
+}
+
+impl ModelRouting {
+    pub fn is_empty(&self) -> bool {
+        self.only.as_ref().is_none_or(Vec::is_empty)
+            && self.order.as_ref().is_none_or(Vec::is_empty)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiCompletionsMaxTokensField {
+    MaxCompletionTokens,
+    MaxTokens,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OpenAiThinkingFormat {
+    #[serde(rename = "openai")]
+    OpenAi,
+    #[serde(rename = "openrouter")]
+    OpenRouter,
+    #[serde(rename = "zai")]
+    Zai,
+    #[serde(rename = "qwen")]
+    Qwen,
+    #[serde(rename = "qwen-chat-template")]
+    QwenChatTemplate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAiCompletionsCompatConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_store: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_developer_role: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_reasoning_effort: Option<bool>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reasoning_effort_map: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_usage_in_streaming: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens_field: Option<OpenAiCompletionsMaxTokensField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_tool_result_name: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_assistant_after_tool_result: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_thinking_as_text: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_format: Option<OpenAiThinkingFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_router_routing: Option<ModelRouting>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vercel_gateway_routing: Option<ModelRouting>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zai_tool_stream: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_strict_mode: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Model {
     pub id: String,
@@ -163,8 +242,12 @@ pub struct Model {
     pub base_url: String,
     pub reasoning: bool,
     pub input: Vec<String>,
+    #[serde(default)]
+    pub cost: ModelCost,
     pub context_window: u64,
     pub max_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat: Option<OpenAiCompletionsCompatConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

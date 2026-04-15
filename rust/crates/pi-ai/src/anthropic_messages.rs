@@ -1,13 +1,13 @@
 use crate::{
     AiProvider, AssistantEventStream, CacheRetention, StreamOptions, get_env_api_key,
-    models::{calculate_cost_for, get_model_headers, get_provider_headers},
+    models::{calculate_cost_with, get_model_headers, get_provider_headers},
     register_provider,
 };
 use async_stream::stream;
 use futures::StreamExt;
 use pi_events::{
-    AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason,
-    ToolDefinition, Usage, UserContent,
+    AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, ModelCost,
+    StopReason, ToolDefinition, Usage, UserContent,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -700,6 +700,7 @@ fn flush_sse_event(
 
 struct AnthropicStreamState {
     output: AssistantMessage,
+    model_cost: ModelCost,
     block_indices: BTreeMap<usize, usize>,
     partial_tool_json: BTreeMap<usize, String>,
     is_oauth_token: bool,
@@ -714,6 +715,7 @@ impl AnthropicStreamState {
                 model.provider.clone(),
                 model.id.clone(),
             ),
+            model_cost: model.cost,
             block_indices: BTreeMap::new(),
             partial_tool_json: BTreeMap::new(),
             is_oauth_token,
@@ -1025,11 +1027,7 @@ impl AnthropicStreamState {
             + self.output.usage.output
             + self.output.usage.cache_read
             + self.output.usage.cache_write;
-        calculate_cost_for(
-            self.output.provider.as_str(),
-            self.output.model.as_str(),
-            &mut self.output.usage,
-        );
+        calculate_cost_with(self.model_cost, &mut self.output.usage);
     }
 }
 

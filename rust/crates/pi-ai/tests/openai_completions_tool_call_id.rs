@@ -22,8 +22,15 @@ fn model() -> Model {
         base_url: "https://api.example.test/v1".into(),
         reasoning: false,
         input: vec!["text".into()],
+        cost: pi_events::ModelCost {
+            input: 1.0,
+            output: 1.0,
+            cache_read: 0.1,
+            cache_write: 0.1,
+        },
         context_window: 128_000,
         max_tokens: 16_384,
+        compat: None,
     }
 }
 

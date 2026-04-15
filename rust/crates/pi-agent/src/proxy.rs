@@ -841,8 +841,15 @@ mod tests {
             base_url: String::from("https://example.com"),
             reasoning: true,
             input: vec![String::from("text"), String::from("image")],
+            cost: pi_events::ModelCost {
+                input: 1.0,
+                output: 1.0,
+                cache_read: 0.1,
+                cache_write: 0.1,
+            },
             context_window: 128_000,
             max_tokens: 16_384,
+            compat: None,
         }
     }
 

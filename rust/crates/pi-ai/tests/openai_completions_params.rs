@@ -1,9 +1,12 @@
 use pi_ai::openai_completions::{
-    OpenAiCompletionsCompat, OpenAiCompletionsMaxTokensField, OpenAiCompletionsRequestOptions,
-    OpenAiCompletionsToolChoice, OpenAiCompletionsToolChoiceMode, ReasoningEffort,
+    ModelRouting, OpenAiCompletionsCompat, OpenAiCompletionsMaxTokensField,
+    OpenAiCompletionsReasoning, OpenAiCompletionsRequestOptions, OpenAiCompletionsToolChoice,
+    OpenAiCompletionsToolChoiceMode, OpenAiThinkingFormat, ReasoningEffort,
     build_openai_completions_request_params, detect_openai_completions_compat,
 };
-use pi_events::{Context, Model, ToolDefinition, UserContent};
+use pi_events::{
+    Context, Model, ModelCost, OpenAiCompletionsCompatConfig, ToolDefinition, UserContent,
+};
 use serde_json::json;
 
 fn model(provider: &str, id: &str, base_url: &str, reasoning: bool) -> Model {
@@ -15,8 +18,10 @@ fn model(provider: &str, id: &str, base_url: &str, reasoning: bool) -> Model {
         base_url: base_url.into(),
         reasoning,
         input: vec!["text".into(), "image".into()],
+        cost: ModelCost::default(),
         context_window: 128_000,
         max_tokens: 16_384,
+        compat: None,
     }
 }
 
@@ -124,8 +129,116 @@ fn detects_default_openai_compat_for_supported_providers() {
             compat.max_tokens_field,
             OpenAiCompletionsMaxTokensField::MaxCompletionTokens
         );
+        assert_eq!(compat.thinking_format, OpenAiThinkingFormat::OpenAi);
         assert!(compat.reasoning_effort_map.is_empty());
     }
+}
+
+#[test]
+fn detects_non_standard_provider_compat_and_reasoning_mappings() {
+    let grok =
+        detect_openai_completions_compat(&model("xai", "grok-4", "https://api.x.ai/v1", true));
+    assert!(!grok.supports_store);
+    assert!(!grok.supports_developer_role);
+    assert!(!grok.supports_reasoning_effort);
+    assert_eq!(grok.thinking_format, OpenAiThinkingFormat::OpenAi);
+
+    let groq_qwen = detect_openai_completions_compat(&model(
+        "groq",
+        "qwen/qwen3-32b",
+        "https://api.groq.com/openai/v1",
+        true,
+    ));
+    assert_eq!(
+        groq_qwen
+            .reasoning_effort_map
+            .get("high")
+            .map(String::as_str),
+        Some("default")
+    );
+    assert_eq!(
+        groq_qwen
+            .reasoning_effort_map
+            .get("xhigh")
+            .map(String::as_str),
+        Some("default")
+    );
+}
+
+#[test]
+fn applies_model_compat_overrides_to_openrouter_request_shapes() {
+    let mut model = model(
+        "openrouter",
+        "anthropic/claude-sonnet-4-5",
+        "https://openrouter.ai/api/v1",
+        true,
+    );
+    model.compat = Some(OpenAiCompletionsCompatConfig {
+        open_router_routing: Some(ModelRouting {
+            only: Some(vec!["anthropic".into()]),
+            order: Some(vec!["openai".into()]),
+        }),
+        ..OpenAiCompletionsCompatConfig::default()
+    });
+
+    let compat = detect_openai_completions_compat(&model);
+    let params = build_openai_completions_request_params(
+        &model,
+        &Context {
+            system_prompt: None,
+            messages: vec![pi_events::Message::User {
+                content: vec![UserContent::Text { text: "Hi".into() }],
+                timestamp: 1,
+            }],
+            tools: vec![],
+        },
+        &compat,
+        &OpenAiCompletionsRequestOptions {
+            reasoning_effort: Some(ReasoningEffort::High),
+            ..OpenAiCompletionsRequestOptions::default()
+        },
+    );
+
+    assert_eq!(compat.thinking_format, OpenAiThinkingFormat::OpenRouter);
+    assert_eq!(
+        params.reasoning,
+        Some(OpenAiCompletionsReasoning {
+            effort: "high".into(),
+        })
+    );
+    assert_eq!(
+        params.provider,
+        Some(ModelRouting {
+            only: Some(vec!["anthropic".into()]),
+            order: Some(vec!["openai".into()]),
+        })
+    );
+    assert_eq!(params.reasoning_effort, None);
+}
+
+#[test]
+fn applies_zai_enable_thinking_and_tool_stream_overrides() {
+    let mut model = model("zai", "glm-4.5", "https://api.z.ai/v1", true);
+    model.compat = Some(OpenAiCompletionsCompatConfig {
+        zai_tool_stream: Some(true),
+        ..OpenAiCompletionsCompatConfig::default()
+    });
+
+    let compat = detect_openai_completions_compat(&model);
+    let params = build_openai_completions_request_params(
+        &model,
+        &context_with_tool(),
+        &compat,
+        &OpenAiCompletionsRequestOptions {
+            reasoning_effort: Some(ReasoningEffort::Medium),
+            ..OpenAiCompletionsRequestOptions::default()
+        },
+    );
+
+    assert_eq!(compat.thinking_format, OpenAiThinkingFormat::Zai);
+    assert_eq!(params.enable_thinking, Some(true));
+    assert_eq!(params.tool_stream, Some(true));
+    assert_eq!(params.reasoning_effort, None);
 }
 
 #[test]

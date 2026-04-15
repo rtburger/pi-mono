@@ -2,7 +2,9 @@ use pi_ai::openai_completions::{
     OpenAiCompletionsCompat, OpenAiCompletionsContentPart, OpenAiCompletionsMessageContent,
     convert_openai_completions_messages,
 };
-use pi_events::{AssistantContent, Context, Message, Model, StopReason, Usage, UserContent};
+use pi_events::{
+    AssistantContent, Context, Message, Model, ModelCost, StopReason, Usage, UserContent,
+};
 
 fn model(provider: &str, id: &str, reasoning: bool, input: &[&str]) -> Model {
     Model {
@@ -13,8 +15,10 @@ fn model(provider: &str, id: &str, reasoning: bool, input: &[&str]) -> Model {
         base_url: "https://api.example.test/v1".into(),
         reasoning,
         input: input.iter().map(|value| (*value).to_string()).collect(),
+        cost: ModelCost::default(),
         context_window: 128_000,
         max_tokens: 16_384,
+        compat: None,
     }
 }
 

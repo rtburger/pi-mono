@@ -62,8 +62,15 @@ fn model(id: &str, provider: &str, reasoning: bool) -> Model {
         base_url: String::new(),
         reasoning,
         input: vec!["text".to_owned()],
+        cost: pi_events::ModelCost {
+            input: 1.0,
+            output: 1.0,
+            cache_read: 0.1,
+            cache_write: 0.1,
+        },
         context_window: 200_000,
         max_tokens: 8_192,
+        compat: None,
     }
 }
 

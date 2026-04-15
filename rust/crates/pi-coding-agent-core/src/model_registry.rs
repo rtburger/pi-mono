@@ -5,7 +5,7 @@ use crate::{
     },
     model_resolver::ModelCatalog,
 };
-use pi_events::Model;
+use pi_events::{Model, ModelCost, ModelRouting, OpenAiCompletionsCompatConfig};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -224,10 +224,12 @@ impl ModelRegistry {
             .map(|model| {
                 let mut next = model.clone();
 
-                if let Some(provider_override) = overrides.get(&model.provider)
-                    && let Some(base_url) = provider_override.base_url.as_ref()
-                {
-                    next.base_url = base_url.clone();
+                if let Some(provider_override) = overrides.get(&model.provider) {
+                    if let Some(base_url) = provider_override.base_url.as_ref() {
+                        next.base_url = base_url.clone();
+                    }
+                    next.compat =
+                        merge_compat(next.compat.as_ref(), provider_override.compat.as_ref());
                 }
 
                 if let Some(provider_model_overrides) = model_overrides.get(&model.provider)
@@ -291,11 +293,12 @@ impl ModelRegistry {
         let mut model_overrides = BTreeMap::new();
 
         for (provider_name, provider_config) in &config.providers {
-            if provider_config.base_url.is_some() {
+            if provider_config.base_url.is_some() || provider_config.compat.is_some() {
                 overrides.insert(
                     provider_name.clone(),
                     ProviderOverride {
                         base_url: provider_config.base_url.clone(),
+                        compat: provider_config.compat.clone(),
                     },
                 );
             }
@@ -375,6 +378,7 @@ impl CustomModelsResult {
 #[derive(Debug, Clone)]
 struct ProviderOverride {
     base_url: Option<String>,
+    compat: Option<OpenAiCompletionsCompatConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -397,6 +401,7 @@ struct ProviderConfigFile {
     api_key: Option<String>,
     api: Option<String>,
     headers: Option<BTreeMap<String, String>>,
+    compat: Option<OpenAiCompletionsCompatConfig>,
     auth_header: Option<bool>,
     models: Option<Vec<ModelDefinitionFile>>,
     model_overrides: Option<BTreeMap<String, ModelOverrideFile>>,
@@ -411,9 +416,11 @@ struct ModelDefinitionFile {
     base_url: Option<String>,
     reasoning: Option<bool>,
     input: Option<Vec<ModelInputKind>>,
+    cost: Option<ModelCost>,
     context_window: Option<u64>,
     max_tokens: Option<u64>,
     headers: Option<BTreeMap<String, String>>,
+    compat: Option<OpenAiCompletionsCompatConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -422,9 +429,20 @@ struct ModelOverrideFile {
     name: Option<String>,
     reasoning: Option<bool>,
     input: Option<Vec<ModelInputKind>>,
+    cost: Option<ModelCostOverrideFile>,
     context_window: Option<u64>,
     max_tokens: Option<u64>,
     headers: Option<BTreeMap<String, String>>,
+    compat: Option<OpenAiCompletionsCompatConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ModelCostOverrideFile {
+    input: Option<f64>,
+    output: Option<f64>,
+    cache_read: Option<f64>,
+    cache_write: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -452,9 +470,12 @@ fn validate_config(config: &ModelsConfigFile) -> Result<(), String> {
             .is_some_and(|overrides| !overrides.is_empty());
 
         if models.is_empty() {
-            if provider_config.base_url.is_none() && !has_model_overrides {
+            if provider_config.base_url.is_none()
+                && provider_config.compat.is_none()
+                && !has_model_overrides
+            {
                 return Err(format!(
-                    "Provider {provider_name}: must specify \"baseUrl\", \"modelOverrides\", or \"models\"."
+                    "Provider {provider_name}: must specify \"baseUrl\", \"compat\", \"modelOverrides\", or \"models\"."
                 ));
             }
         } else {
@@ -541,8 +562,13 @@ fn parse_custom_models(config: &ModelsConfigFile, registry: &mut ModelRegistry) 
                     .as_ref()
                     .map(|input| model_inputs_to_strings(input))
                     .unwrap_or_else(|| vec!["text".into()]),
+                cost: model_definition.cost.unwrap_or_default(),
                 context_window: model_definition.context_window.unwrap_or(128_000),
                 max_tokens: model_definition.max_tokens.unwrap_or(16_384),
+                compat: merge_compat(
+                    provider_config.compat.as_ref(),
+                    model_definition.compat.as_ref(),
+                ),
             });
         }
     }
@@ -566,14 +592,89 @@ fn apply_model_override(model: &Model, model_override: &ModelOverrideFile) -> Mo
     if let Some(input) = model_override.input.as_ref() {
         result.input = model_inputs_to_strings(input);
     }
+    if let Some(cost) = model_override.cost.as_ref() {
+        result.cost = ModelCost {
+            input: cost.input.unwrap_or(result.cost.input),
+            output: cost.output.unwrap_or(result.cost.output),
+            cache_read: cost.cache_read.unwrap_or(result.cost.cache_read),
+            cache_write: cost.cache_write.unwrap_or(result.cost.cache_write),
+        };
+    }
     if let Some(context_window) = model_override.context_window {
         result.context_window = context_window;
     }
     if let Some(max_tokens) = model_override.max_tokens {
         result.max_tokens = max_tokens;
     }
+    result.compat = merge_compat(result.compat.as_ref(), model_override.compat.as_ref());
 
     result
+}
+
+fn merge_compat(
+    base: Option<&OpenAiCompletionsCompatConfig>,
+    override_compat: Option<&OpenAiCompletionsCompatConfig>,
+) -> Option<OpenAiCompletionsCompatConfig> {
+    match (base, override_compat) {
+        (None, None) => None,
+        (Some(base), None) => Some(base.clone()),
+        (None, Some(override_compat)) => Some(override_compat.clone()),
+        (Some(base), Some(override_compat)) => Some(OpenAiCompletionsCompatConfig {
+            supports_store: override_compat.supports_store.or(base.supports_store),
+            supports_developer_role: override_compat
+                .supports_developer_role
+                .or(base.supports_developer_role),
+            supports_reasoning_effort: override_compat
+                .supports_reasoning_effort
+                .or(base.supports_reasoning_effort),
+            reasoning_effort_map: if override_compat.reasoning_effort_map.is_empty() {
+                base.reasoning_effort_map.clone()
+            } else {
+                override_compat.reasoning_effort_map.clone()
+            },
+            supports_usage_in_streaming: override_compat
+                .supports_usage_in_streaming
+                .or(base.supports_usage_in_streaming),
+            max_tokens_field: override_compat.max_tokens_field.or(base.max_tokens_field),
+            requires_tool_result_name: override_compat
+                .requires_tool_result_name
+                .or(base.requires_tool_result_name),
+            requires_assistant_after_tool_result: override_compat
+                .requires_assistant_after_tool_result
+                .or(base.requires_assistant_after_tool_result),
+            requires_thinking_as_text: override_compat
+                .requires_thinking_as_text
+                .or(base.requires_thinking_as_text),
+            thinking_format: override_compat.thinking_format.or(base.thinking_format),
+            open_router_routing: merge_routing(
+                base.open_router_routing.as_ref(),
+                override_compat.open_router_routing.as_ref(),
+            ),
+            vercel_gateway_routing: merge_routing(
+                base.vercel_gateway_routing.as_ref(),
+                override_compat.vercel_gateway_routing.as_ref(),
+            ),
+            zai_tool_stream: override_compat.zai_tool_stream.or(base.zai_tool_stream),
+            supports_strict_mode: override_compat
+                .supports_strict_mode
+                .or(base.supports_strict_mode),
+        }),
+    }
+}
+
+fn merge_routing(
+    base: Option<&ModelRouting>,
+    override_routing: Option<&ModelRouting>,
+) -> Option<ModelRouting> {
+    match (base, override_routing) {
+        (None, None) => None,
+        (Some(base), None) => Some(base.clone()),
+        (None, Some(override_routing)) => Some(override_routing.clone()),
+        (Some(base), Some(override_routing)) => Some(ModelRouting {
+            only: override_routing.only.clone().or(base.only.clone()),
+            order: override_routing.order.clone().or(base.order.clone()),
+        }),
+    }
 }
 
 fn merge_custom_models(built_in_models: Vec<Model>, custom_models: Vec<Model>) -> Vec<Model> {

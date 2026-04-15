@@ -13,8 +13,15 @@ fn model_with(provider: &str, base_url: String, input: Vec<&str>) -> Model {
         base_url,
         reasoning: true,
         input: input.into_iter().map(str::to_string).collect(),
+        cost: pi_events::ModelCost {
+            input: 1.0,
+            output: 1.0,
+            cache_read: 0.1,
+            cache_write: 0.1,
+        },
         context_window: 128_000,
         max_tokens: 16_384,
+        compat: None,
     }
 }
 

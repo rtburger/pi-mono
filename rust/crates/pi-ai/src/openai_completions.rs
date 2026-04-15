@@ -1,14 +1,14 @@
 use crate::{
     AiProvider, AssistantEventStream, StreamOptions,
-    models::{calculate_cost_for, get_model_headers, get_provider_headers},
+    models::{calculate_cost_with, get_model_headers, get_provider_headers},
     register_provider,
     unicode::sanitize_provider_text,
 };
 use async_stream::stream;
 use futures::StreamExt;
 use pi_events::{
-    AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason,
-    ToolDefinition, Usage, UserContent,
+    AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, ModelCost,
+    OpenAiCompletionsCompatConfig, StopReason, ToolDefinition, Usage, UserContent,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,24 +38,23 @@ impl ReasoningEffort {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OpenAiCompletionsMaxTokensField {
-    MaxCompletionTokens,
-    MaxTokens,
-}
+pub use pi_events::{ModelRouting, OpenAiCompletionsMaxTokensField, OpenAiThinkingFormat};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenAiCompletionsCompat {
     pub supports_store: bool,
     pub supports_developer_role: bool,
     pub supports_reasoning_effort: bool,
-    pub reasoning_effort_map: BTreeMap<ReasoningEffort, String>,
+    pub reasoning_effort_map: BTreeMap<String, String>,
     pub supports_usage_in_streaming: bool,
     pub max_tokens_field: OpenAiCompletionsMaxTokensField,
     pub requires_tool_result_name: bool,
     pub requires_assistant_after_tool_result: bool,
     pub requires_thinking_as_text: bool,
+    pub thinking_format: OpenAiThinkingFormat,
+    pub open_router_routing: ModelRouting,
+    pub vercel_gateway_routing: ModelRouting,
+    pub zai_tool_stream: bool,
     pub supports_strict_mode: bool,
 }
 
@@ -71,6 +70,10 @@ impl Default for OpenAiCompletionsCompat {
             requires_tool_result_name: false,
             requires_assistant_after_tool_result: false,
             requires_thinking_as_text: false,
+            thinking_format: OpenAiThinkingFormat::OpenAi,
+            open_router_routing: ModelRouting::default(),
+            vercel_gateway_routing: ModelRouting::default(),
+            zai_tool_stream: false,
             supports_strict_mode: true,
         }
     }
@@ -143,6 +146,33 @@ pub struct OpenAiCompletionsRequestParams {
     pub tool_choice: Option<OpenAiCompletionsToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<OpenAiCompletionsReasoning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<OpenAiCompletionsChatTemplateKwargs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ModelRouting>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<OpenAiCompletionsProviderOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_stream: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiCompletionsReasoning {
+    pub effort: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiCompletionsChatTemplateKwargs {
+    pub enable_thinking: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiCompletionsProviderOptions {
+    pub gateway: ModelRouting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,8 +249,114 @@ pub struct OpenAiCompletionsFunctionDefinition {
     pub strict: Option<bool>,
 }
 
-pub fn detect_openai_completions_compat(_model: &Model) -> OpenAiCompletionsCompat {
-    OpenAiCompletionsCompat::default()
+pub fn detect_openai_completions_compat(model: &Model) -> OpenAiCompletionsCompat {
+    let provider = model.provider.as_str();
+    let base_url = model.base_url.as_str();
+
+    let is_zai = provider == "zai" || base_url.contains("api.z.ai");
+    let is_non_standard = provider == "cerebras"
+        || base_url.contains("cerebras.ai")
+        || provider == "xai"
+        || base_url.contains("api.x.ai")
+        || base_url.contains("chutes.ai")
+        || base_url.contains("deepseek.com")
+        || is_zai
+        || provider == "opencode"
+        || base_url.contains("opencode.ai");
+    let use_max_tokens = base_url.contains("chutes.ai");
+    let is_grok = provider == "xai" || base_url.contains("api.x.ai");
+    let is_groq = provider == "groq" || base_url.contains("groq.com");
+
+    let mut detected = OpenAiCompletionsCompat {
+        supports_store: !is_non_standard,
+        supports_developer_role: !is_non_standard,
+        supports_reasoning_effort: !is_grok && !is_zai,
+        reasoning_effort_map: if is_groq && model.id == "qwen/qwen3-32b" {
+            BTreeMap::from([
+                ("minimal".into(), "default".into()),
+                ("low".into(), "default".into()),
+                ("medium".into(), "default".into()),
+                ("high".into(), "default".into()),
+                ("xhigh".into(), "default".into()),
+            ])
+        } else {
+            BTreeMap::new()
+        },
+        supports_usage_in_streaming: true,
+        max_tokens_field: if use_max_tokens {
+            OpenAiCompletionsMaxTokensField::MaxTokens
+        } else {
+            OpenAiCompletionsMaxTokensField::MaxCompletionTokens
+        },
+        requires_tool_result_name: false,
+        requires_assistant_after_tool_result: false,
+        requires_thinking_as_text: false,
+        thinking_format: if is_zai {
+            OpenAiThinkingFormat::Zai
+        } else if provider == "openrouter" || base_url.contains("openrouter.ai") {
+            OpenAiThinkingFormat::OpenRouter
+        } else {
+            OpenAiThinkingFormat::OpenAi
+        },
+        open_router_routing: ModelRouting::default(),
+        vercel_gateway_routing: ModelRouting::default(),
+        zai_tool_stream: false,
+        supports_strict_mode: true,
+    };
+
+    if let Some(compat) = model.compat.as_ref() {
+        merge_openai_completions_compat(&mut detected, compat);
+    }
+
+    detected
+}
+
+fn merge_openai_completions_compat(
+    detected: &mut OpenAiCompletionsCompat,
+    override_compat: &OpenAiCompletionsCompatConfig,
+) {
+    if let Some(value) = override_compat.supports_store {
+        detected.supports_store = value;
+    }
+    if let Some(value) = override_compat.supports_developer_role {
+        detected.supports_developer_role = value;
+    }
+    if let Some(value) = override_compat.supports_reasoning_effort {
+        detected.supports_reasoning_effort = value;
+    }
+    if !override_compat.reasoning_effort_map.is_empty() {
+        detected.reasoning_effort_map = override_compat.reasoning_effort_map.clone();
+    }
+    if let Some(value) = override_compat.supports_usage_in_streaming {
+        detected.supports_usage_in_streaming = value;
+    }
+    if let Some(value) = override_compat.max_tokens_field {
+        detected.max_tokens_field = value;
+    }
+    if let Some(value) = override_compat.requires_tool_result_name {
+        detected.requires_tool_result_name = value;
+    }
+    if let Some(value) = override_compat.requires_assistant_after_tool_result {
+        detected.requires_assistant_after_tool_result = value;
+    }
+    if let Some(value) = override_compat.requires_thinking_as_text {
+        detected.requires_thinking_as_text = value;
+    }
+    if let Some(value) = override_compat.thinking_format {
+        detected.thinking_format = value;
+    }
+    if let Some(routing) = override_compat.open_router_routing.as_ref() {
+        detected.open_router_routing = routing.clone();
+    }
+    if let Some(routing) = override_compat.vercel_gateway_routing.as_ref() {
+        detected.vercel_gateway_routing = routing.clone();
+    }
+    if let Some(value) = override_compat.zai_tool_stream {
+        detected.zai_tool_stream = value;
+    }
+    if let Some(value) = override_compat.supports_strict_mode {
+        detected.supports_strict_mode = value;
+    }
 }
 
 pub fn build_openai_completions_request_params(
@@ -242,8 +378,9 @@ pub fn build_openai_completions_request_params(
         .reasoning_effort
         .as_ref()
         .map(|effort| map_reasoning_effort(*effort, compat));
+    let reasoning_enabled = options.reasoning_effort.is_some();
 
-    OpenAiCompletionsRequestParams {
+    let mut params = OpenAiCompletionsRequestParams {
         model: model.id.clone(),
         messages,
         stream: true,
@@ -264,12 +401,54 @@ pub fn build_openai_completions_request_params(
         temperature: options.temperature,
         tools,
         tool_choice: options.tool_choice.clone(),
-        reasoning_effort: if model.reasoning && compat.supports_reasoning_effort {
-            mapped_reasoning_effort.clone()
-        } else {
-            None
-        },
+        reasoning_effort: None,
+        reasoning: None,
+        enable_thinking: None,
+        chat_template_kwargs: None,
+        provider: None,
+        provider_options: None,
+        tool_stream: None,
+    };
+
+    if model.reasoning {
+        match compat.thinking_format {
+            OpenAiThinkingFormat::Zai | OpenAiThinkingFormat::Qwen => {
+                params.enable_thinking = Some(reasoning_enabled);
+            }
+            OpenAiThinkingFormat::QwenChatTemplate => {
+                params.chat_template_kwargs = Some(OpenAiCompletionsChatTemplateKwargs {
+                    enable_thinking: reasoning_enabled,
+                });
+            }
+            OpenAiThinkingFormat::OpenRouter => {
+                params.reasoning = Some(OpenAiCompletionsReasoning {
+                    effort: mapped_reasoning_effort.unwrap_or_else(|| "none".into()),
+                });
+            }
+            OpenAiThinkingFormat::OpenAi => {
+                if compat.supports_reasoning_effort {
+                    params.reasoning_effort = mapped_reasoning_effort;
+                }
+            }
+        }
     }
+
+    if !context.tools.is_empty() && compat.zai_tool_stream {
+        params.tool_stream = Some(true);
+    }
+
+    if model.base_url.contains("openrouter.ai") && !compat.open_router_routing.is_empty() {
+        params.provider = Some(compat.open_router_routing.clone());
+    }
+
+    if model.base_url.contains("ai-gateway.vercel.sh") && !compat.vercel_gateway_routing.is_empty()
+    {
+        params.provider_options = Some(OpenAiCompletionsProviderOptions {
+            gateway: compat.vercel_gateway_routing.clone(),
+        });
+    }
+
+    params
 }
 
 pub fn convert_openai_completions_messages(
@@ -546,7 +725,7 @@ fn has_tool_history(messages: &[Message]) -> bool {
 fn map_reasoning_effort(effort: ReasoningEffort, compat: &OpenAiCompletionsCompat) -> String {
     compat
         .reasoning_effort_map
-        .get(&effort)
+        .get(effort.as_str())
         .cloned()
         .unwrap_or_else(|| effort.as_str().to_string())
 }
@@ -944,6 +1123,7 @@ enum OpenAiCompletionsBlockKind {
 #[derive(Debug, Clone)]
 struct OpenAiCompletionsStreamState {
     output: AssistantMessage,
+    model_cost: ModelCost,
     current_block_index: Option<usize>,
     current_block_kind: Option<OpenAiCompletionsBlockKind>,
     current_tool_json: String,
@@ -957,6 +1137,7 @@ impl OpenAiCompletionsStreamState {
         output.timestamp = now_ms();
         Self {
             output,
+            model_cost: model.cost,
             current_block_index: None,
             current_block_kind: None,
             current_tool_json: String::new(),
@@ -996,11 +1177,7 @@ impl OpenAiCompletionsStreamState {
 
         if let Some(usage) = chunk.usage.as_ref() {
             self.output.usage = parse_chunk_usage(usage);
-            calculate_cost_for(
-                self.output.provider.as_str(),
-                self.output.model.as_str(),
-                &mut self.output.usage,
-            );
+            calculate_cost_with(self.model_cost, &mut self.output.usage);
         }
 
         let Some(choice) = chunk.choices.first() else {
@@ -1011,11 +1188,7 @@ impl OpenAiCompletionsStreamState {
             && let Some(usage) = choice.usage.as_ref()
         {
             self.output.usage = parse_chunk_usage(usage);
-            calculate_cost_for(
-                self.output.provider.as_str(),
-                self.output.model.as_str(),
-                &mut self.output.usage,
-            );
+            calculate_cost_with(self.model_cost, &mut self.output.usage);
         }
 
         if let Some(finish_reason) = choice.finish_reason.as_deref() {

@@ -49,8 +49,15 @@ fn openai_responses_model(base_url: String, max_tokens: u64) -> Model {
         base_url,
         reasoning: true,
         input: vec!["text".into()],
+        cost: pi_events::ModelCost {
+            input: 1.0,
+            output: 1.0,
+            cache_read: 0.1,
+            cache_write: 0.1,
+        },
         context_window: 128_000,
         max_tokens,
+        compat: None,
     }
 }
 
@@ -63,8 +70,15 @@ fn openai_completions_model(base_url: String, max_tokens: u64) -> Model {
         base_url,
         reasoning: true,
         input: vec!["text".into()],
+        cost: pi_events::ModelCost {
+            input: 1.0,
+            output: 1.0,
+            cache_read: 0.1,
+            cache_write: 0.1,
+        },
         context_window: 128_000,
         max_tokens,
+        compat: None,
     }
 }
 
@@ -77,8 +91,15 @@ fn anthropic_model_with_id(id: &str, base_url: String, max_tokens: u64) -> Model
         base_url,
         reasoning: true,
         input: vec!["text".into()],
+        cost: pi_events::ModelCost {
+            input: 1.0,
+            output: 1.0,
+            cache_read: 0.1,
+            cache_write: 0.1,
+        },
         context_window: 200_000,
         max_tokens,
+        compat: None,
     }
 }
 
@@ -95,8 +116,15 @@ fn openai_codex_model(base_url: String, max_tokens: u64) -> Model {
         base_url,
         reasoning: true,
         input: vec!["text".into()],
+        cost: pi_events::ModelCost {
+            input: 1.0,
+            output: 1.0,
+            cache_read: 0.1,
+            cache_write: 0.1,
+        },
         context_window: 272_000,
         max_tokens,
+        compat: None,
     }
 }
 

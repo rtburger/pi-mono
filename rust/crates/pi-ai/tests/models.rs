@@ -2,7 +2,7 @@ use pi_ai::{
     built_in_models, calculate_cost, get_env_api_key, get_model, get_models, get_providers,
     models_are_equal, supports_xhigh,
 };
-use pi_events::{Usage, UsageCost};
+use pi_events::{Model, ModelCost, Usage, UsageCost};
 use std::{
     ffi::OsString,
     sync::{Mutex, OnceLock},
@@ -143,6 +143,45 @@ fn calculate_cost_populates_openai_and_anthropic_usage_costs() {
         }
     );
     assert_eq!(anthropic_usage.cost, anthropic_cost);
+}
+
+#[test]
+fn calculate_cost_uses_model_embedded_costs_for_custom_models() {
+    let custom_model = Model {
+        id: "custom-openai-model".into(),
+        name: "Custom OpenAI Model".into(),
+        api: "openai-completions".into(),
+        provider: "custom-provider".into(),
+        base_url: "https://custom.example.com/v1".into(),
+        reasoning: false,
+        input: vec!["text".into()],
+        cost: ModelCost {
+            input: 0.25,
+            output: 0.75,
+            cache_read: 0.05,
+            cache_write: 0.0,
+        },
+        context_window: 128_000,
+        max_tokens: 16_384,
+        compat: None,
+    };
+    let mut usage = Usage {
+        input: 1_000_000,
+        output: 2_000_000,
+        cache_read: 3_000_000,
+        cache_write: 4_000_000,
+        total_tokens: 10_000_000,
+        cost: UsageCost::default(),
+    };
+
+    let cost = calculate_cost(&custom_model, &mut usage);
+
+    assert!((cost.input - 0.25).abs() < 1e-12);
+    assert!((cost.output - 1.5).abs() < 1e-12);
+    assert!((cost.cache_read - 0.15).abs() < 1e-12);
+    assert!((cost.cache_write - 0.0).abs() < 1e-12);
+    assert!((cost.total - 1.9).abs() < 1e-12);
+    assert_eq!(usage.cost, cost);
 }
 
 #[test]

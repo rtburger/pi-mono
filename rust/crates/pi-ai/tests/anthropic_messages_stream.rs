@@ -13,8 +13,15 @@ fn model(provider: &str) -> Model {
         base_url: "https://api.anthropic.com/v1".into(),
         reasoning: true,
         input: vec!["text".into(), "image".into()],
+        cost: pi_events::ModelCost {
+            input: 1.0,
+            output: 1.0,
+            cache_read: 0.1,
+            cache_write: 0.1,
+        },
         context_window: 200_000,
         max_tokens: 8_192,
+        compat: None,
     }
 }
 
