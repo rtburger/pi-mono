@@ -12,14 +12,14 @@ use pi_coding_agent_core::{
     FooterDataProvider, ModelRegistry, NewSessionOptions, ScopedModel, SessionBootstrapOptions,
     SessionEntry, SessionHeader, SessionInfo, SessionManager, create_coding_agent_core,
     find_exact_model_reference_match, get_default_session_dir, parse_thinking_level,
-    resolve_cli_model, resolve_model_scope, resolve_prompt_input,
+    resolve_cli_model, resolve_model_scope, resolve_prompt_input, restore_model_from_session,
 };
 use pi_coding_agent_tui::{
-    CustomMessageComponent, ExternalEditorCommandRunner, ExternalEditorHost, FooterStateHandle,
-    InteractiveCoreBinding, KeybindingsManager, PlainKeyHintStyler, StartupShellComponent,
-    StatusHandle,
+    CustomMessageComponent, DEFAULT_APP_KEYBINDINGS, ExternalEditorCommandRunner,
+    ExternalEditorHost, FooterStateHandle, InteractiveCoreBinding, KeybindingsManager,
+    PlainKeyHintStyler, StartupShellComponent, StatusHandle,
 };
-use pi_config::{ThinkingBudgetsSettings, load_runtime_settings};
+use pi_config::{LoadedRuntimeSettings, ThinkingBudgetsSettings, load_runtime_settings};
 use pi_events::{AssistantContent, Message, Model, UserContent};
 use pi_tui::{
     AutocompleteItem, CombinedAutocompleteProvider, Component, ProcessTerminal, RenderHandle,
@@ -29,7 +29,9 @@ use std::{
     borrow::Cow,
     cell::Cell,
     collections::BTreeMap,
+    env, fs,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -117,6 +119,14 @@ impl BootstrapDefaults {
             thinking_level,
         }
     }
+}
+
+#[derive(Clone)]
+struct InteractiveSlashCommandContext {
+    keybindings: KeybindingsManager,
+    runtime_settings: LoadedRuntimeSettings,
+    cwd: PathBuf,
+    agent_dir: Option<PathBuf>,
 }
 
 struct InteractiveIterationOptions {
@@ -1099,6 +1109,12 @@ async fn run_interactive_iteration(
     });
 
     let transition_request = Arc::new(Mutex::new(None::<InteractiveTransitionRequest>));
+    let slash_command_context = InteractiveSlashCommandContext {
+        keybindings: keybindings.clone(),
+        runtime_settings: runtime_settings.clone(),
+        cwd: cwd.clone(),
+        agent_dir: agent_dir.clone(),
+    };
     let footer_provider = FooterDataProvider::new(&cwd);
     let render_handle = tui.render_handle();
     if let Some(command) = runtime.extension_editor_command.clone() {
@@ -1124,6 +1140,7 @@ async fn run_interactive_iteration(
         created.core.model_registry(),
         interactive_scoped_models,
         interactive_session_manager,
+        slash_command_context,
         status_handle,
         footer_state_handle,
         Arc::clone(&exit_requested),
@@ -1829,6 +1846,7 @@ fn build_interactive_slash_commands(
     let scoped_models_for_arguments = scoped_models.clone();
 
     vec![
+        simple_slash_command("settings", "Open settings menu"),
         SlashCommand {
             name: String::from("model"),
             description: Some(String::from("Select model")),
@@ -1869,11 +1887,22 @@ fn build_interactive_slash_commands(
                 )
             })),
         },
-        simple_slash_command("new", "Start a new session"),
-        simple_slash_command("resume", "Resume a different session"),
-        simple_slash_command("fork", "Fork from a previous user message"),
-        simple_slash_command("session", "Show session info and stats"),
+        simple_slash_command("scoped-models", "Show scoped models for Ctrl+P cycling"),
+        simple_slash_command("export", "Export session as JSONL"),
+        simple_slash_command("share", "Share session as a secret GitHub gist"),
+        simple_slash_command("copy", "Copy last assistant message to clipboard"),
         simple_slash_command("name", "Set session display name"),
+        simple_slash_command("session", "Show session info and stats"),
+        simple_slash_command("changelog", "Show changelog entries"),
+        simple_slash_command("hotkeys", "Show keyboard shortcuts"),
+        simple_slash_command("fork", "Fork from a previous user message"),
+        simple_slash_command("tree", "Show or switch the session tree"),
+        simple_slash_command("login", "Login with OAuth provider"),
+        simple_slash_command("logout", "Logout from OAuth provider"),
+        simple_slash_command("new", "Start a new session"),
+        simple_slash_command("compact", "Compact the current session context"),
+        simple_slash_command("resume", "Resume a different session"),
+        simple_slash_command("reload", "Reload keybindings and resources"),
         SlashCommand {
             name: String::from("quit"),
             description: Some(String::from("Quit pi")),
@@ -2307,6 +2336,723 @@ fn render_session_info_text(
     info.trim_end().to_owned()
 }
 
+fn render_runtime_settings_text(context: &InteractiveSlashCommandContext) -> String {
+    let mut output = String::new();
+    push_line(&mut output, "Settings");
+    push_line(&mut output, "");
+    let global_settings_path = context
+        .agent_dir
+        .as_ref()
+        .map(|agent_dir| agent_dir.join("settings.json"));
+    if let Some(global_settings_path) = global_settings_path {
+        push_line(
+            &mut output,
+            &format!("Global settings: {}", global_settings_path.display()),
+        );
+    } else {
+        push_line(&mut output, "Global settings: unavailable");
+    }
+    push_line(
+        &mut output,
+        &format!(
+            "Project settings: {}",
+            context.cwd.join(".pi/settings.json").display()
+        ),
+    );
+    push_line(&mut output, "");
+    push_line(&mut output, "Images");
+    push_line(
+        &mut output,
+        &format!(
+            "Auto resize: {}",
+            if context.runtime_settings.settings.images.auto_resize_images {
+                "on"
+            } else {
+                "off"
+            }
+        ),
+    );
+    push_line(
+        &mut output,
+        &format!(
+            "Block images: {}",
+            if context.runtime_settings.settings.images.block_images {
+                "on"
+            } else {
+                "off"
+            }
+        ),
+    );
+    push_line(&mut output, "");
+    push_line(&mut output, "Editor");
+    push_line(
+        &mut output,
+        &format!(
+            "Padding X: {}",
+            context.runtime_settings.settings.editor_padding_x
+        ),
+    );
+    push_line(
+        &mut output,
+        &format!(
+            "Autocomplete max visible: {}",
+            context.runtime_settings.settings.autocomplete_max_visible
+        ),
+    );
+    push_line(&mut output, "");
+    push_line(&mut output, "Thinking budgets");
+    push_line(
+        &mut output,
+        &format!(
+            "minimal: {}",
+            option_u64_label(context.runtime_settings.settings.thinking_budgets.minimal)
+        ),
+    );
+    push_line(
+        &mut output,
+        &format!(
+            "low: {}",
+            option_u64_label(context.runtime_settings.settings.thinking_budgets.low)
+        ),
+    );
+    push_line(
+        &mut output,
+        &format!(
+            "medium: {}",
+            option_u64_label(context.runtime_settings.settings.thinking_budgets.medium)
+        ),
+    );
+    push_line(
+        &mut output,
+        &format!(
+            "high: {}",
+            option_u64_label(context.runtime_settings.settings.thinking_budgets.high)
+        ),
+    );
+
+    if !context.runtime_settings.warnings.is_empty() {
+        push_line(&mut output, "");
+        push_line(&mut output, "Warnings");
+        for warning in &context.runtime_settings.warnings {
+            push_line(
+                &mut output,
+                &format!("- ({} settings) {}", warning.scope.label(), warning.message),
+            );
+        }
+    }
+
+    output.trim_end().to_owned()
+}
+
+fn option_u64_label(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| String::from("default"))
+}
+
+fn render_scoped_models_text(core: &CodingAgentCore, scoped_models: &[ScopedModel]) -> String {
+    let mut output = String::new();
+    push_line(&mut output, "Scoped Models");
+    push_line(&mut output, "");
+    let current_model = core.state().model;
+    push_line(
+        &mut output,
+        &format!(
+            "Current model: {}/{}",
+            current_model.provider, current_model.id
+        ),
+    );
+    push_line(&mut output, "");
+
+    if scoped_models.is_empty() {
+        push_line(
+            &mut output,
+            "No scoped models configured. Model cycling uses all available models.",
+        );
+        return output.trim_end().to_owned();
+    }
+
+    for scoped_model in scoped_models {
+        let marker = if models_are_equal(Some(&scoped_model.model), Some(&current_model)) {
+            "*"
+        } else {
+            "-"
+        };
+        let mut line = format!(
+            "{marker} {}/{}",
+            scoped_model.model.provider, scoped_model.model.id
+        );
+        if let Some(thinking_level) = scoped_model.thinking_level {
+            line.push_str(&format!(
+                " (thinking: {})",
+                thinking_level_label(thinking_level)
+            ));
+        }
+        push_line(&mut output, &line);
+    }
+
+    output.trim_end().to_owned()
+}
+
+fn render_hotkeys_text(keybindings: &KeybindingsManager) -> String {
+    let mut output = String::new();
+    push_line(&mut output, "Keyboard Shortcuts");
+    push_line(&mut output, "");
+
+    let mut current_section = None::<&str>;
+    for (keybinding, definition) in DEFAULT_APP_KEYBINDINGS.iter() {
+        let section = if keybinding.starts_with("tui.editor.") {
+            "Editor"
+        } else if keybinding.starts_with("tui.input.") {
+            "Input"
+        } else if keybinding.starts_with("tui.select.") {
+            "Selection"
+        } else {
+            "Application"
+        };
+
+        if current_section != Some(section) {
+            if current_section.is_some() {
+                push_line(&mut output, "");
+            }
+            push_line(&mut output, section);
+            current_section = Some(section);
+        }
+
+        let keys = format_key_ids(&keybindings.get_keys(keybinding));
+        let description = definition
+            .description
+            .as_deref()
+            .unwrap_or(keybinding.as_str());
+        push_line(&mut output, &format!("{keys}: {description}"));
+    }
+
+    output.trim_end().to_owned()
+}
+
+fn format_key_ids(keys: &[pi_tui::KeyId]) -> String {
+    if keys.is_empty() {
+        return String::from("(unbound)");
+    }
+
+    keys.iter()
+        .map(|key| capitalize_key_id(key.as_str()))
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
+fn capitalize_key_id(key: &str) -> String {
+    key.split('/')
+        .map(|binding| {
+            binding
+                .split('+')
+                .map(|part| {
+                    let lower = part.to_ascii_lowercase();
+                    match lower.as_str() {
+                        "ctrl" => String::from("Ctrl"),
+                        "alt" => String::from("Alt"),
+                        "shift" => String::from("Shift"),
+                        "enter" => String::from("Enter"),
+                        "escape" => String::from("Escape"),
+                        "backspace" => String::from("Backspace"),
+                        "delete" => String::from("Delete"),
+                        "pageup" => String::from("PageUp"),
+                        "pagedown" => String::from("PageDown"),
+                        "left" => String::from("Left"),
+                        "right" => String::from("Right"),
+                        "up" => String::from("Up"),
+                        "down" => String::from("Down"),
+                        "tab" => String::from("Tab"),
+                        "home" => String::from("Home"),
+                        "end" => String::from("End"),
+                        _ if part.len() <= 1 => part.to_ascii_uppercase(),
+                        _ => {
+                            let mut characters = part.chars();
+                            let Some(first) = characters.next() else {
+                                return String::new();
+                            };
+                            let mut value = first.to_ascii_uppercase().to_string();
+                            value.push_str(characters.as_str());
+                            value
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("+")
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn render_changelog_text() -> Result<String, String> {
+    let changelog_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../packages/coding-agent/CHANGELOG.md");
+    let content = fs::read_to_string(&changelog_path)
+        .map_err(|error| format!("{}: {error}", changelog_path.display()))?;
+
+    let mut sections = Vec::<String>::new();
+    let mut current = Vec::<String>::new();
+    for line in content.lines() {
+        if line.starts_with("## ") {
+            if !current.is_empty() {
+                sections.push(current.join("\n").trim().to_owned());
+                current.clear();
+            }
+        }
+        if !current.is_empty() || line.starts_with("## ") {
+            current.push(line.to_owned());
+        }
+    }
+    if !current.is_empty() {
+        sections.push(current.join("\n").trim().to_owned());
+    }
+
+    let mut selected = Vec::<String>::new();
+    if let Some(unreleased) = sections
+        .iter()
+        .find(|section| section.starts_with("## [Unreleased]"))
+    {
+        selected.push(unreleased.clone());
+    }
+    if let Some(latest_release) = sections
+        .iter()
+        .find(|section| section.starts_with("## [") && !section.starts_with("## [Unreleased]"))
+    {
+        selected.push(latest_release.clone());
+    }
+
+    if selected.is_empty() {
+        return Ok(String::from("No changelog entries found."));
+    }
+
+    Ok(selected.join("\n\n").trim().to_owned())
+}
+
+fn render_session_tree_text(session_manager: &SessionManager) -> String {
+    let mut output = String::new();
+    push_line(&mut output, "Session Tree");
+    push_line(&mut output, "");
+    push_line(
+        &mut output,
+        &format!(
+            "Current leaf: {}",
+            session_manager.get_leaf_id().unwrap_or("root")
+        ),
+    );
+    push_line(&mut output, "");
+
+    let tree = session_manager.get_tree();
+    if tree.is_empty() {
+        push_line(&mut output, "(empty)");
+    } else {
+        for (index, node) in tree.iter().enumerate() {
+            render_session_tree_node(
+                &mut output,
+                node,
+                "",
+                index + 1 == tree.len(),
+                session_manager.get_leaf_id(),
+            );
+        }
+    }
+
+    push_line(&mut output, "");
+    push_line(&mut output, "Use /tree <entry-id> to switch branches.");
+    push_line(&mut output, "Use /tree root to switch to the root.");
+    output.trim_end().to_owned()
+}
+
+fn render_session_tree_node(
+    output: &mut String,
+    node: &pi_coding_agent_core::SessionTreeNode,
+    prefix: &str,
+    is_last: bool,
+    current_leaf: Option<&str>,
+) {
+    if matches!(node.entry, SessionEntry::Label { .. }) {
+        for (index, child) in node.children.iter().enumerate() {
+            render_session_tree_node(
+                output,
+                child,
+                prefix,
+                index + 1 == node.children.len(),
+                current_leaf,
+            );
+        }
+        return;
+    }
+
+    let marker = if Some(node.entry.id()) == current_leaf {
+        '*'
+    } else {
+        ' '
+    };
+    let branch = if prefix.is_empty() {
+        String::new()
+    } else if is_last {
+        String::from("└─ ")
+    } else {
+        String::from("├─ ")
+    };
+    let label_suffix = node
+        .label
+        .as_deref()
+        .map(|label| format!(" [{label}]"))
+        .unwrap_or_default();
+    if let Some(description) = describe_session_tree_entry(&node.entry) {
+        push_line(
+            output,
+            &format!("{prefix}{branch}{marker} {description}{label_suffix}"),
+        );
+    }
+
+    let next_prefix = if prefix.is_empty() {
+        if is_last {
+            String::from("   ")
+        } else {
+            String::from("│  ")
+        }
+    } else if is_last {
+        format!("{prefix}   ")
+    } else {
+        format!("{prefix}│  ")
+    };
+
+    for (index, child) in node.children.iter().enumerate() {
+        render_session_tree_node(
+            output,
+            child,
+            &next_prefix,
+            index + 1 == node.children.len(),
+            current_leaf,
+        );
+    }
+}
+
+fn describe_session_tree_entry(entry: &SessionEntry) -> Option<String> {
+    let description = match entry {
+        SessionEntry::Message { id, message, .. } => match message.as_standard_message() {
+            Some(Message::User { content, .. }) => {
+                format!(
+                    "{id} user: {}",
+                    truncate_text_for_tree(&extract_user_text(content), 72)
+                )
+            }
+            Some(Message::Assistant { content, .. }) => format!(
+                "{id} assistant: {}",
+                truncate_text_for_tree(&extract_assistant_text(content), 72)
+            ),
+            Some(Message::ToolResult { tool_name, .. }) => {
+                format!("{id} tool result: {tool_name}")
+            }
+            None => format!("{id} custom message"),
+        },
+        SessionEntry::ThinkingLevelChange {
+            id, thinking_level, ..
+        } => format!("{id} thinking: {thinking_level}"),
+        SessionEntry::ModelChange {
+            id,
+            provider,
+            model_id,
+            ..
+        } => format!("{id} model: {provider}/{model_id}"),
+        SessionEntry::Compaction { id, summary, .. } => {
+            format!("{id} compaction: {}", truncate_text_for_tree(summary, 72))
+        }
+        SessionEntry::BranchSummary { id, summary, .. } => format!(
+            "{id} branch summary: {}",
+            truncate_text_for_tree(summary, 72)
+        ),
+        SessionEntry::Custom {
+            id, custom_type, ..
+        } => format!("{id} custom: {custom_type}"),
+        SessionEntry::CustomMessage {
+            id,
+            custom_type,
+            content,
+            ..
+        } => format!(
+            "{id} {custom_type}: {}",
+            truncate_text_for_tree(&extract_custom_message_text(content), 72)
+        ),
+        SessionEntry::SessionInfo { id, name, .. } => format!(
+            "{id} session: {}",
+            name.clone().unwrap_or_else(|| String::from("(unnamed)"))
+        ),
+        SessionEntry::Label { .. } => return None,
+    };
+    Some(description)
+}
+
+fn truncate_text_for_tree(text: &str, max: usize) -> String {
+    let sanitized = sanitize_display_text(text);
+    if sanitized.chars().count() <= max {
+        return sanitized;
+    }
+    let truncated = sanitized
+        .chars()
+        .take(max.saturating_sub(3))
+        .collect::<String>();
+    format!("{truncated}...")
+}
+
+fn extract_assistant_text(content: &[AssistantContent]) -> String {
+    content
+        .iter()
+        .filter_map(|content| match content {
+            AssistantContent::Text { text, .. } => Some(text.as_str()),
+            AssistantContent::Thinking { .. } | AssistantContent::ToolCall { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+        .trim()
+        .to_owned()
+}
+
+fn extract_custom_message_text(content: &CustomMessageContent) -> String {
+    match content {
+        CustomMessageContent::Text(text) => text.trim().to_owned(),
+        CustomMessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                UserContent::Text { text } => Some(text.as_str()),
+                UserContent::Image { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+            .trim()
+            .to_owned(),
+    }
+}
+
+fn switch_interactive_tree_branch(
+    core: &CodingAgentCore,
+    model_registry: &ModelRegistry,
+    session_manager: &Arc<Mutex<SessionManager>>,
+    branch_ref: &str,
+) -> Result<String, String> {
+    let (session_context, leaf_id) = {
+        let mut session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        if branch_ref.eq_ignore_ascii_case("root") {
+            session_manager.reset_leaf();
+        } else {
+            session_manager
+                .branch(branch_ref)
+                .map_err(|error| error.to_string())?;
+        }
+        (
+            session_manager.build_session_context(),
+            session_manager.get_leaf_id().map(str::to_owned),
+        )
+    };
+
+    let current_state = core.state();
+    let restore_result = session_context.model.as_ref().map(|saved_model| {
+        restore_model_from_session(
+            &model_registry.catalog(),
+            &saved_model.provider,
+            &saved_model.model_id,
+            Some(&current_state.model),
+        )
+    });
+    let next_model = restore_result
+        .as_ref()
+        .and_then(|result| result.model.clone())
+        .unwrap_or_else(|| current_state.model.clone());
+    let next_thinking_level = clamp_interactive_thinking_level(
+        parse_thinking_level(&session_context.thinking_level).unwrap_or(ThinkingLevel::Off),
+        &next_model,
+    );
+    let next_messages = session_context.messages;
+
+    core.agent().update_state(move |state| {
+        state.messages = next_messages.clone();
+        state.model = next_model.clone();
+        state.thinking_level = next_thinking_level;
+    });
+
+    let mut message = format!("Switched to {}", leaf_id.as_deref().unwrap_or("root"));
+    if let Some(fallback_message) = restore_result.and_then(|result| result.fallback_message) {
+        message.push_str(". ");
+        message.push_str(&fallback_message);
+    }
+    Ok(message)
+}
+
+fn resolve_export_path(
+    cwd: &Path,
+    session_manager: &SessionManager,
+    output_path: Option<&str>,
+) -> Result<PathBuf, String> {
+    let Some(output_path) = output_path.filter(|path| !path.trim().is_empty()) else {
+        return Ok(cwd.join(format!(
+            "session-{}.jsonl",
+            session_manager.get_session_id()
+        )));
+    };
+
+    if output_path.ends_with(".html") {
+        return Err(String::from(
+            "HTML export is not supported in the Rust interactive CLI yet. Use /export <path.jsonl>.",
+        ));
+    }
+
+    let output_path = Path::new(output_path);
+    if output_path.is_absolute() {
+        Ok(output_path.to_path_buf())
+    } else {
+        Ok(cwd.join(output_path))
+    }
+}
+
+fn export_interactive_session(
+    session_manager: &Arc<Mutex<SessionManager>>,
+    cwd: &Path,
+    output_path: Option<&str>,
+) -> Result<String, String> {
+    let session_manager = session_manager
+        .lock()
+        .expect("session manager mutex poisoned");
+    let output_path = resolve_export_path(cwd, &session_manager, output_path)?;
+    session_manager
+        .export_branch_jsonl(&output_path)
+        .map_err(|error| error.to_string())
+}
+
+fn share_interactive_session(
+    session_manager: &Arc<Mutex<SessionManager>>,
+    cwd: &Path,
+) -> Result<String, String> {
+    let temp_file = {
+        let session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        env::temp_dir().join(format!(
+            "pi-session-{}.jsonl",
+            session_manager.get_session_id()
+        ))
+    };
+
+    export_interactive_session(session_manager, cwd, temp_file.to_str())?;
+    let temp_file_string = temp_file.to_string_lossy().into_owned();
+    let output = Command::new("gh")
+        .args([
+            "gist",
+            "create",
+            "--public=false",
+            temp_file_string.as_str(),
+        ])
+        .output()
+        .map_err(|error| format!("Failed to run gh: {error}"))?;
+    let _ = fs::remove_file(&temp_file);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let message = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            String::from("gh gist create failed")
+        };
+        return Err(message);
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| String::from("Failed to parse gist URL from gh output"))
+}
+
+fn last_assistant_message_text(core: &CodingAgentCore) -> Option<String> {
+    core.state()
+        .messages
+        .iter()
+        .rev()
+        .filter_map(|agent_message| {
+            let Message::Assistant {
+                content,
+                stop_reason,
+                ..
+            } = agent_message.as_standard_message()?
+            else {
+                return None;
+            };
+            if *stop_reason == pi_events::StopReason::Aborted && content.is_empty() {
+                return None;
+            }
+            let text = extract_assistant_text(content);
+            (!text.is_empty()).then_some(text)
+        })
+        .next()
+}
+
+fn copy_text_to_system_clipboard(text: &str) -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        return run_clipboard_command("pbcopy", &[], text);
+    }
+
+    if env::var_os("WAYLAND_DISPLAY").is_some()
+        && run_clipboard_command("wl-copy", &["--type", "text/plain"], text).is_ok()
+    {
+        return Ok(());
+    }
+
+    if run_clipboard_command("xclip", &["-selection", "clipboard", "-in"], text).is_ok() {
+        return Ok(());
+    }
+    if run_clipboard_command("xsel", &["--clipboard", "--input"], text).is_ok() {
+        return Ok(());
+    }
+    if cfg!(windows) {
+        if run_clipboard_command("clip", &[], text).is_ok() {
+            return Ok(());
+        }
+        return run_clipboard_command("clip.exe", &[], text);
+    }
+
+    Err(String::from(
+        "No clipboard command found (tried wl-copy, xclip, xsel, pbcopy, clip).",
+    ))
+}
+
+fn run_clipboard_command(command: &str, args: &[&str], text: &str) -> Result<(), String> {
+    use std::io::Write as _;
+
+    let mut child = Command::new(command)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("{command}: {error}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|error| format!("{command}: {error}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("{command}: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if stderr.is_empty() {
+        Err(format!("{command} exited with status {}", output.status))
+    } else {
+        Err(format!("{command}: {stderr}"))
+    }
+}
+
 fn collect_fork_candidates(session_manager: &SessionManager) -> Vec<ForkMessageCandidate> {
     session_manager
         .get_entries()
@@ -2374,6 +3120,7 @@ fn install_interactive_submit_handler(
     model_registry: Arc<ModelRegistry>,
     scoped_models: Vec<ScopedModel>,
     session_manager: Option<Arc<Mutex<SessionManager>>>,
+    slash_command_context: InteractiveSlashCommandContext,
     status_handle: StatusHandle,
     footer_state_handle: FooterStateHandle,
     exit_requested: Arc<AtomicBool>,
@@ -2500,6 +3247,7 @@ fn install_interactive_submit_handler(
             model_registry.as_ref(),
             &scoped_models,
             session_manager.as_ref(),
+            &slash_command_context,
             &status_handle,
             &footer_state_handle,
             &exit_requested,
@@ -2579,6 +3327,7 @@ fn handle_interactive_slash_command(
     model_registry: &ModelRegistry,
     scoped_models: &[ScopedModel],
     session_manager: Option<&Arc<Mutex<SessionManager>>>,
+    slash_command_context: &InteractiveSlashCommandContext,
     status_handle: &StatusHandle,
     footer_state_handle: &FooterStateHandle,
     exit_requested: &Arc<AtomicBool>,
@@ -2586,6 +3335,15 @@ fn handle_interactive_slash_command(
 ) -> bool {
     if text == "/quit" {
         exit_requested.store(true, Ordering::Relaxed);
+        return true;
+    }
+
+    if text == "/settings" {
+        append_transcript_custom_message(
+            shell,
+            "settings",
+            render_runtime_settings_text(slash_command_context),
+        );
         return true;
     }
 
@@ -2622,12 +3380,96 @@ fn handle_interactive_slash_command(
         );
     }
 
+    if text == "/tree" || text.starts_with("/tree ") {
+        let Some(session_manager) = session_manager else {
+            status_handle.set_message("Session tree is not available in this interactive mode.");
+            return true;
+        };
+
+        let target = text.strip_prefix("/tree").unwrap_or_default().trim();
+        if target.is_empty() {
+            let rendered = render_session_tree_text(
+                &session_manager
+                    .lock()
+                    .expect("session manager mutex poisoned"),
+            );
+            append_transcript_custom_message(shell, "tree", rendered);
+            return true;
+        }
+
+        if core.state().is_streaming {
+            status_handle.set_message(
+                "Session switching while a request is running is not supported in the Rust interactive CLI yet.",
+            );
+            return true;
+        }
+
+        match switch_interactive_tree_branch(core, model_registry, session_manager, target) {
+            Ok(message) => {
+                update_interactive_footer_state(footer_state_handle, core, Some(session_manager));
+                status_handle.set_message(message);
+            }
+            Err(error) => status_handle.set_message(format!("Error: {error}")),
+        }
+        return true;
+    }
+
+    if text == "/scoped-models" || text.starts_with("/scoped-models ") {
+        append_transcript_custom_message(
+            shell,
+            "scoped-models",
+            render_scoped_models_text(core, scoped_models),
+        );
+        return true;
+    }
+
     if text == "/session" {
         append_transcript_custom_message(
             shell,
             "session",
             render_session_info_text(core, session_manager),
         );
+        return true;
+    }
+
+    if text == "/copy" {
+        let Some(text) = last_assistant_message_text(core) else {
+            status_handle.set_message("No assistant messages to copy yet.");
+            return true;
+        };
+        match copy_text_to_system_clipboard(&text) {
+            Ok(()) => status_handle.set_message("Copied last assistant message to clipboard"),
+            Err(error) => status_handle.set_message(format!("Error: {error}")),
+        }
+        return true;
+    }
+
+    if text == "/export" || text.starts_with("/export ") {
+        let Some(session_manager) = session_manager else {
+            status_handle.set_message("Session export is not available in this interactive mode.");
+            return true;
+        };
+        let output_path = text.strip_prefix("/export").unwrap_or_default().trim();
+        match export_interactive_session(
+            session_manager,
+            &slash_command_context.cwd,
+            (!output_path.is_empty()).then_some(output_path),
+        ) {
+            Ok(path) => status_handle.set_message(format!("Session exported to: {path}")),
+            Err(error) => status_handle.set_message(format!("Error: {error}")),
+        }
+        return true;
+    }
+
+    if text == "/share" {
+        let Some(session_manager) = session_manager else {
+            status_handle.set_message("Session sharing is not available in this interactive mode.");
+            return true;
+        };
+        match share_interactive_session(session_manager, &slash_command_context.cwd) {
+            Ok(url) => status_handle.set_message(format!("Shared session: {url}")),
+            Err(error) => status_handle.set_message(format!("Error: {error}")),
+        }
         return true;
     }
 
@@ -2669,6 +3511,48 @@ fn handle_interactive_slash_command(
             }
             Err(error) => status_handle.set_message(format!("Error: {error}")),
         }
+        return true;
+    }
+
+    if text == "/changelog" {
+        match render_changelog_text() {
+            Ok(changelog) => append_transcript_custom_message(shell, "changelog", changelog),
+            Err(error) => status_handle.set_message(format!("Error: {error}")),
+        }
+        return true;
+    }
+
+    if text == "/hotkeys" {
+        append_transcript_custom_message(
+            shell,
+            "hotkeys",
+            render_hotkeys_text(&slash_command_context.keybindings),
+        );
+        return true;
+    }
+
+    if text == "/login" {
+        status_handle
+            .set_message("OAuth login is not implemented in the Rust interactive CLI yet.");
+        return true;
+    }
+
+    if text == "/logout" {
+        status_handle
+            .set_message("OAuth logout is not implemented in the Rust interactive CLI yet.");
+        return true;
+    }
+
+    if text == "/compact" || text.starts_with("/compact ") {
+        status_handle
+            .set_message("Session compaction is not implemented in the Rust interactive CLI yet.");
+        return true;
+    }
+
+    if text == "/reload" {
+        status_handle.set_message(
+            "Reloading keybindings, extensions, skills, prompts, and themes is not implemented in the Rust interactive CLI yet.",
+        );
         return true;
     }
 
@@ -3113,6 +3997,18 @@ mod tests {
         result
     }
 
+    fn test_slash_command_context(
+        keybindings: &KeybindingsManager,
+        cwd: impl Into<PathBuf>,
+    ) -> InteractiveSlashCommandContext {
+        InteractiveSlashCommandContext {
+            keybindings: keybindings.clone(),
+            runtime_settings: LoadedRuntimeSettings::default(),
+            cwd: cwd.into(),
+            agent_dir: None,
+        }
+    }
+
     #[test]
     fn resolve_system_prompt_reads_file_inputs_and_uses_blank_line_separator() {
         let temp_dir = unique_temp_dir("resolve-system-prompt");
@@ -3434,6 +4330,7 @@ mod tests {
         let model = faux
             .get_model(Some("slash-session-commands-faux-1"))
             .expect("expected faux model");
+        let cwd = unique_temp_dir("slash-session-commands-cwd");
         let created = create_coding_agent_core(CodingAgentCoreOptions {
             auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
                 model.provider.as_str(),
@@ -3441,7 +4338,7 @@ mod tests {
             )])),
             built_in_models: vec![model],
             models_json_path: None,
-            cwd: Some(unique_temp_dir("slash-session-commands-cwd")),
+            cwd: Some(cwd.clone()),
             tools: None,
             system_prompt: String::new(),
             bootstrap: SessionBootstrapOptions::default(),
@@ -3464,6 +4361,7 @@ mod tests {
         let footer_state_handle = shell.footer_state_handle();
         let exit_requested = Arc::new(AtomicBool::new(false));
         let transition_request = Arc::new(Mutex::new(None));
+        let slash_command_context = test_slash_command_context(&keybindings, cwd);
 
         assert!(handle_interactive_slash_command(
             &mut shell,
@@ -3472,6 +4370,7 @@ mod tests {
             core.model_registry().as_ref(),
             &[],
             Some(&session_manager),
+            &slash_command_context,
             &status_handle,
             &footer_state_handle,
             &exit_requested,
@@ -3493,6 +4392,7 @@ mod tests {
             core.model_registry().as_ref(),
             &[],
             Some(&session_manager),
+            &slash_command_context,
             &status_handle,
             &footer_state_handle,
             &exit_requested,
@@ -3506,6 +4406,353 @@ mod tests {
         );
         assert!(rendered.contains("Session Info"), "output: {rendered}");
         assert!(rendered.contains("Name: demo"), "output: {rendered}");
+
+        faux.unregister();
+    }
+
+    #[test]
+    fn interactive_slash_command_catalog_includes_remaining_builtin_commands() {
+        let registry = Arc::new(ModelRegistry::new(
+            Arc::new(MemoryAuthStorage::default()),
+            Vec::new(),
+            None,
+        ));
+        let commands = build_interactive_slash_commands(registry, Vec::new())
+            .into_iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>();
+
+        for command in [
+            "settings",
+            "model",
+            "scoped-models",
+            "export",
+            "share",
+            "copy",
+            "name",
+            "session",
+            "changelog",
+            "hotkeys",
+            "fork",
+            "tree",
+            "login",
+            "logout",
+            "new",
+            "compact",
+            "resume",
+            "reload",
+            "quit",
+        ] {
+            assert!(
+                commands.iter().any(|current| current == command),
+                "missing command {command}: {commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn slash_commands_render_settings_hotkeys_tree_and_changelog() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "slash-render-commands-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "slash-render-commands-faux-1".into(),
+                name: Some("Slash Render Commands Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("slash-render-commands-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("slash-render-commands-cwd");
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(cwd.clone()),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
+        let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
+        manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("hello"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        let session_manager = Arc::new(Mutex::new(manager));
+        let status_handle = shell.status_handle();
+        let footer_state_handle = shell.footer_state_handle();
+        let exit_requested = Arc::new(AtomicBool::new(false));
+        let transition_request = Arc::new(Mutex::new(None));
+        let slash_command_context = test_slash_command_context(&keybindings, cwd);
+
+        for command in [
+            "/settings",
+            "/scoped-models",
+            "/hotkeys",
+            "/tree",
+            "/changelog",
+        ] {
+            assert!(handle_interactive_slash_command(
+                &mut shell,
+                command,
+                &core,
+                core.model_registry().as_ref(),
+                &[],
+                Some(&session_manager),
+                &slash_command_context,
+                &status_handle,
+                &footer_state_handle,
+                &exit_requested,
+                &transition_request,
+            ));
+        }
+
+        let rendered = shell.render(120).join("\n");
+        assert!(rendered.contains("Settings"), "output: {rendered}");
+        assert!(rendered.contains("Scoped Models"), "output: {rendered}");
+        assert!(
+            rendered.contains("Keyboard Shortcuts"),
+            "output: {rendered}"
+        );
+        assert!(rendered.contains("Session Tree"), "output: {rendered}");
+        assert!(rendered.contains("## ["), "output: {rendered}");
+
+        faux.unregister();
+    }
+
+    #[test]
+    fn slash_export_command_writes_jsonl_session_snapshot() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "slash-export-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "slash-export-faux-1".into(),
+                name: Some("Slash Export Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("slash-export-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("slash-export-cwd");
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(cwd.clone()),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
+        let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
+        manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("export me"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        let session_manager = Arc::new(Mutex::new(manager));
+        let status_handle = shell.status_handle();
+        let footer_state_handle = shell.footer_state_handle();
+        let exit_requested = Arc::new(AtomicBool::new(false));
+        let transition_request = Arc::new(Mutex::new(None));
+        let slash_command_context = test_slash_command_context(&keybindings, cwd.clone());
+        let export_path = cwd.join("session-export.jsonl");
+        let command = format!("/export {}", export_path.display());
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            &command,
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            Some(&session_manager),
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+
+        let exported = fs::read_to_string(&export_path).expect("expected exported jsonl");
+        assert!(
+            exported.contains("\"type\":\"session\""),
+            "content: {exported}"
+        );
+        assert!(
+            exported.contains("\"role\":\"user\""),
+            "content: {exported}"
+        );
+        assert!(exported.contains("export me"), "content: {exported}");
+
+        faux.unregister();
+    }
+
+    #[test]
+    fn tree_slash_command_switches_session_context() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "slash-tree-switch-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "slash-tree-switch-faux-1".into(),
+                name: Some("Slash Tree Switch Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("slash-tree-switch-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("slash-tree-switch-cwd");
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(cwd.clone()),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
+        let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
+        let root_user_id = manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("root"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        manager
+            .append_message(Message::Assistant {
+                content: vec![AssistantContent::Text {
+                    text: String::from("assistant root"),
+                    text_signature: None,
+                }],
+                api: String::from("faux:test"),
+                provider: String::from("slash-tree-switch-faux"),
+                model: String::from("slash-tree-switch-faux-1"),
+                response_id: None,
+                usage: Default::default(),
+                stop_reason: pi_events::StopReason::Stop,
+                error_message: None,
+                timestamp: 2,
+            })
+            .unwrap();
+        let primary_user_id = manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("primary branch"),
+                }],
+                timestamp: 3,
+            })
+            .unwrap();
+        manager.branch(&root_user_id).unwrap();
+        manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("alternate branch"),
+                }],
+                timestamp: 4,
+            })
+            .unwrap();
+        let initial_context = manager.build_session_context();
+        core.agent().update_state(move |state| {
+            state.messages = initial_context.messages.clone();
+        });
+        let session_manager = Arc::new(Mutex::new(manager));
+        let status_handle = shell.status_handle();
+        let footer_state_handle = shell.footer_state_handle();
+        let exit_requested = Arc::new(AtomicBool::new(false));
+        let transition_request = Arc::new(Mutex::new(None));
+        let slash_command_context = test_slash_command_context(&keybindings, cwd);
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            &format!("/tree {primary_user_id}"),
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            Some(&session_manager),
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+
+        let state = core.state();
+        let user_messages = state
+            .messages
+            .iter()
+            .filter_map(|message| match message.as_standard_message() {
+                Some(Message::User { content, .. }) => Some(extract_user_text(content)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            user_messages
+                .iter()
+                .any(|message| message == "primary branch")
+        );
+        assert!(
+            !user_messages
+                .iter()
+                .any(|message| message == "alternate branch")
+        );
 
         faux.unregister();
     }

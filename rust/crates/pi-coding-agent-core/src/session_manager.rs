@@ -1103,6 +1103,182 @@ impl SessionManager {
 
         Ok(session_file)
     }
+
+    pub fn render_branch_jsonl(&self) -> String {
+        let header = SessionHeader {
+            version: Some(CURRENT_SESSION_VERSION),
+            id: self.header.id.clone(),
+            timestamp: current_timestamp_iso(),
+            cwd: self.cwd.clone(),
+            parent_session: self.header.parent_session.clone(),
+        };
+
+        let mut content = String::new();
+        content.push_str(&value_to_json_line(&typed_file_entry_to_raw(
+            &FileEntry::Session(header),
+        )));
+        content.push('\n');
+
+        let mut previous_id = None::<String>;
+        for entry in self.get_branch(self.leaf_id.as_deref()) {
+            let linear_entry = clone_session_entry_with_parent_id(&entry, previous_id.clone());
+            previous_id = Some(linear_entry.id().to_owned());
+            content.push_str(&value_to_json_line(&typed_file_entry_to_raw(
+                &FileEntry::Entry(linear_entry),
+            )));
+            content.push('\n');
+        }
+
+        content
+    }
+
+    pub fn export_branch_jsonl(
+        &self,
+        output_path: impl AsRef<Path>,
+    ) -> Result<String, SessionManagerError> {
+        let output_path = output_path.as_ref();
+        if let Some(parent) = output_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
+
+        fs::write(output_path, self.render_branch_jsonl())?;
+        Ok(output_path.to_string_lossy().into_owned())
+    }
+}
+
+fn clone_session_entry_with_parent_id(
+    entry: &SessionEntry,
+    parent_id: Option<String>,
+) -> SessionEntry {
+    match entry {
+        SessionEntry::Message {
+            id,
+            timestamp,
+            message,
+            ..
+        } => SessionEntry::Message {
+            id: id.clone(),
+            parent_id,
+            timestamp: timestamp.clone(),
+            message: message.clone(),
+        },
+        SessionEntry::ThinkingLevelChange {
+            id,
+            timestamp,
+            thinking_level,
+            ..
+        } => SessionEntry::ThinkingLevelChange {
+            id: id.clone(),
+            parent_id,
+            timestamp: timestamp.clone(),
+            thinking_level: thinking_level.clone(),
+        },
+        SessionEntry::ModelChange {
+            id,
+            timestamp,
+            provider,
+            model_id,
+            ..
+        } => SessionEntry::ModelChange {
+            id: id.clone(),
+            parent_id,
+            timestamp: timestamp.clone(),
+            provider: provider.clone(),
+            model_id: model_id.clone(),
+        },
+        SessionEntry::Compaction {
+            id,
+            timestamp,
+            summary,
+            first_kept_entry_id,
+            tokens_before,
+            details,
+            from_hook,
+            ..
+        } => SessionEntry::Compaction {
+            id: id.clone(),
+            parent_id,
+            timestamp: timestamp.clone(),
+            summary: summary.clone(),
+            first_kept_entry_id: first_kept_entry_id.clone(),
+            tokens_before: *tokens_before,
+            details: details.clone(),
+            from_hook: *from_hook,
+        },
+        SessionEntry::BranchSummary {
+            id,
+            timestamp,
+            from_id,
+            summary,
+            details,
+            from_hook,
+            ..
+        } => SessionEntry::BranchSummary {
+            id: id.clone(),
+            parent_id,
+            timestamp: timestamp.clone(),
+            from_id: from_id.clone(),
+            summary: summary.clone(),
+            details: details.clone(),
+            from_hook: *from_hook,
+        },
+        SessionEntry::Custom {
+            id,
+            timestamp,
+            custom_type,
+            data,
+            ..
+        } => SessionEntry::Custom {
+            id: id.clone(),
+            parent_id,
+            timestamp: timestamp.clone(),
+            custom_type: custom_type.clone(),
+            data: data.clone(),
+        },
+        SessionEntry::CustomMessage {
+            id,
+            timestamp,
+            custom_type,
+            content,
+            details,
+            display,
+            ..
+        } => SessionEntry::CustomMessage {
+            id: id.clone(),
+            parent_id,
+            timestamp: timestamp.clone(),
+            custom_type: custom_type.clone(),
+            content: content.clone(),
+            details: details.clone(),
+            display: *display,
+        },
+        SessionEntry::Label {
+            id,
+            timestamp,
+            target_id,
+            label,
+            ..
+        } => SessionEntry::Label {
+            id: id.clone(),
+            parent_id,
+            timestamp: timestamp.clone(),
+            target_id: target_id.clone(),
+            label: label.clone(),
+        },
+        SessionEntry::SessionInfo {
+            id,
+            timestamp,
+            name,
+            ..
+        } => SessionEntry::SessionInfo {
+            id: id.clone(),
+            parent_id,
+            timestamp: timestamp.clone(),
+            name: name.clone(),
+        },
+    }
 }
 
 fn build_session_context_internal(
