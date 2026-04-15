@@ -389,10 +389,7 @@ async fn continue_uses_existing_tool_result_state_and_updates_transcript() {
     let assistant_tool_call = assistant_tool_call_message(
         "calc-1",
         "calculate",
-        serde_json::Map::from_iter([(
-            String::from("expression"),
-            Value::String("5 + 3".into()),
-        )]),
+        serde_json::Map::from_iter([(String::from("expression"), Value::String("5 + 3".into()))]),
         11,
     );
     initial_state.messages.push(
@@ -804,7 +801,9 @@ async fn continue_prefers_queued_steering_messages_over_follow_up_messages_from_
     });
 
     let mut initial_state = AgentState::new(model());
-    initial_state.messages.push(user_message("initial", 10).into());
+    initial_state
+        .messages
+        .push(user_message("initial", 10).into());
     initial_state.messages.push(
         Message::Assistant {
             content: vec![AssistantContent::Text {
@@ -1039,7 +1038,10 @@ async fn rejects_prompt_and_continue_while_active() {
     );
 
     let continue_error = agent.r#continue().await.unwrap_err();
-    assert!(matches!(continue_error, AgentError::AlreadyProcessingContinue));
+    assert!(matches!(
+        continue_error,
+        AgentError::AlreadyProcessingContinue
+    ));
     assert_eq!(
         continue_error.to_string(),
         "Agent is already processing. Wait for completion before continuing."
@@ -1063,14 +1065,16 @@ async fn continue_rejects_custom_assistant_tail_like_typescript() {
     let agent = Agent::new(AgentState::new(model()));
     agent.update_state(|state| {
         state.messages.push(
-            CustomAgentMessage::new("assistant", json!({ "note": "custom assistant" }), 10)
-                .into(),
+            CustomAgentMessage::new("assistant", json!({ "note": "custom assistant" }), 10).into(),
         );
     });
 
     let error = agent.r#continue().await.unwrap_err();
     assert!(matches!(error, AgentError::CannotContinueFromAssistant));
-    assert_eq!(error.to_string(), "Cannot continue from message role: assistant");
+    assert_eq!(
+        error.to_string(),
+        "Cannot continue from message role: assistant"
+    );
 }
 
 #[tokio::test]
@@ -1232,7 +1236,10 @@ async fn wrapper_preserves_pending_tool_call_iteration_order_like_typescript_set
 
     assert_eq!(
         pending_snapshots.lock().unwrap().clone(),
-        vec![vec![String::from("tool-b")], vec![String::from("tool-b"), String::from("tool-a")],]
+        vec![
+            vec![String::from("tool-b")],
+            vec![String::from("tool-b"), String::from("tool-a")],
+        ]
     );
 }
 
@@ -1426,7 +1433,10 @@ async fn wrapper_falls_back_to_stream_options_api_key_when_hook_returns_empty_st
               _context: Context,
               options: StreamOptions|
               -> Result<AssistantEventStream, AiError> {
-            received_api_keys.lock().unwrap().push(options.api_key.clone());
+            received_api_keys
+                .lock()
+                .unwrap()
+                .push(options.api_key.clone());
 
             let message = assistant_message("ok", StopReason::Stop, 20);
             Ok(Box::pin(try_stream! {

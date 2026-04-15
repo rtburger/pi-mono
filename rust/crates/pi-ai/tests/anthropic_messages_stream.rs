@@ -290,13 +290,15 @@ async fn oauth_tool_names_round_trip_and_passthrough_in_stream() {
         .collect::<Vec<_>>()
         .await;
 
-        let tool_call_name = collected.iter().find_map(|event| match event.as_ref().unwrap() {
-            AssistantEvent::ToolCallEnd { tool_call, .. } => match tool_call {
-                AssistantContent::ToolCall { name, .. } => Some(name.clone()),
+        let tool_call_name = collected
+            .iter()
+            .find_map(|event| match event.as_ref().unwrap() {
+                AssistantEvent::ToolCallEnd { tool_call, .. } => match tool_call {
+                    AssistantContent::ToolCall { name, .. } => Some(name.clone()),
+                    _ => None,
+                },
                 _ => None,
-            },
-            _ => None,
-        });
+            });
 
         assert_eq!(tool_call_name.as_deref(), Some(tool_name));
 

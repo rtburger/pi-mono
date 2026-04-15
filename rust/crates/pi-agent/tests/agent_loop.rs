@@ -421,7 +421,10 @@ async fn continue_loop_rejects_custom_assistant_tail_like_typescript() {
         Ok(_) => panic!("expected assistant-tail error"),
         Err(error) => error,
     };
-    assert_eq!(error.to_string(), "Cannot continue from message role: assistant");
+    assert_eq!(
+        error.to_string(),
+        "Cannot continue from message role: assistant"
+    );
 }
 
 #[tokio::test]

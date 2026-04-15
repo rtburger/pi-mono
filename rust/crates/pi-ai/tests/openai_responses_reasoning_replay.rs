@@ -1,5 +1,5 @@
 use httpmock::prelude::*;
-use pi_ai::{complete, PayloadHook, StreamOptions};
+use pi_ai::{PayloadHook, StreamOptions, complete};
 use pi_events::{
     AssistantContent, Context, Message, Model, StopReason, ToolDefinition, Usage, UserContent,
 };

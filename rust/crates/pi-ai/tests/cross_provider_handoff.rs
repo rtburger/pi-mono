@@ -9,7 +9,9 @@ use pi_ai::openai_codex_responses::{
 use pi_ai::openai_responses::{
     ResponsesContentPart, ResponsesFunctionCallOutput, ResponsesInputItem, tool_call_arguments,
 };
-use pi_events::{AssistantContent, Context, Message, Model, StopReason, ToolDefinition, Usage, UserContent};
+use pi_events::{
+    AssistantContent, Context, Message, Model, StopReason, ToolDefinition, Usage, UserContent,
+};
 use serde_json::json;
 
 fn openai_codex_model() -> Model {
@@ -175,10 +177,16 @@ fn replays_anthropic_tool_turn_into_openai_codex_request() {
     assert_eq!(params.tool_choice, "auto");
     assert!(params.parallel_tool_calls);
     assert_eq!(params.text.verbosity, "medium");
-    assert_eq!(params.include, vec!["reasoning.encrypted_content".to_string()]);
+    assert_eq!(
+        params.include,
+        vec!["reasoning.encrypted_content".to_string()]
+    );
     assert!(params.reasoning.is_none());
 
-    let tools = params.tools.as_ref().expect("expected codex tool definitions");
+    let tools = params
+        .tools
+        .as_ref()
+        .expect("expected codex tool definitions");
     assert_eq!(tools.len(), 1);
     match &tools[0] {
         OpenAiCodexResponsesToolDefinition::Function { name, strict, .. } => {
@@ -293,7 +301,10 @@ fn replays_openai_responses_tool_turn_into_anthropic_request() {
         AnthropicMessageContent::Blocks(blocks) => {
             assert_eq!(blocks.len(), 2);
             match &blocks[0] {
-                AnthropicContentBlock::Text { text, cache_control } => {
+                AnthropicContentBlock::Text {
+                    text,
+                    cache_control,
+                } => {
                     assert_eq!(text, "I should think first.");
                     assert!(cache_control.is_none());
                 }
@@ -303,7 +314,10 @@ fn replays_openai_responses_tool_turn_into_anthropic_request() {
                 AnthropicContentBlock::ToolUse { id, name, input } => {
                     assert_eq!(id, &normalize_anthropic_tool_call_id("call_123|fc_123"));
                     assert_eq!(name, "edit");
-                    assert_eq!(input, &tool_call_arguments(&[("path", json!("src/main.rs"))]));
+                    assert_eq!(
+                        input,
+                        &tool_call_arguments(&[("path", json!("src/main.rs"))])
+                    );
                 }
                 other => panic!("expected replayed tool use, got {other:?}"),
             }
@@ -321,7 +335,10 @@ fn replays_openai_responses_tool_turn_into_anthropic_request() {
                     is_error,
                     cache_control,
                 } => {
-                    assert_eq!(tool_use_id, &normalize_anthropic_tool_call_id("call_123|fc_123"));
+                    assert_eq!(
+                        tool_use_id,
+                        &normalize_anthropic_tool_call_id("call_123|fc_123")
+                    );
                     assert!(!is_error);
                     assert!(cache_control.is_none());
                     assert_eq!(content, &AnthropicMessageContent::Text("42".into()));

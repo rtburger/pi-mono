@@ -119,7 +119,12 @@ fn build_params_adds_long_cache_ttl_only_for_direct_anthropic_base_url() {
 #[test]
 fn oauth_tool_name_normalization_matches_claude_code_round_trip() {
     let oauth_model = model("claude-sonnet-4-20250514", "https://api.anthropic.com/v1");
-    let tools = vec![tool("todowrite"), tool("read"), tool("find"), tool("my_custom_tool")];
+    let tools = vec![
+        tool("todowrite"),
+        tool("read"),
+        tool("find"),
+        tool("my_custom_tool"),
+    ];
     let params = build_anthropic_request_params(
         &oauth_model,
         &Context {

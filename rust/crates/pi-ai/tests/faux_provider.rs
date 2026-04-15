@@ -3,7 +3,9 @@ use pi_ai::{
     CacheRetention, FauxContentBlock, FauxResponse, RegisterFauxProviderOptions, StreamOptions,
     complete, register_faux_provider, stream_response,
 };
-use pi_events::{AssistantContent, AssistantEvent, Context, Message, StopReason, Usage, UserContent};
+use pi_events::{
+    AssistantContent, AssistantEvent, Context, Message, StopReason, Usage, UserContent,
+};
 use serde_json::json;
 use std::{collections::BTreeMap, fs, path::PathBuf};
 use tokio::sync::watch;

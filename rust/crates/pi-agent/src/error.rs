@@ -2,7 +2,9 @@ use pi_ai::AiError;
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum AgentError {
-    #[error("Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.")]
+    #[error(
+        "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+    )]
     AlreadyProcessingPrompt,
     #[error("Agent is already processing. Wait for completion before continuing.")]
     AlreadyProcessingContinue,

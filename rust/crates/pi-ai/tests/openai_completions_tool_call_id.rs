@@ -1,15 +1,11 @@
 use pi_ai::openai_completions::{
-    OpenAiCompletionsCompat, OpenAiCompletionsMessageContent,
-    convert_openai_completions_messages, normalize_openai_completions_tool_call_id,
+    OpenAiCompletionsCompat, OpenAiCompletionsMessageContent, convert_openai_completions_messages,
+    normalize_openai_completions_tool_call_id,
 };
 use pi_events::{AssistantContent, Context, Message, Model, StopReason, Usage, UserContent};
 use serde::Deserialize;
 use serde_json::json;
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 #[derive(Debug, Deserialize)]
 struct Fixture {
@@ -80,7 +76,11 @@ fn normalizes_foreign_pipe_separated_tool_call_ids_for_openai_completions() {
         tools: vec![],
     };
 
-    let messages = convert_openai_completions_messages(&model(), &context, &OpenAiCompletionsCompat::default());
+    let messages = convert_openai_completions_messages(
+        &model(),
+        &context,
+        &OpenAiCompletionsCompat::default(),
+    );
 
     assert_eq!(messages.len(), 3);
     assert_eq!(
@@ -99,7 +99,10 @@ fn normalizes_foreign_pipe_separated_tool_call_ids_for_openai_completions() {
     }
 
     assert_eq!(messages[1].role, "tool");
-    assert_eq!(messages[1].tool_call_id.as_deref(), Some(fixture.normalized_call_id.as_str()));
+    assert_eq!(
+        messages[1].tool_call_id.as_deref(),
+        Some(fixture.normalized_call_id.as_str())
+    );
     match &messages[1].content {
         OpenAiCompletionsMessageContent::Text(text) => {
             assert_eq!(text, "No result provided");

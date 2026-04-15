@@ -91,11 +91,7 @@ pub fn calculate_cost(model: &Model, usage: &mut Usage) -> UsageCost {
     calculate_cost_for(model.provider.as_str(), model.id.as_str(), usage)
 }
 
-pub(crate) fn calculate_cost_for(
-    provider: &str,
-    model_id: &str,
-    usage: &mut Usage,
-) -> UsageCost {
+pub(crate) fn calculate_cost_for(provider: &str, model_id: &str, usage: &mut Usage) -> UsageCost {
     let Some(cost) = model_cost(provider, model_id) else {
         usage.cost = UsageCost::default();
         return usage.cost.clone();
