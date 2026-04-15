@@ -9,8 +9,8 @@ mod partial_json;
 mod unicode;
 
 pub use models::{
-    built_in_models, calculate_cost, get_model, get_models, get_providers, models_are_equal,
-    supports_xhigh,
+    BUILT_IN_MODEL_PROVIDERS, built_in_models, calculate_cost, get_model, get_models,
+    get_providers, models_are_equal, supports_xhigh,
 };
 pub use oauth::{
     AnthropicOAuthProvider, OAuthApiKeyResult, OAuthAuthInfo, OAuthCredentials,

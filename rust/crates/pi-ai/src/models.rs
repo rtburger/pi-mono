@@ -2,6 +2,8 @@ use pi_events::{Model, ModelCost, Usage, UsageCost};
 use serde::Deserialize;
 use std::{collections::BTreeMap, sync::OnceLock};
 
+// Rust owns the built-in model catalog in-tree. Keep runtime loading pointed at this
+// local file instead of reintroducing a dependency on TypeScript-generated artifacts.
 const MODELS_CATALOG_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/src/models.catalog.json"
@@ -35,7 +37,7 @@ struct RawModel {
 
 type RawCatalog = BTreeMap<String, BTreeMap<String, RawModel>>;
 
-const SUPPORTED_PROVIDERS: &[&str] = &["anthropic", "openai", "openai-codex"];
+pub const BUILT_IN_MODEL_PROVIDERS: &[&str] = &["anthropic", "openai", "openai-codex"];
 
 pub fn built_in_models() -> &'static [Model] {
     catalog().all_models.as_slice()
@@ -121,7 +123,7 @@ fn load_catalog() -> BuiltInModelCatalog {
     let mut all_models = Vec::new();
 
     for (provider, models) in raw_catalog {
-        if !SUPPORTED_PROVIDERS.contains(&provider.as_str()) {
+        if !BUILT_IN_MODEL_PROVIDERS.contains(&provider.as_str()) {
             continue;
         }
 

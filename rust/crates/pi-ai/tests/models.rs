@@ -1,9 +1,11 @@
 use pi_ai::{
-    built_in_models, calculate_cost, get_env_api_key, get_model, get_models, get_providers,
-    models_are_equal, supports_xhigh,
+    BUILT_IN_MODEL_PROVIDERS, built_in_models, calculate_cost, get_env_api_key, get_model,
+    get_models, get_providers, models_are_equal, supports_xhigh,
 };
 use pi_events::{Model, ModelCost, Usage, UsageCost};
+use serde::Deserialize;
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     sync::{Mutex, OnceLock},
 };
@@ -40,6 +42,13 @@ where
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct CatalogModelEntry {
+    id: String,
+}
+
+type RawCatalog = BTreeMap<String, BTreeMap<String, CatalogModelEntry>>;
+
 #[test]
 fn loads_known_models_from_rust_owned_catalog() {
     let all_models = built_in_models();
@@ -58,11 +67,10 @@ fn exposes_only_migrated_providers() {
     let providers = get_providers();
     assert_eq!(
         providers,
-        vec![
-            String::from("anthropic"),
-            String::from("openai"),
-            String::from("openai-codex"),
-        ]
+        BUILT_IN_MODEL_PROVIDERS
+            .iter()
+            .map(|provider| (*provider).to_string())
+            .collect::<Vec<_>>()
     );
 
     let anthropic_models = get_models("anthropic");
@@ -73,6 +81,33 @@ fn exposes_only_migrated_providers() {
     );
     assert!(get_models("missing-provider").is_empty());
     assert!(get_model("missing-provider", "missing-model").is_none());
+}
+
+#[test]
+fn built_in_models_match_entries_in_local_catalog_file() {
+    let raw_catalog: RawCatalog = serde_json::from_str(include_str!("../src/models.catalog.json"))
+        .expect("expected local rust model catalog to parse");
+    let providers = get_providers();
+    let expected_model_count = providers
+        .iter()
+        .map(|provider| raw_catalog.get(provider).map_or(0, BTreeMap::len))
+        .sum::<usize>();
+
+    let all_models = built_in_models();
+    assert_eq!(all_models.len(), expected_model_count);
+
+    for model in all_models {
+        let provider_models = raw_catalog
+            .get(&model.provider)
+            .unwrap_or_else(|| panic!("missing provider {} in local rust catalog", model.provider));
+        let raw_entry = provider_models.get(&model.id).unwrap_or_else(|| {
+            panic!(
+                "missing model {}/{} in local rust catalog",
+                model.provider, model.id
+            )
+        });
+        assert_eq!(raw_entry.id, model.id);
+    }
 }
 
 #[test]
