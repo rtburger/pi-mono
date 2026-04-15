@@ -171,7 +171,10 @@ fn parse_catalog(input: &str, path: &Path) -> Result<CatalogFile, String> {
 
 fn validate_catalog(catalog: &CatalogFile) -> Result<(), String> {
     let mut errors = Vec::new();
-    let supported_providers = BUILT_IN_MODEL_PROVIDERS.iter().copied().collect::<BTreeSet<_>>();
+    let supported_providers = BUILT_IN_MODEL_PROVIDERS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
 
     if catalog.is_empty() {
         errors.push(String::from("Catalog must contain at least one provider."));
@@ -196,7 +199,9 @@ fn validate_catalog(catalog: &CatalogFile) -> Result<(), String> {
 
     for (provider_key, models) in catalog {
         if models.is_empty() {
-            errors.push(format!("Provider `{provider_key}` must define at least one model."));
+            errors.push(format!(
+                "Provider `{provider_key}` must define at least one model."
+            ));
         }
 
         for (model_key, model) in models {
@@ -258,12 +263,7 @@ fn validate_catalog(catalog: &CatalogFile) -> Result<(), String> {
     }
 }
 
-fn validate_costs(
-    provider_key: &str,
-    model_key: &str,
-    cost: ModelCost,
-    errors: &mut Vec<String>,
-) {
+fn validate_costs(provider_key: &str, model_key: &str, cost: ModelCost, errors: &mut Vec<String>) {
     if cost.input < 0.0 {
         errors.push(format!(
             "Provider `{provider_key}` model `{model_key}` has negative input cost."

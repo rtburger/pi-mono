@@ -1,7 +1,6 @@
 use crate::config_value::resolve_config_value_uncached;
 use pi_ai::oauth::{
-    OAuthCredentials, OAuthRefreshOverrides, get_oauth_provider,
-    refresh_oauth_token_with_overrides,
+    OAuthCredentials, OAuthRefreshOverrides, get_oauth_provider, refresh_oauth_token_with_overrides,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -369,17 +368,14 @@ async fn refresh_auth_file_oauth_inner(
             continue;
         }
 
-        let refreshed = match refresh_auth_provider(
-            provider,
-            &credential.to_oauth_credentials(),
-            overrides,
-        )
-        .await
-        {
-            Ok(refreshed) => Ok(refreshed),
-            Err(error) if error.starts_with("Unsupported OAuth provider:") => continue,
-            Err(error) => Err(error),
-        };
+        let refreshed =
+            match refresh_auth_provider(provider, &credential.to_oauth_credentials(), overrides)
+                .await
+            {
+                Ok(refreshed) => Ok(refreshed),
+                Err(error) if error.starts_with("Unsupported OAuth provider:") => continue,
+                Err(error) => Err(error),
+            };
 
         match refreshed {
             Ok(refreshed) => {
@@ -426,8 +422,7 @@ fn oauth_credentials_to_value(credentials: OAuthCredentials) -> Value {
 }
 
 fn oauth_api_key(provider: &str, credentials: &OAuthCredentials) -> Option<String> {
-    get_oauth_provider(provider)
-        .and_then(|provider| provider.get_api_key(credentials).ok())
+    get_oauth_provider(provider).and_then(|provider| provider.get_api_key(credentials).ok())
 }
 
 fn now_ms() -> i64 {

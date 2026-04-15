@@ -97,10 +97,7 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "pi-ai-{prefix}-{}-{nanos}",
-        std::process::id()
-    ));
+    let path = std::env::temp_dir().join(format!("pi-ai-{prefix}-{}-{nanos}", std::process::id()));
     fs::create_dir_all(&path).unwrap();
     path
 }
@@ -135,7 +132,10 @@ fn invalid_model_key_catalog_json() -> String {
     .unwrap()
 }
 
-#[expect(clippy::too_many_arguments, reason = "test helper keeps catalog fixtures readable")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test helper keeps catalog fixtures readable"
+)]
 fn model_entry(
     id: &str,
     name: &str,
@@ -169,4 +169,3 @@ fn model_entry(
         "maxTokens": max_tokens,
     })
 }
-
