@@ -1,8 +1,15 @@
 use crate::{
     AppMode, Args, Diagnostic, DiagnosticKind, ListModels, OverlayAuthSource, PrintModeOptions,
-    PrintOutputMode, ProcessFileOptions, build_initial_message, list_models::render_list_models,
+    PrintOutputMode, ProcessFileOptions,
+    auth::{
+        OAuthProviderSummary, list_persisted_oauth_providers, oauth_provider_name,
+        oauth_provider_summaries, remove_persisted_oauth_provider, run_terminal_oauth_login,
+    },
+    build_initial_message,
+    list_models::render_list_models,
     parse_args, process_file_arguments, resolve_app_mode, run_print_mode,
-    session_picker::SessionPickerComponent, to_print_output_mode,
+    session_picker::SessionPickerComponent,
+    to_print_output_mode,
 };
 use pi_agent::{AgentUnsubscribe, ThinkingLevel};
 use pi_ai::{
@@ -128,9 +135,11 @@ impl BootstrapDefaults {
 #[derive(Clone)]
 struct InteractiveSlashCommandContext {
     keybindings: KeybindingsManager,
-    runtime_settings: LoadedRuntimeSettings,
+    runtime_settings: Arc<Mutex<LoadedRuntimeSettings>>,
     cwd: PathBuf,
     agent_dir: Option<PathBuf>,
+    ui_host: Arc<dyn ExternalEditorHost>,
+    auth_operation_in_progress: Arc<AtomicBool>,
 }
 
 struct InteractiveIterationOptions {
@@ -858,6 +867,7 @@ async fn run_interactive_iteration(
         .as_deref()
         .map(|agent_dir| load_runtime_settings(&cwd, agent_dir))
         .unwrap_or_default();
+    let shared_runtime_settings = Arc::new(Mutex::new(runtime_settings.clone()));
     eprint!("{}", render_settings_warnings(&runtime_settings.warnings));
 
     let scoped_models = if let Some(patterns) = parsed.models.as_ref() {
@@ -1113,12 +1123,6 @@ async fn run_interactive_iteration(
     });
 
     let transition_request = Arc::new(Mutex::new(None::<InteractiveTransitionRequest>));
-    let slash_command_context = InteractiveSlashCommandContext {
-        keybindings: keybindings.clone(),
-        runtime_settings: runtime_settings.clone(),
-        cwd: cwd.clone(),
-        agent_dir: agent_dir.clone(),
-    };
     let footer_provider = FooterDataProvider::new(&cwd);
     let render_handle = tui.render_handle();
     if let Some(command) = runtime.extension_editor_command.clone() {
@@ -1127,7 +1131,16 @@ async fn run_interactive_iteration(
     if let Some(runner) = runtime.extension_editor_runner.clone() {
         shell.set_extension_editor_command_runner_arc(runner);
     }
-    shell.set_extension_editor_host(terminal.external_editor_host(render_handle.clone()));
+    let interactive_host = terminal.external_editor_host(render_handle.clone());
+    shell.set_extension_editor_host(interactive_host.clone());
+    let slash_command_context = InteractiveSlashCommandContext {
+        keybindings: keybindings.clone(),
+        runtime_settings: shared_runtime_settings.clone(),
+        cwd: cwd.clone(),
+        agent_dir: agent_dir.clone(),
+        ui_host: Arc::new(interactive_host),
+        auth_operation_in_progress: Arc::new(AtomicBool::new(false)),
+    };
     shell.bind_footer_data_provider_with_render_handle(&footer_provider, render_handle.clone());
     let binding =
         InteractiveCoreBinding::bind(created.core.clone(), &mut shell, render_handle.clone());
@@ -1146,7 +1159,7 @@ async fn run_interactive_iteration(
         interactive_session_manager.as_ref(),
         &status_handle,
         &footer_state_handle,
-        &runtime_settings,
+        shared_runtime_settings.clone(),
     );
     install_interactive_submit_handler(
         &mut shell,
@@ -2059,13 +2072,12 @@ fn install_interactive_auto_compaction(
     session_manager: Option<&Arc<Mutex<SessionManager>>>,
     status_handle: &StatusHandle,
     footer_state_handle: &FooterStateHandle,
-    runtime_settings: &LoadedRuntimeSettings,
+    runtime_settings: Arc<Mutex<LoadedRuntimeSettings>>,
 ) -> Option<AgentUnsubscribe> {
     let session_manager = session_manager?.clone();
     let core = core.clone();
     let status_handle = status_handle.clone();
     let footer_state_handle = footer_state_handle.clone();
-    let settings = runtime_compaction_settings(runtime_settings);
     let compaction_running = Arc::new(AtomicBool::new(false));
     let overflow_recovery_attempted = Arc::new(AtomicBool::new(false));
 
@@ -2074,7 +2086,7 @@ fn install_interactive_auto_compaction(
         let session_manager = session_manager.clone();
         let status_handle = status_handle.clone();
         let footer_state_handle = footer_state_handle.clone();
-        let settings = settings.clone();
+        let runtime_settings = runtime_settings.clone();
         let compaction_running = compaction_running.clone();
         let overflow_recovery_attempted = overflow_recovery_attempted.clone();
         Box::pin(async move {
@@ -2088,6 +2100,14 @@ fn install_interactive_auto_compaction(
                     if compaction_running.swap(true, Ordering::Relaxed) {
                         return;
                     }
+
+                    let settings = {
+                        let runtime_settings = runtime_settings
+                            .lock()
+                            .expect("interactive runtime settings mutex poisoned")
+                            .clone();
+                        runtime_compaction_settings(&runtime_settings)
+                    };
 
                     let result = maybe_run_auto_compaction(
                         &core,
@@ -2124,6 +2144,9 @@ fn build_interactive_slash_commands(
 
     let model_registry_for_arguments = model_registry.clone();
     let scoped_models_for_arguments = scoped_models.clone();
+    let oauth_providers = oauth_provider_summaries();
+    let oauth_providers_for_login = oauth_providers.clone();
+    let oauth_providers_for_logout = oauth_providers.clone();
 
     vec![
         simple_slash_command("settings", "Open settings menu"),
@@ -2177,8 +2200,20 @@ fn build_interactive_slash_commands(
         simple_slash_command("hotkeys", "Show keyboard shortcuts"),
         simple_slash_command("fork", "Fork from a previous user message"),
         simple_slash_command("tree", "Show or switch the session tree"),
-        simple_slash_command("login", "Login with OAuth provider"),
-        simple_slash_command("logout", "Logout from OAuth provider"),
+        SlashCommand {
+            name: String::from("login"),
+            description: Some(String::from("Login with OAuth provider")),
+            argument_completions: Some(Arc::new(move |prefix| {
+                autocomplete_oauth_providers(&oauth_providers_for_login, prefix)
+            })),
+        },
+        SlashCommand {
+            name: String::from("logout"),
+            description: Some(String::from("Logout from OAuth provider")),
+            argument_completions: Some(Arc::new(move |prefix| {
+                autocomplete_oauth_providers(&oauth_providers_for_logout, prefix)
+            })),
+        },
         simple_slash_command("new", "Start a new session"),
         simple_slash_command("compact", "Compact the current session context"),
         simple_slash_command("resume", "Resume a different session"),
@@ -2197,6 +2232,29 @@ fn simple_slash_command(name: &str, description: &str) -> SlashCommand {
         description: Some(description.to_owned()),
         argument_completions: None,
     }
+}
+
+fn autocomplete_oauth_providers(
+    providers: &[OAuthProviderSummary],
+    prefix: &str,
+) -> Option<Vec<AutocompleteItem>> {
+    let filtered = fuzzy_filter(providers, prefix, |provider| {
+        Cow::Owned(format!("{} {}", provider.id, provider.name))
+    });
+    if filtered.is_empty() {
+        return None;
+    }
+
+    Some(
+        filtered
+            .into_iter()
+            .map(|provider| AutocompleteItem {
+                value: provider.id.clone(),
+                label: provider.id.clone(),
+                description: Some(provider.name.clone()),
+            })
+            .collect(),
+    )
 }
 
 fn current_interactive_model_candidates(
@@ -2616,7 +2674,16 @@ fn render_session_info_text(
     info.trim_end().to_owned()
 }
 
+fn current_runtime_settings(context: &InteractiveSlashCommandContext) -> LoadedRuntimeSettings {
+    context
+        .runtime_settings
+        .lock()
+        .expect("interactive runtime settings mutex poisoned")
+        .clone()
+}
+
 fn render_runtime_settings_text(context: &InteractiveSlashCommandContext) -> String {
+    let runtime_settings = current_runtime_settings(context);
     let mut output = String::new();
     push_line(&mut output, "Settings");
     push_line(&mut output, "");
@@ -2645,7 +2712,7 @@ fn render_runtime_settings_text(context: &InteractiveSlashCommandContext) -> Str
         &mut output,
         &format!(
             "Auto resize: {}",
-            if context.runtime_settings.settings.images.auto_resize_images {
+            if runtime_settings.settings.images.auto_resize_images {
                 "on"
             } else {
                 "off"
@@ -2656,7 +2723,7 @@ fn render_runtime_settings_text(context: &InteractiveSlashCommandContext) -> Str
         &mut output,
         &format!(
             "Block images: {}",
-            if context.runtime_settings.settings.images.block_images {
+            if runtime_settings.settings.images.block_images {
                 "on"
             } else {
                 "off"
@@ -2669,7 +2736,7 @@ fn render_runtime_settings_text(context: &InteractiveSlashCommandContext) -> Str
         &mut output,
         &format!(
             "Enabled: {}",
-            if context.runtime_settings.settings.compaction.enabled {
+            if runtime_settings.settings.compaction.enabled {
                 "on"
             } else {
                 "off"
@@ -2680,34 +2747,27 @@ fn render_runtime_settings_text(context: &InteractiveSlashCommandContext) -> Str
         &mut output,
         &format!(
             "Reserve tokens: {}",
-            context.runtime_settings.settings.compaction.reserve_tokens
+            runtime_settings.settings.compaction.reserve_tokens
         ),
     );
     push_line(
         &mut output,
         &format!(
             "Keep recent tokens: {}",
-            context
-                .runtime_settings
-                .settings
-                .compaction
-                .keep_recent_tokens
+            runtime_settings.settings.compaction.keep_recent_tokens
         ),
     );
     push_line(&mut output, "");
     push_line(&mut output, "Editor");
     push_line(
         &mut output,
-        &format!(
-            "Padding X: {}",
-            context.runtime_settings.settings.editor_padding_x
-        ),
+        &format!("Padding X: {}", runtime_settings.settings.editor_padding_x),
     );
     push_line(
         &mut output,
         &format!(
             "Autocomplete max visible: {}",
-            context.runtime_settings.settings.autocomplete_max_visible
+            runtime_settings.settings.autocomplete_max_visible
         ),
     );
     push_line(&mut output, "");
@@ -2716,35 +2776,35 @@ fn render_runtime_settings_text(context: &InteractiveSlashCommandContext) -> Str
         &mut output,
         &format!(
             "minimal: {}",
-            option_u64_label(context.runtime_settings.settings.thinking_budgets.minimal)
+            option_u64_label(runtime_settings.settings.thinking_budgets.minimal)
         ),
     );
     push_line(
         &mut output,
         &format!(
             "low: {}",
-            option_u64_label(context.runtime_settings.settings.thinking_budgets.low)
+            option_u64_label(runtime_settings.settings.thinking_budgets.low)
         ),
     );
     push_line(
         &mut output,
         &format!(
             "medium: {}",
-            option_u64_label(context.runtime_settings.settings.thinking_budgets.medium)
+            option_u64_label(runtime_settings.settings.thinking_budgets.medium)
         ),
     );
     push_line(
         &mut output,
         &format!(
             "high: {}",
-            option_u64_label(context.runtime_settings.settings.thinking_budgets.high)
+            option_u64_label(runtime_settings.settings.thinking_budgets.high)
         ),
     );
 
-    if !context.runtime_settings.warnings.is_empty() {
+    if !runtime_settings.warnings.is_empty() {
         push_line(&mut output, "");
         push_line(&mut output, "Warnings");
-        for warning in &context.runtime_settings.warnings {
+        for warning in &runtime_settings.warnings {
             push_line(
                 &mut output,
                 &format!("- ({} settings) {}", warning.scope.label(), warning.message),
@@ -2838,6 +2898,37 @@ fn render_hotkeys_text(keybindings: &KeybindingsManager) -> String {
         push_line(&mut output, &format!("{keys}: {description}"));
     }
 
+    output.trim_end().to_owned()
+}
+
+fn render_oauth_login_help_text() -> String {
+    let mut output = String::new();
+    push_line(&mut output, "OAuth Providers");
+    push_line(&mut output, "");
+    for provider in oauth_provider_summaries() {
+        push_line(
+            &mut output,
+            &format!("- {}: {}", provider.id, provider.name),
+        );
+    }
+    push_line(&mut output, "");
+    push_line(&mut output, "Use /login <provider> to authenticate.");
+    output.trim_end().to_owned()
+}
+
+fn render_oauth_logout_help_text(providers: &[String]) -> String {
+    let mut providers = providers.to_vec();
+    providers.sort();
+
+    let mut output = String::new();
+    push_line(&mut output, "Logged-in OAuth Providers");
+    push_line(&mut output, "");
+    for provider in providers {
+        let description = oauth_provider_name(&provider).unwrap_or_else(|| provider.clone());
+        push_line(&mut output, &format!("- {provider}: {description}"));
+    }
+    push_line(&mut output, "");
+    push_line(&mut output, "Use /logout <provider> to remove credentials.");
     output.trim_end().to_owned()
 }
 
@@ -3842,15 +3933,104 @@ fn handle_interactive_slash_command(
         return true;
     }
 
-    if text == "/login" {
-        status_handle
-            .set_message("OAuth login is not implemented in the Rust interactive CLI yet.");
+    if text == "/login" || text.starts_with("/login ") {
+        if core.state().is_streaming {
+            status_handle.set_message("Wait for the current response to finish before logging in.");
+            return true;
+        }
+
+        let provider_id = text.strip_prefix("/login").unwrap_or_default().trim();
+        if provider_id.is_empty() {
+            append_transcript_custom_message(shell, "login", render_oauth_login_help_text());
+            return true;
+        }
+
+        if oauth_provider_name(provider_id).is_none() {
+            status_handle.set_message(format!("Unknown OAuth provider: {provider_id}"));
+            return true;
+        }
+
+        let Some(agent_dir) = slash_command_context.agent_dir.as_ref() else {
+            status_handle.set_message("OAuth login requires an agent directory.");
+            return true;
+        };
+
+        if slash_command_context
+            .auth_operation_in_progress
+            .swap(true, Ordering::Relaxed)
+        {
+            status_handle.set_message("An OAuth login is already in progress.");
+            return true;
+        }
+
+        let provider_id = provider_id.to_owned();
+        let auth_path = agent_dir.join("auth.json");
+        let status_handle = status_handle.clone();
+        let ui_host = slash_command_context.ui_host.clone();
+        let auth_operation_in_progress = slash_command_context.auth_operation_in_progress.clone();
+        status_handle.set_message(format!("Starting OAuth login for {provider_id}..."));
+        tokio::spawn(async move {
+            let result = run_terminal_oauth_login(auth_path, provider_id.clone(), ui_host).await;
+            auth_operation_in_progress.store(false, Ordering::Relaxed);
+            match result {
+                Ok(provider_name) => {
+                    status_handle.set_message(format!("Logged in to {provider_name}"));
+                }
+                Err(error) => status_handle.set_message(format!("Error: {error}")),
+            }
+        });
         return true;
     }
 
-    if text == "/logout" {
-        status_handle
-            .set_message("OAuth logout is not implemented in the Rust interactive CLI yet.");
+    if text == "/logout" || text.starts_with("/logout ") {
+        if core.state().is_streaming {
+            status_handle
+                .set_message("Wait for the current response to finish before logging out.");
+            return true;
+        }
+
+        let Some(agent_dir) = slash_command_context.agent_dir.as_ref() else {
+            status_handle.set_message("OAuth logout requires an agent directory.");
+            return true;
+        };
+
+        if slash_command_context
+            .auth_operation_in_progress
+            .load(Ordering::Relaxed)
+        {
+            status_handle.set_message("Wait for the current OAuth login to finish.");
+            return true;
+        }
+
+        let auth_path = agent_dir.join("auth.json");
+        let provider_id = text.strip_prefix("/logout").unwrap_or_default().trim();
+        if provider_id.is_empty() {
+            match list_persisted_oauth_providers(&auth_path) {
+                Ok(providers) if providers.is_empty() => {
+                    status_handle
+                        .set_message("No OAuth providers logged in. Use /login <provider>.");
+                }
+                Ok(providers) => {
+                    append_transcript_custom_message(
+                        shell,
+                        "logout",
+                        render_oauth_logout_help_text(&providers),
+                    );
+                }
+                Err(error) => status_handle.set_message(format!("Error: {error}")),
+            }
+            return true;
+        }
+
+        let provider_name =
+            oauth_provider_name(provider_id).unwrap_or_else(|| provider_id.to_owned());
+        match remove_persisted_oauth_provider(&auth_path, provider_id) {
+            Ok(true) => status_handle.set_message(format!("Logged out of {provider_name}")),
+            Ok(false) => {
+                status_handle.set_message(format!("No OAuth credentials stored for {provider_id}"))
+            }
+            Err(error) => status_handle.set_message(format!("Error: {error}")),
+        }
         return true;
     }
 
@@ -3872,7 +4052,8 @@ fn handle_interactive_slash_command(
         let session_manager = session_manager.clone();
         let status_handle = status_handle.clone();
         let footer_state_handle = footer_state_handle.clone();
-        let settings = runtime_compaction_settings(&slash_command_context.runtime_settings);
+        let settings =
+            runtime_compaction_settings(&current_runtime_settings(slash_command_context));
         status_handle.set_message("Compacting session context...");
         tokio::spawn(async move {
             match run_interactive_compaction(
@@ -3899,9 +4080,49 @@ fn handle_interactive_slash_command(
     }
 
     if text == "/reload" {
-        status_handle.set_message(
-            "Reloading keybindings, extensions, skills, prompts, and themes is not implemented in the Rust interactive CLI yet.",
-        );
+        if core.state().is_streaming {
+            status_handle.set_message("Wait for the current response to finish before reloading.");
+            return true;
+        }
+        if slash_command_context
+            .auth_operation_in_progress
+            .load(Ordering::Relaxed)
+        {
+            status_handle.set_message("Wait for the current OAuth login to finish.");
+            return true;
+        }
+
+        let Some(agent_dir) = slash_command_context.agent_dir.as_ref() else {
+            status_handle.set_message("Reloading settings requires an agent directory.");
+            return true;
+        };
+
+        let loaded = load_runtime_settings(&slash_command_context.cwd, agent_dir);
+        core.set_auto_resize_images(loaded.settings.images.auto_resize_images);
+        core.set_block_images(loaded.settings.images.block_images);
+        core.set_thinking_budgets(map_thinking_budgets(&loaded.settings.thinking_budgets));
+        shell.set_input_padding_x(loaded.settings.editor_padding_x);
+        shell.set_autocomplete_max_visible(loaded.settings.autocomplete_max_visible);
+        footer_state_handle.update(|footer_state| {
+            footer_state.auto_compact_enabled = loaded.settings.compaction.enabled;
+        });
+        *slash_command_context
+            .runtime_settings
+            .lock()
+            .expect("interactive runtime settings mutex poisoned") = loaded.clone();
+
+        if loaded.warnings.is_empty() {
+            status_handle.set_message("Reloaded settings");
+        } else {
+            append_transcript_custom_message(
+                shell,
+                "reload",
+                render_settings_warnings(&loaded.warnings)
+                    .trim_end()
+                    .to_owned(),
+            );
+            status_handle.set_message("Reloaded settings with warnings");
+        }
         return true;
     }
 
@@ -4346,15 +4567,30 @@ mod tests {
         result
     }
 
+    #[derive(Default)]
+    struct TestExternalEditorHost;
+
+    impl ExternalEditorHost for TestExternalEditorHost {}
+
     fn test_slash_command_context(
         keybindings: &KeybindingsManager,
         cwd: impl Into<PathBuf>,
     ) -> InteractiveSlashCommandContext {
+        test_slash_command_context_with_agent_dir(keybindings, cwd, None)
+    }
+
+    fn test_slash_command_context_with_agent_dir(
+        keybindings: &KeybindingsManager,
+        cwd: impl Into<PathBuf>,
+        agent_dir: Option<PathBuf>,
+    ) -> InteractiveSlashCommandContext {
         InteractiveSlashCommandContext {
             keybindings: keybindings.clone(),
-            runtime_settings: LoadedRuntimeSettings::default(),
+            runtime_settings: Arc::new(Mutex::new(LoadedRuntimeSettings::default())),
             cwd: cwd.into(),
-            agent_dir: None,
+            agent_dir,
+            ui_host: Arc::new(TestExternalEditorHost),
+            auth_operation_in_progress: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -4886,6 +5122,285 @@ mod tests {
         );
         assert!(rendered.contains("Session Tree"), "output: {rendered}");
         assert!(rendered.contains("## ["), "output: {rendered}");
+
+        faux.unregister();
+    }
+
+    #[test]
+    fn login_slash_command_lists_available_oauth_providers() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "slash-login-help-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "slash-login-help-faux-1".into(),
+                name: Some("Slash Login Help Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("slash-login-help-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("slash-login-help-cwd");
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(cwd.clone()),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
+        let status_handle = shell.status_handle();
+        let footer_state_handle = shell.footer_state_handle();
+        let exit_requested = Arc::new(AtomicBool::new(false));
+        let transition_request = Arc::new(Mutex::new(None));
+        let slash_command_context = test_slash_command_context(&keybindings, cwd);
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/login",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            None,
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+
+        let rendered = shell.render(100).join("\n");
+        assert!(rendered.contains("OAuth Providers"), "output: {rendered}");
+        assert!(rendered.contains("anthropic"), "output: {rendered}");
+        assert!(rendered.contains("openai-codex"), "output: {rendered}");
+        assert!(
+            rendered.contains("Use /login <provider>"),
+            "output: {rendered}"
+        );
+
+        faux.unregister();
+    }
+
+    #[test]
+    fn logout_slash_command_removes_saved_oauth_provider() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "slash-logout-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "slash-logout-faux-1".into(),
+                name: Some("Slash Logout Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("slash-logout-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("slash-logout-cwd");
+        let agent_dir = unique_temp_dir("slash-logout-agent");
+        fs::write(
+            agent_dir.join("auth.json"),
+            serde_json::json!({
+                "anthropic": {
+                    "type": "oauth",
+                    "refresh": "refresh-token",
+                    "access": "access-token",
+                    "expires": 123
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(cwd.clone()),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
+        let status_handle = shell.status_handle();
+        let footer_state_handle = shell.footer_state_handle();
+        let exit_requested = Arc::new(AtomicBool::new(false));
+        let transition_request = Arc::new(Mutex::new(None));
+        let slash_command_context =
+            test_slash_command_context_with_agent_dir(&keybindings, cwd, Some(agent_dir.clone()));
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/logout anthropic",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            None,
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+
+        let providers = list_persisted_oauth_providers(&agent_dir.join("auth.json")).unwrap();
+        assert!(providers.is_empty(), "providers: {providers:?}");
+
+        let rendered = shell.render(100).join("\n");
+        assert!(
+            rendered.contains("Logged out of Anthropic"),
+            "output: {rendered}"
+        );
+
+        faux.unregister();
+    }
+
+    #[test]
+    fn reload_slash_command_reloads_runtime_settings_from_disk() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "slash-reload-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "slash-reload-faux-1".into(),
+                name: Some("Slash Reload Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("slash-reload-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("slash-reload-cwd");
+        let agent_dir = unique_temp_dir("slash-reload-agent");
+        fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({
+                "images": {
+                    "autoResize": false,
+                    "blockImages": true
+                },
+                "compaction": {
+                    "enabled": false
+                },
+                "thinkingBudgets": {
+                    "low": 123
+                },
+                "editorPaddingX": 2,
+                "autocompleteMaxVisible": 7
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(cwd.clone()),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
+        let status_handle = shell.status_handle();
+        let footer_state_handle = shell.footer_state_handle();
+        let exit_requested = Arc::new(AtomicBool::new(false));
+        let transition_request = Arc::new(Mutex::new(None));
+        let slash_command_context =
+            test_slash_command_context_with_agent_dir(&keybindings, cwd, Some(agent_dir));
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/reload",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            None,
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+
+        assert!(!core.auto_resize_images());
+        assert!(core.block_images());
+        assert_eq!(core.thinking_budgets().low, Some(123));
+        assert_eq!(
+            current_runtime_settings(&slash_command_context)
+                .settings
+                .editor_padding_x,
+            2
+        );
+        assert_eq!(
+            current_runtime_settings(&slash_command_context)
+                .settings
+                .autocomplete_max_visible,
+            7
+        );
+
+        let settings_text = render_runtime_settings_text(&slash_command_context);
+        assert!(
+            settings_text.contains("Auto resize: off"),
+            "output: {settings_text}"
+        );
+        assert!(
+            settings_text.contains("Block images: on"),
+            "output: {settings_text}"
+        );
+        assert!(
+            settings_text.contains("Padding X: 2"),
+            "output: {settings_text}"
+        );
+        assert!(
+            settings_text.contains("Autocomplete max visible: 7"),
+            "output: {settings_text}"
+        );
 
         faux.unregister();
     }
