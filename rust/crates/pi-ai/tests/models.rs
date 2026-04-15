@@ -1,7 +1,8 @@
 use pi_ai::{
-    built_in_models, get_env_api_key, get_model, get_models, get_providers, models_are_equal,
-    supports_xhigh,
+    built_in_models, calculate_cost, get_env_api_key, get_model, get_models, get_providers,
+    models_are_equal, supports_xhigh,
 };
+use pi_events::{Usage, UsageCost};
 use std::{
     ffi::OsString,
     sync::{Mutex, OnceLock},
@@ -40,7 +41,7 @@ where
 }
 
 #[test]
-fn loads_known_models_from_typescript_generated_catalog() {
+fn loads_known_models_from_rust_owned_catalog() {
     let all_models = built_in_models();
     assert!(!all_models.is_empty());
 
@@ -75,7 +76,7 @@ fn exposes_only_migrated_providers() {
 }
 
 #[test]
-fn supports_xhigh_matches_typescript_rules() {
+fn supports_xhigh_matches_model_id_rules() {
     let anthropic_opus = get_model("anthropic", "claude-opus-4-6").unwrap();
     let anthropic_sonnet = get_model("anthropic", "claude-sonnet-4-5").unwrap();
     let openai_gpt = get_model("openai-codex", "gpt-5.4").unwrap();
@@ -94,6 +95,54 @@ fn models_are_equal_matches_provider_and_id_only() {
     assert!(models_are_equal(Some(&left), Some(&right)));
     assert!(!models_are_equal(Some(&left), Some(&other_provider)));
     assert!(!models_are_equal(Some(&left), None));
+}
+
+#[test]
+fn calculate_cost_populates_openai_and_anthropic_usage_costs() {
+    let mut openai_usage = Usage {
+        input: 1_000_000,
+        output: 1_000_000,
+        cache_read: 1_000_000,
+        cache_write: 1_000_000,
+        total_tokens: 4_000_000,
+        cost: UsageCost::default(),
+    };
+    let openai_model = get_model("openai", "gpt-5.4").expect("expected openai/gpt-5.4 model");
+    let openai_cost = calculate_cost(&openai_model, &mut openai_usage);
+    assert_eq!(
+        openai_cost,
+        UsageCost {
+            input: 2.5,
+            output: 15.0,
+            cache_read: 0.25,
+            cache_write: 0.0,
+            total: 17.75,
+        }
+    );
+    assert_eq!(openai_usage.cost, openai_cost);
+
+    let mut anthropic_usage = Usage {
+        input: 1_000_000,
+        output: 1_000_000,
+        cache_read: 1_000_000,
+        cache_write: 1_000_000,
+        total_tokens: 4_000_000,
+        cost: UsageCost::default(),
+    };
+    let anthropic_model = get_model("anthropic", "claude-opus-4-6")
+        .expect("expected anthropic/claude-opus-4-6 model");
+    let anthropic_cost = calculate_cost(&anthropic_model, &mut anthropic_usage);
+    assert_eq!(
+        anthropic_cost,
+        UsageCost {
+            input: 5.0,
+            output: 25.0,
+            cache_read: 0.5,
+            cache_write: 6.25,
+            total: 36.75,
+        }
+    );
+    assert_eq!(anthropic_usage.cost, anthropic_cost);
 }
 
 #[test]

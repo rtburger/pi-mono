@@ -1,6 +1,6 @@
 use crate::{
     AiProvider, AssistantEventStream, CacheRetention, StreamOptions, get_env_api_key,
-    models::{get_model_headers, get_provider_headers},
+    models::{calculate_cost_for, get_model_headers, get_provider_headers},
     register_provider,
 };
 use async_stream::stream;
@@ -1025,6 +1025,11 @@ impl AnthropicStreamState {
             + self.output.usage.output
             + self.output.usage.cache_read
             + self.output.usage.cache_write;
+        calculate_cost_for(
+            self.output.provider.as_str(),
+            self.output.model.as_str(),
+            &mut self.output.usage,
+        );
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::{
     AiProvider, AssistantEventStream, StreamOptions,
-    models::{get_model_headers, get_provider_headers},
+    models::{calculate_cost_for, get_model_headers, get_provider_headers},
     register_provider,
     unicode::sanitize_provider_text,
 };
@@ -996,6 +996,11 @@ impl OpenAiCompletionsStreamState {
 
         if let Some(usage) = chunk.usage.as_ref() {
             self.output.usage = parse_chunk_usage(usage);
+            calculate_cost_for(
+                self.output.provider.as_str(),
+                self.output.model.as_str(),
+                &mut self.output.usage,
+            );
         }
 
         let Some(choice) = chunk.choices.first() else {
@@ -1006,6 +1011,11 @@ impl OpenAiCompletionsStreamState {
             && let Some(usage) = choice.usage.as_ref()
         {
             self.output.usage = parse_chunk_usage(usage);
+            calculate_cost_for(
+                self.output.provider.as_str(),
+                self.output.model.as_str(),
+                &mut self.output.usage,
+            );
         }
 
         if let Some(finish_reason) = choice.finish_reason.as_deref() {

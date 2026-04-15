@@ -8,7 +8,8 @@ mod unicode;
 mod partial_json;
 
 pub use models::{
-    built_in_models, get_model, get_models, get_providers, models_are_equal, supports_xhigh,
+    built_in_models, calculate_cost, get_model, get_models, get_providers, models_are_equal,
+    supports_xhigh,
 };
 pub use overflow::{is_context_overflow, overflow_patterns};
 

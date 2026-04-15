@@ -62,6 +62,7 @@ async fn streams_text_response_events() {
         AssistantEvent::Done { message, .. } => {
             assert_eq!(message.response_id.as_deref(), Some("chatcmpl-1"));
             assert_eq!(message.usage.total_tokens, 8);
+            assert!(message.usage.cost.total > 0.0);
             assert_eq!(
                 message.content,
                 vec![AssistantContent::Text {

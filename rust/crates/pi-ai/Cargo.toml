@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 async-stream.workspace = true
 futures.workspace = true
-json5 = "0.4"
 pi-events = { path = "../pi-events" }
 regex = "1"
 reqwest.workspace = true

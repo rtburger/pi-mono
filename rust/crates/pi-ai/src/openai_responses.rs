@@ -1,6 +1,6 @@
 use crate::{
     AiProvider, AssistantEventStream, StreamOptions,
-    models::{get_model_headers, get_provider_headers},
+    models::{calculate_cost_for, get_model_headers, get_provider_headers},
     register_provider,
 };
 use async_stream::stream;
@@ -1586,6 +1586,11 @@ fn apply_usage_from_response(
             .unwrap_or(input_tokens + output_tokens),
         ..Usage::default()
     };
+    calculate_cost_for(
+        output.provider.as_str(),
+        output.model.as_str(),
+        &mut output.usage,
+    );
 }
 
 fn map_response_status(status: Option<&str>) -> StopReason {

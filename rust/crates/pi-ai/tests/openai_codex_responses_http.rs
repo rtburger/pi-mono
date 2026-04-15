@@ -158,6 +158,7 @@ async fn dispatches_openai_codex_responses_through_registry_with_codex_headers()
             AssistantEvent::Done { message, .. } => {
                 saw_done = true;
                 assert_eq!(message.response_id.as_deref(), Some("resp_1"));
+                assert!(message.usage.cost.total > 0.0);
             }
             AssistantEvent::Error { error, .. } => {
                 panic!("unexpected error: {:?}", error.error_message)
@@ -192,6 +193,7 @@ async fn completes_after_response_completed_even_when_sse_body_stays_open() {
 
     assert_eq!(response.response_id.as_deref(), Some("resp_1"));
     assert_eq!(response.stop_reason, pi_events::StopReason::Stop);
+    assert!(response.usage.cost.total > 0.0);
 }
 
 #[tokio::test]

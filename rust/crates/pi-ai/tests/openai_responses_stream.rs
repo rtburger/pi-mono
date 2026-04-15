@@ -105,6 +105,7 @@ async fn streams_text_response_events() {
                     text_signature: Some(r#"{"v":1,"id":"msg_1"}"#.into()),
                 }]
             );
+            assert!(message.usage.cost.total > 0.0);
         }
         other => panic!("expected done event, got {other:?}"),
     }
@@ -179,6 +180,7 @@ async fn streams_tool_call_response_events() {
                 message.content[0],
                 pi_events::AssistantContent::ToolCall { .. }
             ));
+            assert!(message.usage.cost.total > 0.0);
         }
         _ => panic!("expected terminal done event"),
     }

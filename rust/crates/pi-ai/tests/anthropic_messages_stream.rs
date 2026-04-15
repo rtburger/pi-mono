@@ -173,6 +173,7 @@ async fn streams_text_thinking_and_tool_call_events() {
             assert_eq!(*reason, StopReason::ToolUse);
             assert_eq!(message.response_id.as_deref(), Some("msg_1"));
             assert_eq!(message.usage.total_tokens, 15);
+            assert!(message.usage.cost.total > 0.0);
             assert_eq!(
                 message.content,
                 vec![
