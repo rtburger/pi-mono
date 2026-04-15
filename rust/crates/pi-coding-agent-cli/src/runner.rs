@@ -1,15 +1,16 @@
 use crate::{
     AppMode, Args, Diagnostic, DiagnosticKind, ListModels, OverlayAuthSource, PrintModeOptions,
-    ProcessFileOptions, build_initial_message, list_models::render_list_models, parse_args,
-    process_file_arguments, resolve_app_mode, run_print_mode, to_print_output_mode,
+    PrintOutputMode, ProcessFileOptions, build_initial_message, list_models::render_list_models,
+    parse_args, process_file_arguments, resolve_app_mode, run_print_mode, to_print_output_mode,
 };
 use pi_agent::ThinkingLevel;
 use pi_ai::{StreamOptions, ThinkingBudgets, models_are_equal, supports_xhigh};
 use pi_coding_agent_core::{
     AuthSource, BootstrapDiagnosticLevel, CodingAgentCore, CodingAgentCoreError,
-    CodingAgentCoreOptions, FooterDataProvider, ModelRegistry, ScopedModel,
-    SessionBootstrapOptions, create_coding_agent_core, find_exact_model_reference_match,
-    resolve_cli_model, resolve_model_scope, resolve_prompt_input,
+    CodingAgentCoreOptions, ExistingSessionSelection, FooterDataProvider, ModelRegistry,
+    ScopedModel, SessionBootstrapOptions, SessionEntry, SessionHeader, SessionManager,
+    create_coding_agent_core, find_exact_model_reference_match, get_default_session_dir,
+    parse_thinking_level, resolve_cli_model, resolve_model_scope, resolve_prompt_input,
 };
 use pi_coding_agent_tui::{
     ExternalEditorCommandRunner, ExternalEditorHost, FooterStateHandle, InteractiveCoreBinding,
@@ -76,6 +77,192 @@ impl InteractiveRuntime {
             extension_editor_runner: None,
         }
     }
+}
+
+#[derive(Clone)]
+struct SessionSupport {
+    manager: Arc<Mutex<SessionManager>>,
+    header: SessionHeader,
+    restored_messages: Vec<pi_agent::AgentMessage>,
+    has_existing_messages: bool,
+    has_thinking_entry: bool,
+    existing_session: ExistingSessionSelection,
+    session_id: String,
+}
+
+fn create_session_support(
+    parsed: &Args,
+    cwd: &Path,
+    agent_dir: Option<&Path>,
+) -> Result<Option<SessionSupport>, String> {
+    let should_use_session_manager = parsed.no_session
+        || parsed.continue_session
+        || parsed.session.is_some()
+        || parsed.fork.is_some()
+        || parsed.session_dir.is_some()
+        || agent_dir.is_some();
+    if !should_use_session_manager {
+        return Ok(None);
+    }
+
+    if parsed.resume {
+        return Err(String::from(
+            "--resume is not supported in the Rust CLI yet. Use --continue or --session <path>.",
+        ));
+    }
+
+    let cwd_string = cwd.to_string_lossy().into_owned();
+    let session_dir = resolve_session_dir(parsed, cwd, agent_dir);
+    let session_manager = if parsed.no_session {
+        SessionManager::in_memory(&cwd_string)
+    } else if let Some(session) = parsed.session.as_deref() {
+        SessionManager::open(
+            &resolve_session_path(cwd, session),
+            session_dir.as_deref(),
+            None,
+        )
+        .map_err(|error| error.to_string())?
+    } else if let Some(fork) = parsed.fork.as_deref() {
+        SessionManager::fork_from(
+            &resolve_session_path(cwd, fork),
+            &cwd_string,
+            session_dir.as_deref(),
+        )
+        .map_err(|error| error.to_string())?
+    } else if parsed.continue_session {
+        SessionManager::continue_recent(&cwd_string, session_dir.as_deref())
+            .map_err(|error| error.to_string())?
+    } else {
+        SessionManager::create(&cwd_string, session_dir.as_deref())
+            .map_err(|error| error.to_string())?
+    };
+
+    Ok(Some(build_session_support(session_manager)))
+}
+
+fn resolve_session_dir(parsed: &Args, cwd: &Path, agent_dir: Option<&Path>) -> Option<String> {
+    if let Some(session_dir) = parsed.session_dir.as_deref() {
+        return Some(resolve_path_from_cwd(cwd, session_dir));
+    }
+
+    agent_dir.map(|agent_dir| {
+        get_default_session_dir(&cwd.to_string_lossy(), Some(&agent_dir.to_string_lossy()))
+    })
+}
+
+fn resolve_session_path(cwd: &Path, path: &str) -> String {
+    if Path::new(path).is_absolute() {
+        path.to_owned()
+    } else {
+        cwd.join(path).to_string_lossy().into_owned()
+    }
+}
+
+fn resolve_path_from_cwd(cwd: &Path, path: &str) -> String {
+    if Path::new(path).is_absolute() {
+        path.to_owned()
+    } else {
+        cwd.join(path).to_string_lossy().into_owned()
+    }
+}
+
+fn build_session_support(session_manager: SessionManager) -> SessionSupport {
+    let header = session_manager.get_header().clone();
+    let restored_context = session_manager.build_session_context();
+    let has_existing_messages = !restored_context.messages.is_empty();
+    let has_thinking_entry = session_manager
+        .get_branch(session_manager.get_leaf_id())
+        .iter()
+        .any(|entry| matches!(entry, SessionEntry::ThinkingLevelChange { .. }));
+    let existing_session = ExistingSessionSelection {
+        has_messages: has_existing_messages,
+        saved_model_provider: restored_context
+            .model
+            .as_ref()
+            .map(|model| model.provider.clone()),
+        saved_model_id: restored_context
+            .model
+            .as_ref()
+            .map(|model| model.model_id.clone()),
+        saved_thinking_level: parse_thinking_level(&restored_context.thinking_level),
+        has_thinking_entry,
+    };
+    let session_id = session_manager.get_session_id().to_owned();
+
+    SessionSupport {
+        manager: Arc::new(Mutex::new(session_manager)),
+        header,
+        restored_messages: restored_context.messages,
+        has_existing_messages,
+        has_thinking_entry,
+        existing_session,
+        session_id,
+    }
+}
+
+fn apply_session_support(
+    core: &CodingAgentCore,
+    session_support: &SessionSupport,
+) -> Result<(), String> {
+    core.agent()
+        .set_session_id(Some(session_support.session_id.clone()));
+
+    if !session_support.restored_messages.is_empty() {
+        let restored_messages = session_support.restored_messages.clone();
+        core.agent().update_state(move |state| {
+            state.messages = restored_messages;
+        });
+    }
+
+    let state = core.state();
+    {
+        let mut session_manager = session_support
+            .manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        if session_support.has_existing_messages {
+            if !session_support.has_thinking_entry {
+                session_manager
+                    .append_thinking_level_change(thinking_level_label(state.thinking_level))
+                    .map_err(|error| error.to_string())?;
+            }
+        } else {
+            session_manager
+                .append_model_change(state.model.provider.clone(), state.model.id.clone())
+                .map_err(|error| error.to_string())?;
+            session_manager
+                .append_thinking_level_change(thinking_level_label(state.thinking_level))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
+    let session_manager = session_support.manager.clone();
+    let _ = core.agent().subscribe(move |event, _signal| {
+        let session_manager = session_manager.clone();
+        Box::pin(async move {
+            if let pi_agent::AgentEvent::MessageEnd { message } = event {
+                let _ = session_manager
+                    .lock()
+                    .expect("session manager mutex poisoned")
+                    .append_message(message);
+            }
+        })
+    });
+
+    Ok(())
+}
+
+fn session_header_json_line(header: &SessionHeader) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "type": "session",
+        "version": header.version,
+        "id": header.id,
+        "timestamp": header.timestamp,
+        "cwd": header.cwd,
+        "parentSession": header.parent_session,
+    }))
+    .expect("session header serialization should succeed")
+        + "\n"
 }
 
 #[derive(Clone)]
@@ -435,6 +622,13 @@ async fn run_interactive_command_with_runtime(
         Vec::new()
     };
     let interactive_scoped_models = scoped_models.clone();
+    let session_support = match create_session_support(&parsed, &cwd, agent_dir.as_deref()) {
+        Ok(session_support) => session_support,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            return 1;
+        }
+    };
 
     let stdin_content = normalize_stdin_content(stdin_is_tty, stdin_content);
     let processed_files = match process_file_arguments(
@@ -471,6 +665,11 @@ async fn run_interactive_command_with_runtime(
         return 1;
     }
 
+    let mut stream_options = stream_options;
+    if let Some(session_support) = session_support.as_ref() {
+        stream_options.session_id = Some(session_support.session_id.clone());
+    }
+
     let created = create_coding_agent_core(CodingAgentCoreOptions {
         auth_source: Arc::new(overlay_auth),
         built_in_models,
@@ -487,6 +686,10 @@ async fn run_interactive_command_with_runtime(
             cli_model: parsed.model.clone(),
             cli_thinking_level: parsed.thinking,
             scoped_models,
+            existing_session: session_support
+                .as_ref()
+                .map(|session_support| session_support.existing_session.clone())
+                .unwrap_or_default(),
             ..SessionBootstrapOptions::default()
         },
         stream_options,
@@ -503,6 +706,13 @@ async fn run_interactive_command_with_runtime(
             return 1;
         }
     };
+
+    if let Some(session_support) = session_support.as_ref()
+        && let Err(error) = apply_session_support(&created.core, session_support)
+    {
+        eprintln!("Error: {error}");
+        return 1;
+    }
 
     created
         .core
@@ -525,6 +735,10 @@ async fn run_interactive_command_with_runtime(
     {
         return 1;
     }
+
+    let interactive_session_manager = session_support
+        .as_ref()
+        .map(|support| support.manager.clone());
 
     let mut keybindings = match &agent_dir {
         Some(agent_dir) => KeybindingsManager::create(agent_dir),
@@ -578,6 +792,7 @@ async fn run_interactive_command_with_runtime(
         created.core.clone(),
         created.core.model_registry(),
         interactive_scoped_models,
+        interactive_session_manager,
         status_handle,
         footer_state_handle,
         Arc::clone(&exit_requested),
@@ -729,6 +944,17 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
     } else {
         Vec::new()
     };
+    let session_support = match create_session_support(&parsed, &cwd, agent_dir.as_deref()) {
+        Ok(session_support) => session_support,
+        Err(error) => {
+            push_line(&mut stderr, &format!("Error: {error}"));
+            return RunCommandResult {
+                exit_code: 1,
+                stdout,
+                stderr,
+            };
+        }
+    };
 
     let stdin_content = normalize_stdin_content(stdin_is_tty, stdin_content);
     let processed_files = match process_file_arguments(
@@ -773,11 +999,16 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         };
     }
 
+    let mut stream_options = stream_options;
+    if let Some(session_support) = session_support.as_ref() {
+        stream_options.session_id = Some(session_support.session_id.clone());
+    }
+
     let created = create_coding_agent_core(CodingAgentCoreOptions {
         auth_source: Arc::new(overlay_auth),
         built_in_models,
         models_json_path: models_json_path.clone(),
-        cwd: Some(cwd),
+        cwd: Some(cwd.clone()),
         tools: None,
         system_prompt: resolve_system_prompt(
             &default_system_prompt,
@@ -789,6 +1020,10 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
             cli_model: parsed.model.clone(),
             cli_thinking_level: parsed.thinking,
             scoped_models,
+            existing_session: session_support
+                .as_ref()
+                .map(|session_support| session_support.existing_session.clone())
+                .unwrap_or_default(),
             ..SessionBootstrapOptions::default()
         },
         stream_options,
@@ -814,6 +1049,17 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         }
     };
 
+    if let Some(session_support) = session_support.as_ref()
+        && let Err(error) = apply_session_support(&created.core, session_support)
+    {
+        push_line(&mut stderr, &format!("Error: {error}"));
+        return RunCommandResult {
+            exit_code: 1,
+            stdout,
+            stderr,
+        };
+    }
+
     created
         .core
         .set_auto_resize_images(runtime_settings.settings.images.auto_resize_images);
@@ -837,6 +1083,14 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         };
     }
 
+    let json_session_header = if print_mode == PrintOutputMode::Json {
+        session_support
+            .as_ref()
+            .map(|session_support| session_header_json_line(&session_support.header))
+    } else {
+        None
+    };
+
     let run_result = run_print_mode(
         &created.core,
         PrintModeOptions {
@@ -848,6 +1102,9 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
     )
     .await;
 
+    if let Some(header) = json_session_header {
+        stdout.push_str(&header);
+    }
     stdout.push_str(&run_result.stdout);
     stderr.push_str(&run_result.stderr);
 
@@ -1069,6 +1326,7 @@ fn install_interactive_submit_handler(
     core: CodingAgentCore,
     model_registry: Arc<ModelRegistry>,
     scoped_models: Vec<ScopedModel>,
+    session_manager: Option<Arc<Mutex<SessionManager>>>,
     status_handle: StatusHandle,
     footer_state_handle: FooterStateHandle,
     exit_requested: Arc<AtomicBool>,
@@ -1076,6 +1334,7 @@ fn install_interactive_submit_handler(
     let cycle_forward_core = core.clone();
     let cycle_forward_model_registry = Arc::clone(&model_registry);
     let cycle_forward_scoped_models = scoped_models.clone();
+    let cycle_forward_session_manager = session_manager.clone();
     let cycle_forward_status_handle = status_handle.clone();
     let cycle_forward_footer_state_handle = footer_state_handle.clone();
     shell.on_action("app.model.cycleForward", move || {
@@ -1084,6 +1343,7 @@ fn install_interactive_submit_handler(
             &cycle_forward_core,
             cycle_forward_model_registry.as_ref(),
             &cycle_forward_scoped_models,
+            cycle_forward_session_manager.as_ref(),
             &cycle_forward_status_handle,
             &cycle_forward_footer_state_handle,
         );
@@ -1092,6 +1352,7 @@ fn install_interactive_submit_handler(
     let cycle_backward_core = core.clone();
     let cycle_backward_model_registry = Arc::clone(&model_registry);
     let cycle_backward_scoped_models = scoped_models.clone();
+    let cycle_backward_session_manager = session_manager.clone();
     let cycle_backward_status_handle = status_handle.clone();
     let cycle_backward_footer_state_handle = footer_state_handle.clone();
     shell.on_action("app.model.cycleBackward", move || {
@@ -1100,6 +1361,7 @@ fn install_interactive_submit_handler(
             &cycle_backward_core,
             cycle_backward_model_registry.as_ref(),
             &cycle_backward_scoped_models,
+            cycle_backward_session_manager.as_ref(),
             &cycle_backward_status_handle,
             &cycle_backward_footer_state_handle,
         );
@@ -1108,6 +1370,7 @@ fn install_interactive_submit_handler(
     let action_core = core.clone();
     let action_model_registry = Arc::clone(&model_registry);
     let action_scoped_models = scoped_models.clone();
+    let action_session_manager = session_manager.clone();
     let action_status_handle = status_handle.clone();
     let action_footer_state_handle = footer_state_handle.clone();
     shell.on_action_with_shell("app.model.select", move |shell| {
@@ -1123,6 +1386,7 @@ fn install_interactive_submit_handler(
             &action_core,
             action_model_registry.as_ref(),
             &action_scoped_models,
+            action_session_manager.as_ref(),
             &action_status_handle,
             &action_footer_state_handle,
             None,
@@ -1141,6 +1405,7 @@ fn install_interactive_submit_handler(
             &core,
             model_registry.as_ref(),
             &scoped_models,
+            session_manager.as_ref(),
             &status_handle,
             &footer_state_handle,
             &exit_requested,
@@ -1164,6 +1429,7 @@ fn handle_interactive_model_cycle(
     core: &CodingAgentCore,
     model_registry: &ModelRegistry,
     scoped_models: &[ScopedModel],
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
     status_handle: &StatusHandle,
     footer_state_handle: &FooterStateHandle,
 ) {
@@ -1174,7 +1440,13 @@ fn handle_interactive_model_cycle(
         return;
     }
 
-    match cycle_interactive_model(core, model_registry, scoped_models, direction) {
+    match cycle_interactive_model(
+        core,
+        model_registry,
+        scoped_models,
+        session_manager,
+        direction,
+    ) {
         Ok(Some(result)) => {
             update_interactive_footer_state(footer_state_handle, core);
             let model_name = if result.model.name.is_empty() {
@@ -1211,6 +1483,7 @@ fn handle_interactive_slash_command(
     core: &CodingAgentCore,
     model_registry: &ModelRegistry,
     scoped_models: &[ScopedModel],
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
     status_handle: &StatusHandle,
     footer_state_handle: &FooterStateHandle,
     exit_requested: &Arc<AtomicBool>,
@@ -1235,7 +1508,7 @@ fn handle_interactive_slash_command(
             .then(|| find_exact_model_reference_match(search_term, &candidates))
             .flatten()
         {
-            if let Err(error) = switch_interactive_model(core, &model) {
+            if let Err(error) = switch_interactive_model(core, &model, session_manager) {
                 status_handle.set_message(format!("Error: {error}"));
                 return true;
             }
@@ -1250,6 +1523,7 @@ fn handle_interactive_slash_command(
             core,
             model_registry,
             scoped_models,
+            session_manager,
             status_handle,
             footer_state_handle,
             (!search_term.is_empty()).then_some(search_term),
@@ -1265,6 +1539,7 @@ fn show_interactive_model_selector(
     core: &CodingAgentCore,
     model_registry: &ModelRegistry,
     scoped_models: &[ScopedModel],
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
     status_handle: &StatusHandle,
     footer_state_handle: &FooterStateHandle,
     initial_search: Option<&str>,
@@ -1272,6 +1547,7 @@ fn show_interactive_model_selector(
     let current_model = Some(core.state().model.clone());
     let models = current_interactive_model_candidates(model_registry, scoped_models);
     let core = core.clone();
+    let session_manager = session_manager.cloned();
     let status_handle_for_select = status_handle.clone();
     let footer_state_handle_for_select = footer_state_handle.clone();
 
@@ -1280,7 +1556,7 @@ fn show_interactive_model_selector(
         models,
         initial_search,
         move |model| {
-            if let Err(error) = switch_interactive_model(&core, &model) {
+            if let Err(error) = switch_interactive_model(&core, &model, session_manager.as_ref()) {
                 status_handle_for_select.set_message(format!("Error: {error}"));
                 return;
             }
@@ -1296,6 +1572,7 @@ fn cycle_interactive_model(
     core: &CodingAgentCore,
     model_registry: &ModelRegistry,
     scoped_models: &[ScopedModel],
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
     direction: &str,
 ) -> Result<Option<InteractiveModelCycleResult>, String> {
     if !scoped_models.is_empty() {
@@ -1319,7 +1596,7 @@ fn cycle_interactive_model(
             _ => (current_index + 1) % scoped_candidates.len(),
         };
         let next = scoped_candidates[next_index];
-        apply_interactive_model_state(core, &next.model, next.thinking_level)?;
+        apply_interactive_model_state(core, &next.model, next.thinking_level, session_manager)?;
 
         let state = core.state();
         return Ok(Some(InteractiveModelCycleResult {
@@ -1343,7 +1620,7 @@ fn cycle_interactive_model(
         _ => (current_index + 1) % available_models.len(),
     };
     let next_model = available_models[next_index].clone();
-    apply_interactive_model_state(core, &next_model, None)?;
+    apply_interactive_model_state(core, &next_model, None, session_manager)?;
 
     let state = core.state();
     Ok(Some(InteractiveModelCycleResult {
@@ -1368,22 +1645,48 @@ fn apply_interactive_model_state(
     core: &CodingAgentCore,
     model: &Model,
     thinking_level_override: Option<ThinkingLevel>,
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
 ) -> Result<(), String> {
     if !core.model_registry().has_configured_auth(model) {
         return Err(format!("No API key for {}/{}", model.provider, model.id));
     }
 
+    let state = core.state();
+    let next_thinking_level = clamp_interactive_thinking_level(
+        thinking_level_override.unwrap_or(state.thinking_level),
+        model,
+    );
+
+    if let Some(session_manager) = session_manager {
+        let mut session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        if !models_are_equal(Some(model), Some(&state.model)) {
+            session_manager
+                .append_model_change(model.provider.clone(), model.id.clone())
+                .map_err(|error| error.to_string())?;
+        }
+        if next_thinking_level != state.thinking_level {
+            session_manager
+                .append_thinking_level_change(thinking_level_label(next_thinking_level))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
     let next_model = model.clone();
     core.agent().update_state(move |state| {
-        let thinking_level = thinking_level_override.unwrap_or(state.thinking_level);
         state.model = next_model.clone();
-        state.thinking_level = clamp_interactive_thinking_level(thinking_level, &state.model);
+        state.thinking_level = next_thinking_level;
     });
     Ok(())
 }
 
-fn switch_interactive_model(core: &CodingAgentCore, model: &Model) -> Result<(), String> {
-    apply_interactive_model_state(core, model, None)
+fn switch_interactive_model(
+    core: &CodingAgentCore,
+    model: &Model,
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
+) -> Result<(), String> {
+    apply_interactive_model_state(core, model, None, session_manager)
 }
 
 fn clamp_interactive_thinking_level(level: ThinkingLevel, model: &Model) -> ThinkingLevel {
@@ -1480,15 +1783,9 @@ fn unsupported_flag_message(parsed: &Args) -> Option<String> {
             "--export is not supported in the Rust CLI yet",
         ));
     }
-    if parsed.continue_session
-        || parsed.resume
-        || parsed.no_session
-        || parsed.session.is_some()
-        || parsed.fork.is_some()
-        || parsed.session_dir.is_some()
-    {
+    if parsed.resume {
         return Some(String::from(
-            "Session flags are not supported in the Rust CLI yet",
+            "--resume is not supported in the Rust CLI yet. Use --continue or --session <path>.",
         ));
     }
     if parsed.no_tools
@@ -1526,14 +1823,16 @@ fn render_help() -> String {
         "Supported today:",
         "  - non-interactive text mode (-p / piped stdin)",
         "  - non-interactive json mode (--mode json)",
+        "  - interactive mode",
         "  - --provider, --model, --models, --api-key, --system-prompt, --append-system-prompt, --thinking",
+        "  - --continue, --session, --fork, --no-session, --session-dir",
         "  - --list-models [search]",
         "  - @file text/image preprocessing",
         "",
         "Not yet supported:",
-        "  - interactive mode",
+        "  - --resume session picker",
         "  - rpc mode",
-        "  - sessions, export",
+        "  - export",
     ]
     .join("\n")
 }

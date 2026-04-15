@@ -332,6 +332,167 @@ async fn run_command_applies_cli_api_key_override_to_stream_options() {
 }
 
 #[tokio::test]
+async fn run_command_continue_restores_previous_session_context() {
+    let provider = unique_name("provider");
+    let model_id = unique_name("model");
+    let (api, recorded) = register_recording_provider("continued");
+    let built_in_model = model(&api, &provider, &model_id);
+    let cwd = unique_temp_dir("runner-continue-session");
+    let session_dir = cwd.join("sessions");
+    let auth_source = Arc::new(MemoryAuthStorage::with_api_keys([(
+        provider.as_str(),
+        "token",
+    )]));
+
+    let first = run_command(RunCommandOptions {
+        args: vec![
+            String::from("-p"),
+            String::from("--provider"),
+            provider.clone(),
+            String::from("--model"),
+            model_id.clone(),
+            String::from("--session-dir"),
+            session_dir.to_string_lossy().into_owned(),
+            String::from("first turn"),
+        ],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: auth_source.clone(),
+        built_in_models: vec![built_in_model.clone()],
+        models_json_path: None,
+        agent_dir: None,
+        cwd: cwd.clone(),
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(first.exit_code, 0);
+    assert_eq!(first.stdout, "continued\n");
+
+    let second = run_command(RunCommandOptions {
+        args: vec![
+            String::from("-p"),
+            String::from("--continue"),
+            String::from("--provider"),
+            provider.clone(),
+            String::from("--model"),
+            model_id.clone(),
+            String::from("--session-dir"),
+            session_dir.to_string_lossy().into_owned(),
+            String::from("second turn"),
+        ],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source,
+        built_in_models: vec![built_in_model],
+        models_json_path: None,
+        agent_dir: None,
+        cwd,
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(second.exit_code, 0);
+    assert_eq!(second.stdout, "continued\n");
+
+    let request = recorded.lock().unwrap().clone();
+    let context = request.context.expect("expected recorded context");
+    assert_eq!(context.messages.len(), 3);
+    match &context.messages[0] {
+        pi_events::Message::User { content, .. } => {
+            assert_eq!(
+                content,
+                &vec![UserContent::Text {
+                    text: String::from("first turn"),
+                }]
+            );
+        }
+        other => panic!("expected initial user message, got {other:?}"),
+    }
+    match &context.messages[1] {
+        pi_events::Message::Assistant { content, .. } => {
+            assert!(matches!(
+                content.as_slice(),
+                [AssistantContent::Text { text, .. }] if text == "continued"
+            ));
+        }
+        other => panic!("expected restored assistant message, got {other:?}"),
+    }
+    match &context.messages[2] {
+        pi_events::Message::User { content, .. } => {
+            assert_eq!(
+                content,
+                &vec![UserContent::Text {
+                    text: String::from("second turn"),
+                }]
+            );
+        }
+        other => panic!("expected follow-up user message, got {other:?}"),
+    }
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
+async fn run_command_json_mode_emits_session_header_before_events() {
+    let provider = unique_name("provider");
+    let model_id = unique_name("model");
+    let (api, _recorded) = register_recording_provider("json");
+    let built_in_model = model(&api, &provider, &model_id);
+    let cwd = unique_temp_dir("runner-json-session-header");
+    let session_dir = cwd.join("sessions");
+
+    let result = run_command(RunCommandOptions {
+        args: vec![
+            String::from("--mode"),
+            String::from("json"),
+            String::from("--provider"),
+            provider.clone(),
+            String::from("--model"),
+            model_id.clone(),
+            String::from("--session-dir"),
+            session_dir.to_string_lossy().into_owned(),
+            String::from("hello"),
+        ],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            provider.as_str(),
+            "token",
+        )])),
+        built_in_models: vec![built_in_model],
+        models_json_path: None,
+        agent_dir: None,
+        cwd,
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+    let lines = result.stdout.lines().collect::<Vec<_>>();
+    assert!(lines.len() >= 2, "stdout: {}", result.stdout);
+
+    let header: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(
+        header.get("type").and_then(|value| value.as_str()),
+        Some("session")
+    );
+    let first_event: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(
+        first_event.get("type").and_then(|value| value.as_str()),
+        Some("agent_start")
+    );
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
 async fn run_command_uses_pi_ai_built_in_model_catalog() {
     register_builtin_providers();
     let _ = stream_response(
