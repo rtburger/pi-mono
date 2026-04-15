@@ -8,23 +8,26 @@ use pi_agent::ThinkingLevel;
 use pi_ai::{StreamOptions, ThinkingBudgets, models_are_equal, supports_xhigh};
 use pi_coding_agent_core::{
     AuthSource, BootstrapDiagnosticLevel, CodingAgentCore, CodingAgentCoreError,
-    CodingAgentCoreOptions, ExistingSessionSelection, FooterDataProvider, ModelRegistry,
-    ScopedModel, SessionBootstrapOptions, SessionEntry, SessionHeader, SessionInfo, SessionManager,
-    create_coding_agent_core, find_exact_model_reference_match, get_default_session_dir,
-    parse_thinking_level, resolve_cli_model, resolve_model_scope, resolve_prompt_input,
+    CodingAgentCoreOptions, CustomMessage, CustomMessageContent, ExistingSessionSelection,
+    FooterDataProvider, ModelRegistry, NewSessionOptions, ScopedModel, SessionBootstrapOptions,
+    SessionEntry, SessionHeader, SessionInfo, SessionManager, create_coding_agent_core,
+    find_exact_model_reference_match, get_default_session_dir, parse_thinking_level,
+    resolve_cli_model, resolve_model_scope, resolve_prompt_input,
 };
 use pi_coding_agent_tui::{
-    ExternalEditorCommandRunner, ExternalEditorHost, FooterStateHandle, InteractiveCoreBinding,
-    KeybindingsManager, PlainKeyHintStyler, StartupShellComponent, StatusHandle,
+    CustomMessageComponent, ExternalEditorCommandRunner, ExternalEditorHost, FooterStateHandle,
+    InteractiveCoreBinding, KeybindingsManager, PlainKeyHintStyler, StartupShellComponent,
+    StatusHandle,
 };
 use pi_config::{ThinkingBudgetsSettings, load_runtime_settings};
-use pi_events::{Message, Model, UserContent};
+use pi_events::{AssistantContent, Message, Model, UserContent};
 use pi_tui::{
-    AutocompleteItem, CombinedAutocompleteProvider, ProcessTerminal, RenderHandle, SlashCommand,
-    Terminal, Tui, TuiError, fuzzy_filter,
+    AutocompleteItem, CombinedAutocompleteProvider, Component, ProcessTerminal, RenderHandle,
+    SlashCommand, Terminal, Tui, TuiError, fuzzy_filter, matches_key, truncate_to_width,
 };
 use std::{
     borrow::Cow,
+    cell::Cell,
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{
@@ -64,6 +67,7 @@ type InteractiveTerminalFactory = Arc<dyn Fn() -> Box<dyn Terminal + Send> + Sen
 type SharedInputHandler = Arc<Mutex<Box<dyn FnMut(String) + Send>>>;
 type SharedResizeHandler = Arc<Mutex<Box<dyn FnMut() + Send>>>;
 
+#[derive(Clone)]
 struct InteractiveRuntime {
     terminal_factory: InteractiveTerminalFactory,
     extension_editor_command: Option<String>,
@@ -91,12 +95,91 @@ struct SessionSupport {
     session_id: String,
 }
 
+#[derive(Debug, Clone)]
+enum InteractiveTransitionRequest {
+    NewSession,
+    ResumePicker,
+    ForkPicker,
+}
+
+#[derive(Debug, Clone)]
+struct BootstrapDefaults {
+    provider: String,
+    model_id: String,
+    thinking_level: ThinkingLevel,
+}
+
+impl BootstrapDefaults {
+    fn from_model(model: &Model, thinking_level: ThinkingLevel) -> Self {
+        Self {
+            provider: model.provider.clone(),
+            model_id: model.id.clone(),
+            thinking_level,
+        }
+    }
+}
+
+struct InteractiveIterationOptions {
+    parsed: Args,
+    stdin_is_tty: bool,
+    stdin_content: Option<String>,
+    auth_source: Arc<dyn AuthSource>,
+    built_in_models: Vec<Model>,
+    models_json_path: Option<PathBuf>,
+    agent_dir: Option<PathBuf>,
+    cwd: PathBuf,
+    default_system_prompt: String,
+    version: String,
+    stream_options: StreamOptions,
+    runtime: InteractiveRuntime,
+    manager_override: Option<SessionManager>,
+    show_resume_picker: bool,
+    prefill_input: Option<String>,
+    initial_status_message: Option<String>,
+    bootstrap_defaults: Option<BootstrapDefaults>,
+}
+
+struct InteractiveIterationOutcome {
+    exit_code: i32,
+    transition: Option<InteractiveTransitionRequest>,
+    session_context: Option<InteractiveSessionContext>,
+}
+
+struct InteractiveSessionContext {
+    manager: Option<SessionManager>,
+    session_file: Option<String>,
+    session_dir: Option<String>,
+    cwd: String,
+    model: Model,
+    thinking_level: ThinkingLevel,
+}
+
+struct InteractiveTransitionPlan {
+    manager: Option<SessionManager>,
+    cwd: PathBuf,
+    prefill_input: Option<String>,
+    initial_status_message: Option<String>,
+    bootstrap_defaults: Option<BootstrapDefaults>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ForkMessageCandidate {
+    entry_id: String,
+    parent_id: Option<String>,
+    text: String,
+}
+
 fn create_session_support(
     parsed: &Args,
     cwd: &Path,
     agent_dir: Option<&Path>,
     resume_session_path: Option<&str>,
+    manager_override: Option<SessionManager>,
 ) -> Result<Option<SessionSupport>, String> {
+    if let Some(session_manager) = manager_override {
+        return Ok(Some(build_session_support(session_manager)));
+    }
+
     let should_use_session_manager = parsed.no_session
         || parsed.continue_session
         || parsed.session.is_some()
@@ -660,6 +743,103 @@ async fn run_interactive_command_with_runtime(
         return result.exit_code;
     }
 
+    let mut current_cwd = cwd;
+    let mut use_initial_input = true;
+    let mut manager_override = None;
+    let mut prefill_input = None;
+    let mut initial_status_message = None;
+    let mut bootstrap_defaults = None;
+    let initial_show_resume_picker = parsed.resume
+        && !parsed.no_session
+        && parsed.session.is_none()
+        && parsed.fork.is_none()
+        && !parsed.continue_session;
+
+    loop {
+        let parsed_for_iteration = if use_initial_input {
+            parsed.clone()
+        } else {
+            sanitize_interactive_follow_up_args(&parsed)
+        };
+        let stdin_content_for_iteration = if use_initial_input {
+            stdin_content.clone()
+        } else {
+            None
+        };
+
+        let outcome = run_interactive_iteration(InteractiveIterationOptions {
+            parsed: parsed_for_iteration,
+            stdin_is_tty,
+            stdin_content: stdin_content_for_iteration,
+            auth_source: auth_source.clone(),
+            built_in_models: built_in_models.clone(),
+            models_json_path: models_json_path.clone(),
+            agent_dir: agent_dir.clone(),
+            cwd: current_cwd.clone(),
+            default_system_prompt: default_system_prompt.clone(),
+            version: version.clone(),
+            stream_options: stream_options.clone(),
+            runtime: runtime.clone(),
+            manager_override: manager_override.take(),
+            show_resume_picker: use_initial_input && initial_show_resume_picker,
+            prefill_input: prefill_input.take(),
+            initial_status_message: initial_status_message.take(),
+            bootstrap_defaults: bootstrap_defaults.take(),
+        })
+        .await;
+
+        let Some(transition) = outcome.transition else {
+            return outcome.exit_code;
+        };
+
+        let plan = match resolve_interactive_transition(
+            transition,
+            outcome.session_context,
+            &current_cwd,
+            agent_dir.as_deref(),
+            &runtime,
+        )
+        .await
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                eprintln!("Error: {error}");
+                return 1;
+            }
+        };
+
+        current_cwd = plan.cwd;
+        manager_override = plan.manager;
+        prefill_input = plan.prefill_input;
+        initial_status_message = plan.initial_status_message;
+        bootstrap_defaults = plan.bootstrap_defaults;
+        use_initial_input = false;
+    }
+}
+
+async fn run_interactive_iteration(
+    options: InteractiveIterationOptions,
+) -> InteractiveIterationOutcome {
+    let InteractiveIterationOptions {
+        parsed,
+        stdin_is_tty,
+        stdin_content,
+        auth_source,
+        built_in_models,
+        models_json_path,
+        agent_dir,
+        cwd,
+        default_system_prompt,
+        version,
+        stream_options,
+        runtime,
+        manager_override,
+        show_resume_picker,
+        prefill_input,
+        initial_status_message,
+        bootstrap_defaults,
+    } = options;
+
     let runtime_settings = agent_dir
         .as_deref()
         .map(|agent_dir| load_runtime_settings(&cwd, agent_dir))
@@ -680,21 +860,11 @@ async fn run_interactive_command_with_runtime(
     };
     let interactive_scoped_models = scoped_models.clone();
 
-    let mut keybindings = match &agent_dir {
-        Some(agent_dir) => KeybindingsManager::create(agent_dir),
-        None => KeybindingsManager::new(BTreeMap::new(), None),
-    };
-    keybindings.reload();
-
+    let keybindings = create_keybindings_manager(agent_dir.as_deref());
     let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
     let mut tui = Tui::new(terminal.clone());
     let mut resume_picker_was_shown = false;
-    let should_show_resume_picker = parsed.resume
-        && !parsed.no_session
-        && parsed.session.is_none()
-        && parsed.fork.is_none()
-        && !parsed.continue_session;
-    let selected_resume_session = if should_show_resume_picker {
+    let selected_resume_session = if show_resume_picker {
         let cwd_string = cwd.to_string_lossy().into_owned();
         let session_dir = resolve_session_dir(&parsed, &cwd, agent_dir.as_deref());
         let agent_dir_string = agent_dir
@@ -709,12 +879,20 @@ async fn run_interactive_command_with_runtime(
             Ok(None) => {
                 let _ = tui.stop();
                 println!("No session selected");
-                return 0;
+                return InteractiveIterationOutcome {
+                    exit_code: 0,
+                    transition: None,
+                    session_context: None,
+                };
             }
             Err(error) => {
                 let _ = tui.stop();
                 eprintln!("Error: {error}");
-                return 1;
+                return InteractiveIterationOutcome {
+                    exit_code: 1,
+                    transition: None,
+                    session_context: None,
+                };
             }
         }
     } else {
@@ -726,12 +904,17 @@ async fn run_interactive_command_with_runtime(
         &cwd,
         agent_dir.as_deref(),
         selected_resume_session.as_deref(),
+        manager_override,
     ) {
         Ok(session_support) => session_support,
         Err(error) => {
             let _ = tui.stop();
             eprintln!("Error: {error}");
-            return 1;
+            return InteractiveIterationOutcome {
+                exit_code: 1,
+                transition: None,
+                session_context: None,
+            };
         }
     };
 
@@ -747,7 +930,11 @@ async fn run_interactive_command_with_runtime(
         Err(error) => {
             let _ = tui.stop();
             eprintln!("Error: {error}");
-            return 1;
+            return InteractiveIterationOutcome {
+                exit_code: 1,
+                transition: None,
+                session_context: None,
+            };
         }
     };
 
@@ -769,7 +956,11 @@ async fn run_interactive_command_with_runtime(
     ) {
         let _ = tui.stop();
         eprintln!("Error: {error}");
-        return 1;
+        return InteractiveIterationOutcome {
+            exit_code: 1,
+            transition: None,
+            session_context: None,
+        };
     }
 
     let mut stream_options = stream_options;
@@ -793,11 +984,19 @@ async fn run_interactive_command_with_runtime(
             cli_model: parsed.model.clone(),
             cli_thinking_level: parsed.thinking,
             scoped_models,
+            default_provider: bootstrap_defaults
+                .as_ref()
+                .map(|defaults| defaults.provider.clone()),
+            default_model_id: bootstrap_defaults
+                .as_ref()
+                .map(|defaults| defaults.model_id.clone()),
+            default_thinking_level: bootstrap_defaults
+                .as_ref()
+                .map(|defaults| defaults.thinking_level),
             existing_session: session_support
                 .as_ref()
                 .map(|session_support| session_support.existing_session.clone())
                 .unwrap_or_default(),
-            ..SessionBootstrapOptions::default()
         },
         stream_options,
     });
@@ -807,12 +1006,20 @@ async fn run_interactive_command_with_runtime(
         Err(CodingAgentCoreError::NoModelAvailable) => {
             let _ = tui.stop();
             eprint!("{}", render_no_models_message(models_json_path.as_deref()));
-            return 1;
+            return InteractiveIterationOutcome {
+                exit_code: 1,
+                transition: None,
+                session_context: None,
+            };
         }
         Err(error) => {
             let _ = tui.stop();
             eprintln!("Error: {error}");
-            return 1;
+            return InteractiveIterationOutcome {
+                exit_code: 1,
+                transition: None,
+                session_context: None,
+            };
         }
     };
 
@@ -821,7 +1028,11 @@ async fn run_interactive_command_with_runtime(
     {
         let _ = tui.stop();
         eprintln!("Error: {error}");
-        return 1;
+        return InteractiveIterationOutcome {
+            exit_code: 1,
+            transition: None,
+            session_context: None,
+        };
     }
 
     created
@@ -844,7 +1055,11 @@ async fn run_interactive_command_with_runtime(
         .any(|diagnostic| diagnostic.level == BootstrapDiagnosticLevel::Error)
     {
         let _ = tui.stop();
-        return 1;
+        return InteractiveIterationOutcome {
+            exit_code: 1,
+            transition: None,
+            session_context: None,
+        };
     }
 
     let interactive_session_manager = session_support
@@ -869,6 +1084,13 @@ async fn run_interactive_command_with_runtime(
         ),
         cwd.clone(),
     )));
+    if let Some(prefill_input) = prefill_input {
+        shell.set_input_value(prefill_input.clone());
+        shell.set_input_cursor(prefill_input.len());
+    }
+    if let Some(initial_status_message) = initial_status_message {
+        shell.set_status_message(initial_status_message);
+    }
 
     let exit_requested = Arc::new(AtomicBool::new(false));
     let exit_requested_for_shell = Arc::clone(&exit_requested);
@@ -876,12 +1098,13 @@ async fn run_interactive_command_with_runtime(
         exit_requested_for_shell.store(true, Ordering::Relaxed);
     });
 
+    let transition_request = Arc::new(Mutex::new(None::<InteractiveTransitionRequest>));
     let footer_provider = FooterDataProvider::new(&cwd);
     let render_handle = tui.render_handle();
-    if let Some(command) = runtime.extension_editor_command {
+    if let Some(command) = runtime.extension_editor_command.clone() {
         shell.set_extension_editor_command(command);
     }
-    if let Some(runner) = runtime.extension_editor_runner {
+    if let Some(runner) = runtime.extension_editor_runner.clone() {
         shell.set_extension_editor_command_runner_arc(runner);
     }
     shell.set_extension_editor_host(terminal.external_editor_host(render_handle.clone()));
@@ -890,6 +1113,11 @@ async fn run_interactive_command_with_runtime(
         InteractiveCoreBinding::bind(created.core.clone(), &mut shell, render_handle.clone());
     let status_handle = shell.status_handle_with_render_handle(render_handle.clone());
     let footer_state_handle = shell.footer_state_handle_with_render_handle(render_handle);
+    update_interactive_footer_state(
+        &footer_state_handle,
+        &created.core,
+        interactive_session_manager.as_ref(),
+    );
     install_interactive_submit_handler(
         &mut shell,
         created.core.clone(),
@@ -899,6 +1127,7 @@ async fn run_interactive_command_with_runtime(
         status_handle,
         footer_state_handle,
         Arc::clone(&exit_requested),
+        Arc::clone(&transition_request),
     );
     let shell_id = tui.add_child(Box::new(shell));
     let _ = tui.set_focus_child(shell_id);
@@ -908,7 +1137,11 @@ async fn run_interactive_command_with_runtime(
         let _ = tui.stop();
         eprintln!("Error: {error}");
         drop(binding);
-        return 1;
+        return InteractiveIterationOutcome {
+            exit_code: 1,
+            transition: None,
+            session_context: None,
+        };
     }
     if resume_picker_was_shown {
         let _ = tui.request_render(false);
@@ -928,13 +1161,236 @@ async fn run_interactive_command_with_runtime(
 
     created.core.abort();
     created.core.wait_for_idle().await;
+    let transition = transition_request
+        .lock()
+        .expect("interactive transition request mutex poisoned")
+        .take();
+    let final_state = created.core.state();
     let _ = tui
         .terminal_mut()
         .drain_input(Duration::from_millis(1000), Duration::from_millis(50));
     let _ = tui.stop();
     drop(binding);
+    drop(tui);
+    drop(created);
 
-    exit_code
+    let session_context = if transition.is_some() {
+        build_interactive_session_context(session_support, &final_state)
+    } else {
+        None
+    };
+
+    InteractiveIterationOutcome {
+        exit_code,
+        transition,
+        session_context,
+    }
+}
+
+fn create_keybindings_manager(agent_dir: Option<&Path>) -> KeybindingsManager {
+    let mut keybindings = match agent_dir {
+        Some(agent_dir) => KeybindingsManager::create(agent_dir),
+        None => KeybindingsManager::new(BTreeMap::new(), None),
+    };
+    keybindings.reload();
+    keybindings
+}
+
+fn sanitize_interactive_follow_up_args(parsed: &Args) -> Args {
+    let mut parsed = parsed.clone();
+    parsed.continue_session = false;
+    parsed.resume = false;
+    parsed.session = None;
+    parsed.fork = None;
+    parsed.messages.clear();
+    parsed.file_args.clear();
+    parsed
+}
+
+fn build_interactive_session_context(
+    session_support: Option<SessionSupport>,
+    state: &pi_agent::AgentState,
+) -> Option<InteractiveSessionContext> {
+    let session_support = session_support?;
+    let session_file;
+    let session_dir;
+    let cwd;
+    {
+        let session_manager = session_support
+            .manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        session_file = session_manager.get_session_file().map(str::to_owned);
+        session_dir = (!session_manager.get_session_dir().is_empty())
+            .then(|| session_manager.get_session_dir().to_owned());
+        cwd = session_manager.get_cwd().to_owned();
+    }
+
+    let manager = Arc::try_unwrap(session_support.manager)
+        .ok()
+        .and_then(|manager| manager.into_inner().ok());
+
+    Some(InteractiveSessionContext {
+        manager,
+        session_file,
+        session_dir,
+        cwd,
+        model: state.model.clone(),
+        thinking_level: state.thinking_level,
+    })
+}
+
+fn restore_session_manager(context: InteractiveSessionContext) -> Result<SessionManager, String> {
+    if let Some(manager) = context.manager {
+        return Ok(manager);
+    }
+
+    if let Some(session_file) = context.session_file {
+        return SessionManager::open(&session_file, context.session_dir.as_deref(), None)
+            .map_err(|error| error.to_string());
+    }
+
+    Ok(SessionManager::in_memory(&context.cwd))
+}
+
+async fn resolve_interactive_transition(
+    transition: InteractiveTransitionRequest,
+    session_context: Option<InteractiveSessionContext>,
+    current_cwd: &Path,
+    agent_dir: Option<&Path>,
+    runtime: &InteractiveRuntime,
+) -> Result<InteractiveTransitionPlan, String> {
+    match transition {
+        InteractiveTransitionRequest::NewSession => {
+            let defaults = session_context.as_ref().map(|context| {
+                BootstrapDefaults::from_model(&context.model, context.thinking_level)
+            });
+            let mut manager = match session_context {
+                Some(context) => restore_session_manager(context)?,
+                None => SessionManager::in_memory(&current_cwd.to_string_lossy()),
+            };
+            manager.new_session(NewSessionOptions::default());
+            Ok(InteractiveTransitionPlan {
+                cwd: PathBuf::from(manager.get_cwd()),
+                manager: Some(manager),
+                prefill_input: None,
+                initial_status_message: Some(String::from("New session started")),
+                bootstrap_defaults: defaults,
+            })
+        }
+        InteractiveTransitionRequest::ResumePicker => {
+            let current_context = session_context;
+            let current_cwd_string = current_context
+                .as_ref()
+                .map(|context| context.cwd.clone())
+                .unwrap_or_else(|| current_cwd.to_string_lossy().into_owned());
+            let session_dir = current_context
+                .as_ref()
+                .and_then(|context| context.session_dir.clone());
+            let current_sessions =
+                SessionManager::list(&current_cwd_string, session_dir.as_deref());
+            let agent_dir_string =
+                agent_dir.map(|agent_dir| agent_dir.to_string_lossy().into_owned());
+            let all_sessions = SessionManager::list_all(agent_dir_string.as_deref());
+            let keybindings = create_keybindings_manager(agent_dir);
+            let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
+            let mut tui = Tui::new(terminal);
+
+            match select_resume_session(&mut tui, &keybindings, current_sessions, all_sessions)
+                .await?
+            {
+                Some(path) => {
+                    let manager = SessionManager::open(&path, None, None)
+                        .map_err(|error| error.to_string())?;
+                    Ok(InteractiveTransitionPlan {
+                        cwd: PathBuf::from(manager.get_cwd()),
+                        manager: Some(manager),
+                        prefill_input: None,
+                        initial_status_message: Some(String::from("Resumed session")),
+                        bootstrap_defaults: None,
+                    })
+                }
+                None => {
+                    let (manager, cwd) = match current_context {
+                        Some(context) => {
+                            let cwd = PathBuf::from(&context.cwd);
+                            (Some(restore_session_manager(context)?), cwd)
+                        }
+                        None => (None, current_cwd.to_path_buf()),
+                    };
+                    Ok(InteractiveTransitionPlan {
+                        cwd,
+                        manager,
+                        prefill_input: None,
+                        initial_status_message: None,
+                        bootstrap_defaults: None,
+                    })
+                }
+            }
+        }
+        InteractiveTransitionRequest::ForkPicker => {
+            let session_context =
+                session_context.ok_or_else(|| String::from("Session data unavailable"))?;
+            let defaults = BootstrapDefaults::from_model(
+                &session_context.model,
+                session_context.thinking_level,
+            );
+            let mut manager = restore_session_manager(session_context)?;
+            let candidates = collect_fork_candidates(&manager);
+            if candidates.is_empty() {
+                return Ok(InteractiveTransitionPlan {
+                    cwd: PathBuf::from(manager.get_cwd()),
+                    manager: Some(manager),
+                    prefill_input: None,
+                    initial_status_message: Some(String::from("No messages to fork from")),
+                    bootstrap_defaults: None,
+                });
+            }
+
+            let keybindings = create_keybindings_manager(agent_dir);
+            let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
+            let mut tui = Tui::new(terminal);
+            let selected_entry_id =
+                match select_fork_message(&mut tui, &keybindings, candidates.clone()).await? {
+                    Some(entry_id) => entry_id,
+                    None => {
+                        return Ok(InteractiveTransitionPlan {
+                            cwd: PathBuf::from(manager.get_cwd()),
+                            manager: Some(manager),
+                            prefill_input: None,
+                            initial_status_message: None,
+                            bootstrap_defaults: None,
+                        });
+                    }
+                };
+
+            let selected = candidates
+                .into_iter()
+                .find(|candidate| candidate.entry_id == selected_entry_id)
+                .ok_or_else(|| String::from("Fork selection is no longer available"))?;
+
+            let bootstrap_defaults = if let Some(parent_id) = selected.parent_id.as_deref() {
+                manager
+                    .create_branched_session(parent_id)
+                    .map_err(|error| error.to_string())?;
+                None
+            } else {
+                manager.new_session(NewSessionOptions {
+                    id: None,
+                    parent_session: manager.get_session_file().map(ToOwned::to_owned),
+                });
+                Some(defaults)
+            };
+
+            Ok(InteractiveTransitionPlan {
+                cwd: PathBuf::from(manager.get_cwd()),
+                manager: Some(manager),
+                prefill_input: Some(selected.text),
+                initial_status_message: Some(String::from("Branched to new session")),
+                bootstrap_defaults,
+            })
+        }
+    }
 }
 
 pub fn finalize_system_prompt(prompt: impl Into<String>) -> String {
@@ -1063,17 +1519,18 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
     } else {
         Vec::new()
     };
-    let session_support = match create_session_support(&parsed, &cwd, agent_dir.as_deref(), None) {
-        Ok(session_support) => session_support,
-        Err(error) => {
-            push_line(&mut stderr, &format!("Error: {error}"));
-            return RunCommandResult {
-                exit_code: 1,
-                stdout,
-                stderr,
-            };
-        }
-    };
+    let session_support =
+        match create_session_support(&parsed, &cwd, agent_dir.as_deref(), None, None) {
+            Ok(session_support) => session_support,
+            Err(error) => {
+                push_line(&mut stderr, &format!("Error: {error}"));
+                return RunCommandResult {
+                    exit_code: 1,
+                    stdout,
+                    stderr,
+                };
+            }
+        };
 
     let stdin_content = normalize_stdin_content(stdin_is_tty, stdin_content);
     let processed_files = match process_file_arguments(
@@ -1412,12 +1869,25 @@ fn build_interactive_slash_commands(
                 )
             })),
         },
+        simple_slash_command("new", "Start a new session"),
+        simple_slash_command("resume", "Resume a different session"),
+        simple_slash_command("fork", "Fork from a previous user message"),
+        simple_slash_command("session", "Show session info and stats"),
+        simple_slash_command("name", "Set session display name"),
         SlashCommand {
             name: String::from("quit"),
             description: Some(String::from("Quit pi")),
             argument_completions: None,
         },
     ]
+}
+
+fn simple_slash_command(name: &str, description: &str) -> SlashCommand {
+    SlashCommand {
+        name: name.to_owned(),
+        description: Some(description.to_owned()),
+        argument_completions: None,
+    }
 }
 
 fn current_interactive_model_candidates(
@@ -1432,6 +1902,464 @@ fn current_interactive_model_candidates(
     }
 
     model_registry.get_available()
+}
+
+type ForkSelectCallback = Box<dyn FnMut(String) + Send + 'static>;
+type ForkCancelCallback = Box<dyn FnMut() + Send + 'static>;
+
+#[derive(Debug, Clone)]
+enum ForkPickerOutcome {
+    Selected(String),
+    Cancelled,
+}
+
+struct ForkMessagePickerComponent {
+    keybindings: KeybindingsManager,
+    candidates: Vec<ForkMessageCandidate>,
+    selected_index: usize,
+    on_select: Option<ForkSelectCallback>,
+    on_cancel: Option<ForkCancelCallback>,
+    viewport_size: Cell<Option<(usize, usize)>>,
+}
+
+impl ForkMessagePickerComponent {
+    fn new(keybindings: &KeybindingsManager, candidates: Vec<ForkMessageCandidate>) -> Self {
+        Self {
+            keybindings: keybindings.clone(),
+            candidates,
+            selected_index: 0,
+            on_select: None,
+            on_cancel: None,
+            viewport_size: Cell::new(None),
+        }
+    }
+
+    fn set_on_select<F>(&mut self, on_select: F)
+    where
+        F: FnMut(String) + Send + 'static,
+    {
+        self.on_select = Some(Box::new(on_select));
+    }
+
+    fn set_on_cancel<F>(&mut self, on_cancel: F)
+    where
+        F: FnMut() + Send + 'static,
+    {
+        self.on_cancel = Some(Box::new(on_cancel));
+    }
+
+    fn matches_binding(&self, data: &str, keybinding: &str) -> bool {
+        self.keybindings
+            .get_keys(keybinding)
+            .iter()
+            .any(|key| matches_key(data, key.as_str()))
+    }
+
+    fn max_visible(&self) -> usize {
+        self.viewport_size
+            .get()
+            .map(|(_, height)| height.saturating_sub(4).max(1))
+            .unwrap_or(10)
+    }
+
+    fn render_candidates(&self, width: usize) -> Vec<String> {
+        if self.candidates.is_empty() {
+            return vec![truncate_to_width(
+                "No messages to fork from",
+                width,
+                "...",
+                false,
+            )];
+        }
+
+        let max_visible = self.max_visible();
+        let start_index = self
+            .selected_index
+            .saturating_sub(max_visible / 2)
+            .min(self.candidates.len().saturating_sub(max_visible));
+        let end_index = (start_index + max_visible).min(self.candidates.len());
+        let mut lines = Vec::new();
+
+        for (visible_index, candidate) in self.candidates[start_index..end_index].iter().enumerate()
+        {
+            let actual_index = start_index + visible_index;
+            let prefix = if actual_index == self.selected_index {
+                "→ "
+            } else {
+                "  "
+            };
+            let suffix = if candidate.parent_id.is_none() {
+                " (root)"
+            } else {
+                ""
+            };
+            lines.push(truncate_to_width(
+                &format!(
+                    "{prefix}{}{}",
+                    sanitize_display_text(&candidate.text),
+                    suffix
+                ),
+                width,
+                "...",
+                false,
+            ));
+        }
+
+        if start_index > 0 || end_index < self.candidates.len() {
+            lines.push(truncate_to_width(
+                &format!("  ({}/{})", self.selected_index + 1, self.candidates.len()),
+                width,
+                "...",
+                false,
+            ));
+        }
+
+        lines
+    }
+}
+
+impl Component for ForkMessagePickerComponent {
+    fn render(&self, width: usize) -> Vec<String> {
+        if width == 0 {
+            return vec![String::new()];
+        }
+
+        let mut lines = Vec::new();
+        lines.push("─".repeat(width));
+        lines.push(truncate_to_width(
+            "Fork session from user message",
+            width,
+            "...",
+            false,
+        ));
+        lines.extend(self.render_candidates(width));
+        lines.push(truncate_to_width(
+            "Enter select  Esc cancel  ↑/↓ navigate",
+            width,
+            "...",
+            false,
+        ));
+        lines.push("─".repeat(width));
+        lines
+    }
+
+    fn invalidate(&mut self) {}
+
+    fn handle_input(&mut self, data: &str) {
+        if self.matches_binding(data, "tui.select.cancel") {
+            if let Some(on_cancel) = &mut self.on_cancel {
+                on_cancel();
+            }
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.up") {
+            if self.candidates.is_empty() {
+                return;
+            }
+            self.selected_index = if self.selected_index == 0 {
+                self.candidates.len() - 1
+            } else {
+                self.selected_index - 1
+            };
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.down") {
+            if self.candidates.is_empty() {
+                return;
+            }
+            self.selected_index = if self.selected_index + 1 >= self.candidates.len() {
+                0
+            } else {
+                self.selected_index + 1
+            };
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.pageUp") {
+            self.selected_index = self.selected_index.saturating_sub(self.max_visible());
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.pageDown") {
+            self.selected_index = (self.selected_index + self.max_visible())
+                .min(self.candidates.len().saturating_sub(1));
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.confirm") {
+            if let Some(candidate) = self.candidates.get(self.selected_index)
+                && let Some(on_select) = &mut self.on_select
+            {
+                on_select(candidate.entry_id.clone());
+            }
+        }
+    }
+
+    fn set_viewport_size(&self, width: usize, height: usize) {
+        self.viewport_size.set(Some((width, height)));
+    }
+}
+
+async fn select_fork_message(
+    tui: &mut Tui<LiveInteractiveTerminal>,
+    keybindings: &KeybindingsManager,
+    candidates: Vec<ForkMessageCandidate>,
+) -> Result<Option<String>, String> {
+    let outcome = Arc::new(Mutex::new(None::<ForkPickerOutcome>));
+    let mut picker = ForkMessagePickerComponent::new(keybindings, candidates);
+
+    let outcome_for_select = Arc::clone(&outcome);
+    picker.set_on_select(move |entry_id| {
+        *outcome_for_select
+            .lock()
+            .expect("fork picker outcome mutex poisoned") =
+            Some(ForkPickerOutcome::Selected(entry_id));
+    });
+
+    let outcome_for_cancel = Arc::clone(&outcome);
+    picker.set_on_cancel(move || {
+        *outcome_for_cancel
+            .lock()
+            .expect("fork picker outcome mutex poisoned") = Some(ForkPickerOutcome::Cancelled);
+    });
+
+    let picker_id = tui.add_child(Box::new(picker));
+    let _ = tui.set_focus_child(picker_id);
+    tui.start().map_err(|error| error.to_string())?;
+
+    loop {
+        if let Some(outcome) = outcome
+            .lock()
+            .expect("fork picker outcome mutex poisoned")
+            .take()
+        {
+            tui.clear();
+            return Ok(match outcome {
+                ForkPickerOutcome::Selected(entry_id) => Some(entry_id),
+                ForkPickerOutcome::Cancelled => None,
+            });
+        }
+
+        tui.drain_terminal_events()
+            .map_err(|error| error.to_string())?;
+        sleep(Duration::from_millis(16)).await;
+    }
+}
+
+fn request_interactive_transition(
+    transition: InteractiveTransitionRequest,
+    core: &CodingAgentCore,
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
+    status_handle: &StatusHandle,
+    transition_request: &Arc<Mutex<Option<InteractiveTransitionRequest>>>,
+    exit_requested: &Arc<AtomicBool>,
+) -> bool {
+    if core.state().is_streaming {
+        status_handle.set_message(
+            "Session switching while a request is running is not supported in the Rust interactive CLI yet.",
+        );
+        return true;
+    }
+
+    if matches!(transition, InteractiveTransitionRequest::ForkPicker) {
+        let Some(session_manager) = session_manager else {
+            status_handle.set_message("No messages to fork from");
+            return true;
+        };
+        let session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        if collect_fork_candidates(&session_manager).is_empty() {
+            status_handle.set_message("No messages to fork from");
+            return true;
+        }
+    }
+
+    *transition_request
+        .lock()
+        .expect("interactive transition request mutex poisoned") = Some(transition);
+    exit_requested.store(true, Ordering::Relaxed);
+    true
+}
+
+fn append_transcript_custom_message(
+    shell: &mut StartupShellComponent,
+    custom_type: &str,
+    text: impl Into<String>,
+) {
+    shell.add_transcript_item(Box::new(CustomMessageComponent::new(CustomMessage {
+        custom_type: custom_type.to_owned(),
+        content: CustomMessageContent::Text(text.into()),
+        display: true,
+        details: None,
+    })));
+}
+
+fn current_session_name(session_manager: Option<&Arc<Mutex<SessionManager>>>) -> Option<String> {
+    session_manager.and_then(|session_manager| {
+        session_manager
+            .lock()
+            .expect("session manager mutex poisoned")
+            .get_session_name()
+    })
+}
+
+fn render_session_info_text(
+    core: &CodingAgentCore,
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
+) -> String {
+    let state = core.state();
+    let mut user_messages = 0usize;
+    let mut assistant_messages = 0usize;
+    let mut tool_results = 0usize;
+    let mut tool_calls = 0usize;
+    let mut total_input = 0u64;
+    let mut total_output = 0u64;
+    let mut total_cache_read = 0u64;
+    let mut total_cache_write = 0u64;
+    let mut total_cost = 0.0f64;
+
+    for agent_message in &state.messages {
+        let Some(message) = agent_message.as_standard_message() else {
+            continue;
+        };
+        match message {
+            Message::User { .. } => user_messages += 1,
+            Message::Assistant { content, usage, .. } => {
+                assistant_messages += 1;
+                tool_calls += content
+                    .iter()
+                    .filter(|content| matches!(content, AssistantContent::ToolCall { .. }))
+                    .count();
+                total_input += usage.input;
+                total_output += usage.output;
+                total_cache_read += usage.cache_read;
+                total_cache_write += usage.cache_write;
+                total_cost += usage.cost.total;
+            }
+            Message::ToolResult { .. } => tool_results += 1,
+        }
+    }
+
+    let session_file = session_manager.and_then(|session_manager| {
+        session_manager
+            .lock()
+            .expect("session manager mutex poisoned")
+            .get_session_file()
+            .map(str::to_owned)
+    });
+    let session_id = session_manager
+        .map(|session_manager| {
+            session_manager
+                .lock()
+                .expect("session manager mutex poisoned")
+                .get_session_id()
+                .to_owned()
+        })
+        .or_else(|| core.agent().session_id())
+        .unwrap_or_else(|| String::from("In-memory"));
+
+    let mut info = String::new();
+    push_line(&mut info, "Session Info");
+    push_line(&mut info, "");
+    if let Some(session_name) = current_session_name(session_manager) {
+        push_line(&mut info, &format!("Name: {session_name}"));
+    }
+    push_line(
+        &mut info,
+        &format!(
+            "File: {}",
+            session_file.unwrap_or_else(|| String::from("In-memory"))
+        ),
+    );
+    push_line(&mut info, &format!("ID: {session_id}"));
+    push_line(&mut info, "");
+    push_line(&mut info, "Messages");
+    push_line(&mut info, &format!("User: {user_messages}"));
+    push_line(&mut info, &format!("Assistant: {assistant_messages}"));
+    push_line(&mut info, &format!("Tool Calls: {tool_calls}"));
+    push_line(&mut info, &format!("Tool Results: {tool_results}"));
+    push_line(&mut info, &format!("Total: {}", state.messages.len()));
+    push_line(&mut info, "");
+    push_line(&mut info, "Tokens");
+    push_line(&mut info, &format!("Input: {total_input}"));
+    push_line(&mut info, &format!("Output: {total_output}"));
+    if total_cache_read > 0 {
+        push_line(&mut info, &format!("Cache Read: {total_cache_read}"));
+    }
+    if total_cache_write > 0 {
+        push_line(&mut info, &format!("Cache Write: {total_cache_write}"));
+    }
+    push_line(
+        &mut info,
+        &format!(
+            "Total: {}",
+            total_input + total_output + total_cache_read + total_cache_write
+        ),
+    );
+    if total_cost > 0.0 {
+        push_line(&mut info, "");
+        push_line(&mut info, "Cost");
+        push_line(&mut info, &format!("Total: {:.4}", total_cost));
+    }
+    info.trim_end().to_owned()
+}
+
+fn collect_fork_candidates(session_manager: &SessionManager) -> Vec<ForkMessageCandidate> {
+    session_manager
+        .get_entries()
+        .iter()
+        .filter_map(|entry| {
+            let SessionEntry::Message {
+                id,
+                parent_id,
+                message,
+                ..
+            } = entry
+            else {
+                return None;
+            };
+            let Message::User { content, .. } = message.as_standard_message()? else {
+                return None;
+            };
+            let text = extract_user_text(content);
+            (!text.is_empty()).then(|| ForkMessageCandidate {
+                entry_id: id.clone(),
+                parent_id: parent_id.clone(),
+                text,
+            })
+        })
+        .collect()
+}
+
+fn extract_user_text(content: &[UserContent]) -> String {
+    content
+        .iter()
+        .filter_map(|content| match content {
+            UserContent::Text { text } => Some(text.as_str()),
+            UserContent::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+        .trim()
+        .to_owned()
+}
+
+fn sanitize_display_text(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() && character != '\n' && character != '\t' {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Debug, Clone)]
@@ -1449,6 +2377,7 @@ fn install_interactive_submit_handler(
     status_handle: StatusHandle,
     footer_state_handle: FooterStateHandle,
     exit_requested: Arc<AtomicBool>,
+    transition_request: Arc<Mutex<Option<InteractiveTransitionRequest>>>,
 ) {
     let cycle_forward_core = core.clone();
     let cycle_forward_model_registry = Arc::clone(&model_registry);
@@ -1512,6 +2441,52 @@ fn install_interactive_submit_handler(
         );
     });
 
+    let new_session_core = core.clone();
+    let new_session_status_handle = status_handle.clone();
+    let new_session_transition_request = transition_request.clone();
+    let new_session_exit_requested = exit_requested.clone();
+    shell.on_action("app.session.new", move || {
+        request_interactive_transition(
+            InteractiveTransitionRequest::NewSession,
+            &new_session_core,
+            None,
+            &new_session_status_handle,
+            &new_session_transition_request,
+            &new_session_exit_requested,
+        );
+    });
+
+    let resume_core = core.clone();
+    let resume_status_handle = status_handle.clone();
+    let resume_transition_request = transition_request.clone();
+    let resume_exit_requested = exit_requested.clone();
+    shell.on_action("app.session.resume", move || {
+        request_interactive_transition(
+            InteractiveTransitionRequest::ResumePicker,
+            &resume_core,
+            None,
+            &resume_status_handle,
+            &resume_transition_request,
+            &resume_exit_requested,
+        );
+    });
+
+    let fork_core = core.clone();
+    let fork_status_handle = status_handle.clone();
+    let fork_transition_request = transition_request.clone();
+    let fork_exit_requested = exit_requested.clone();
+    let fork_session_manager = session_manager.clone();
+    shell.on_action("app.session.fork", move || {
+        request_interactive_transition(
+            InteractiveTransitionRequest::ForkPicker,
+            &fork_core,
+            fork_session_manager.as_ref(),
+            &fork_status_handle,
+            &fork_transition_request,
+            &fork_exit_requested,
+        );
+    });
+
     shell.set_on_submit_with_shell(move |shell, value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -1528,6 +2503,7 @@ fn install_interactive_submit_handler(
             &status_handle,
             &footer_state_handle,
             &exit_requested,
+            &transition_request,
         ) {
             return;
         }
@@ -1567,7 +2543,7 @@ fn handle_interactive_model_cycle(
         direction,
     ) {
         Ok(Some(result)) => {
-            update_interactive_footer_state(footer_state_handle, core);
+            update_interactive_footer_state(footer_state_handle, core, session_manager);
             let model_name = if result.model.name.is_empty() {
                 result.model.id.as_str()
             } else {
@@ -1606,9 +2582,93 @@ fn handle_interactive_slash_command(
     status_handle: &StatusHandle,
     footer_state_handle: &FooterStateHandle,
     exit_requested: &Arc<AtomicBool>,
+    transition_request: &Arc<Mutex<Option<InteractiveTransitionRequest>>>,
 ) -> bool {
     if text == "/quit" {
         exit_requested.store(true, Ordering::Relaxed);
+        return true;
+    }
+
+    if text == "/new" {
+        return request_interactive_transition(
+            InteractiveTransitionRequest::NewSession,
+            core,
+            None,
+            status_handle,
+            transition_request,
+            exit_requested,
+        );
+    }
+
+    if text == "/resume" {
+        return request_interactive_transition(
+            InteractiveTransitionRequest::ResumePicker,
+            core,
+            None,
+            status_handle,
+            transition_request,
+            exit_requested,
+        );
+    }
+
+    if text == "/fork" {
+        return request_interactive_transition(
+            InteractiveTransitionRequest::ForkPicker,
+            core,
+            session_manager,
+            status_handle,
+            transition_request,
+            exit_requested,
+        );
+    }
+
+    if text == "/session" {
+        append_transcript_custom_message(
+            shell,
+            "session",
+            render_session_info_text(core, session_manager),
+        );
+        return true;
+    }
+
+    if text == "/name" || text.starts_with("/name ") {
+        let name = text.strip_prefix("/name").unwrap_or_default().trim();
+        let current_name = current_session_name(session_manager);
+        if name.is_empty() {
+            if let Some(current_name) = current_name {
+                append_transcript_custom_message(
+                    shell,
+                    "session",
+                    format!("Session name: {current_name}"),
+                );
+            } else {
+                status_handle.set_message("Usage: /name <name>");
+            }
+            return true;
+        }
+
+        let Some(session_manager) = session_manager else {
+            status_handle.set_message("Session naming is not supported in this interactive mode.");
+            return true;
+        };
+
+        match session_manager
+            .lock()
+            .expect("session manager mutex poisoned")
+            .append_session_info(name)
+        {
+            Ok(_) => {
+                footer_state_handle.update(|footer_state| {
+                    footer_state.session_name = Some(name.to_owned());
+                });
+                append_transcript_custom_message(
+                    shell,
+                    "session",
+                    format!("Session name set: {name}"),
+                );
+            }
+            Err(error) => status_handle.set_message(format!("Error: {error}")),
+        }
         return true;
     }
 
@@ -1632,7 +2692,7 @@ fn handle_interactive_slash_command(
                 return true;
             }
 
-            update_interactive_footer_state(footer_state_handle, core);
+            update_interactive_footer_state(footer_state_handle, core, session_manager);
             status_handle.set_message(format!("Model: {}", core.state().model.id));
             return true;
         }
@@ -1680,7 +2740,11 @@ fn show_interactive_model_selector(
                 return;
             }
 
-            update_interactive_footer_state(&footer_state_handle_for_select, &core);
+            update_interactive_footer_state(
+                &footer_state_handle_for_select,
+                &core,
+                session_manager.as_ref(),
+            );
             status_handle_for_select.set_message(format!("Model: {}", core.state().model.id));
         },
         || {},
@@ -1751,12 +2815,15 @@ fn cycle_interactive_model(
 fn update_interactive_footer_state(
     footer_state_handle: &FooterStateHandle,
     core: &CodingAgentCore,
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
 ) {
     let state = core.state();
+    let session_name = current_session_name(session_manager);
     footer_state_handle.update(|footer_state| {
         footer_state.model = Some(state.model.clone());
         footer_state.context_window = state.model.context_window;
         footer_state.thinking_level = thinking_level_label(state.thinking_level).to_owned();
+        footer_state.session_name = session_name.clone();
     });
 }
 
@@ -2071,6 +3138,40 @@ mod tests {
         assert_eq!(resolved, "final prompt");
     }
 
+    #[test]
+    fn collect_fork_candidates_uses_user_messages_only() {
+        let mut session_manager = SessionManager::in_memory("/tmp/pi-fork-candidates");
+        session_manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("first user message"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        session_manager
+            .append_message(Message::Assistant {
+                content: vec![AssistantContent::Text {
+                    text: String::from("assistant response"),
+                    text_signature: None,
+                }],
+                api: String::from("faux:test"),
+                provider: String::from("faux"),
+                model: String::from("model"),
+                response_id: None,
+                usage: Default::default(),
+                stop_reason: pi_events::StopReason::Stop,
+                error_message: None,
+                timestamp: 2,
+            })
+            .unwrap();
+
+        let candidates = collect_fork_candidates(&session_manager);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].text, "first user message");
+        assert!(candidates[0].parent_id.is_none());
+    }
+
     #[derive(Clone)]
     struct LifecycleScriptedTerminal {
         state: Arc<LifecycleScriptedTerminalState>,
@@ -2315,6 +3416,155 @@ mod tests {
         );
         assert_eq!(inspector.start_count(), 2, "output: {output}");
         assert_eq!(inspector.stop_count(), 2, "output: {output}");
+
+        faux.unregister();
+    }
+
+    #[test]
+    fn slash_commands_name_and_session_update_transcript_and_session_metadata() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "slash-session-commands-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "slash-session-commands-faux-1".into(),
+                name: Some("Slash Session Commands Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("slash-session-commands-faux-1"))
+            .expect("expected faux model");
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(unique_temp_dir("slash-session-commands-cwd")),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
+        let session_manager = Arc::new(Mutex::new(SessionManager::in_memory("/tmp/pi-session")));
+        let status_handle = shell.status_handle();
+        let footer_state_handle = shell.footer_state_handle();
+        let exit_requested = Arc::new(AtomicBool::new(false));
+        let transition_request = Arc::new(Mutex::new(None));
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/name demo",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            Some(&session_manager),
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+        assert_eq!(
+            session_manager
+                .lock()
+                .expect("session manager mutex poisoned")
+                .get_session_name()
+                .as_deref(),
+            Some("demo")
+        );
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/session",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            Some(&session_manager),
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+
+        let rendered = shell.render(100).join("\n");
+        assert!(
+            rendered.contains("Session name set: demo"),
+            "output: {rendered}"
+        );
+        assert!(rendered.contains("Session Info"), "output: {rendered}");
+        assert!(rendered.contains("Name: demo"), "output: {rendered}");
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn new_session_transition_resets_session_entries_and_preserves_model_defaults() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "new-session-transition-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "new-session-transition-faux-1".into(),
+                name: Some("New Session Transition Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("new-session-transition-faux-1"))
+            .expect("expected faux model");
+        let mut session_manager = SessionManager::in_memory("/tmp/pi-new-session-transition");
+        session_manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("hello"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+
+        let plan = resolve_interactive_transition(
+            InteractiveTransitionRequest::NewSession,
+            Some(InteractiveSessionContext {
+                manager: Some(session_manager),
+                session_file: None,
+                session_dir: None,
+                cwd: String::from("/tmp/pi-new-session-transition"),
+                model: model.clone(),
+                thinking_level: ThinkingLevel::Off,
+            }),
+            Path::new("/tmp/pi-new-session-transition"),
+            None,
+            &InteractiveRuntime::new(Arc::new(|| {
+                Box::new(LifecycleScriptedTerminal::new(Vec::new()))
+            })),
+        )
+        .await
+        .expect("expected new session transition plan");
+
+        let manager = plan.manager.expect("expected new session manager");
+        assert!(manager.get_entries().is_empty());
+        assert_eq!(
+            plan.initial_status_message.as_deref(),
+            Some("New session started")
+        );
+        let defaults = plan
+            .bootstrap_defaults
+            .expect("expected preserved bootstrap defaults");
+        assert_eq!(defaults.provider, model.provider);
+        assert_eq!(defaults.model_id, model.id);
+        assert_eq!(defaults.thinking_level, ThinkingLevel::Off);
 
         faux.unregister();
     }
