@@ -1,3 +1,6 @@
+#[path = "export_html.rs"]
+mod export_html;
+
 use crate::{
     AppMode, Args, Diagnostic, DiagnosticKind, ListModels, OverlayAuthSource, PrintModeOptions,
     PrintOutputMode, ProcessFileOptions,
@@ -57,6 +60,7 @@ const API_KEY_MODEL_REQUIREMENT: &str =
     "--api-key requires a model to be specified via --model, --provider/--model, or --models";
 const FINALIZED_SYSTEM_PROMPT_PREFIX: &str = "\0pi-final-system-prompt\n";
 const ROOT_TREE_ENTRY_ID: &str = "root";
+const DEFAULT_SHARE_VIEWER_URL: &str = "https://pi.dev/session/";
 
 pub struct RunCommandOptions {
     pub args: Vec<String>,
@@ -1612,13 +1616,49 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         };
     }
 
-    if parsed.export.is_some() {
-        push_line(&mut stderr, "--export is not supported in the Rust CLI yet");
-        return RunCommandResult {
-            exit_code: 1,
-            stdout,
-            stderr,
-        };
+    if let Some(export_path) = parsed.export.as_deref() {
+        if !parsed.file_args.is_empty() {
+            push_line(&mut stderr, "--export does not accept @file arguments");
+            return RunCommandResult {
+                exit_code: 1,
+                stdout,
+                stderr,
+            };
+        }
+        if parsed.messages.len() > 1 {
+            push_line(
+                &mut stderr,
+                "--export accepts at most one optional output path argument",
+            );
+            return RunCommandResult {
+                exit_code: 1,
+                stdout,
+                stderr,
+            };
+        }
+
+        match export_session_file_to_html(
+            &cwd,
+            export_path,
+            parsed.messages.first().map(String::as_str),
+        ) {
+            Ok(path) => {
+                push_line(&mut stdout, &path);
+                return RunCommandResult {
+                    exit_code: 0,
+                    stdout,
+                    stderr,
+                };
+            }
+            Err(error) => {
+                push_line(&mut stderr, &format!("Error: {error}"));
+                return RunCommandResult {
+                    exit_code: 1,
+                    stdout,
+                    stderr,
+                };
+            }
+        }
     }
 
     if let Some(list_models) = parsed.list_models.as_ref() {
@@ -2310,8 +2350,8 @@ fn build_interactive_slash_commands(
             })),
         },
         simple_slash_command("scoped-models", "Show scoped models for Ctrl+P cycling"),
-        simple_slash_command("export", "Export session as JSONL"),
-        simple_slash_command("share", "Share session as a secret GitHub gist"),
+        simple_slash_command("export", "Export session (HTML default, or specify .jsonl)"),
+        simple_slash_command("share", "Share session with an HTML preview link"),
         simple_slash_command("copy", "Copy last assistant message to clipboard"),
         simple_slash_command("name", "Set session display name"),
         simple_slash_command("session", "Show session info and stats"),
@@ -3408,30 +3448,44 @@ fn switch_interactive_tree_branch(
     Ok(message)
 }
 
-fn resolve_export_path(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportFormat {
+    Html,
+    Jsonl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SharedSessionLinks {
+    gist_url: String,
+    preview_url: String,
+}
+
+fn resolve_export_target(
     cwd: &Path,
     session_manager: &SessionManager,
     output_path: Option<&str>,
-) -> Result<PathBuf, String> {
+) -> (PathBuf, ExportFormat) {
     let Some(output_path) = output_path.filter(|path| !path.trim().is_empty()) else {
-        return Ok(cwd.join(format!(
-            "session-{}.jsonl",
-            session_manager.get_session_id()
-        )));
+        return (
+            cwd.join(export_html::default_html_file_name(session_manager)),
+            ExportFormat::Html,
+        );
     };
 
-    if output_path.ends_with(".html") {
-        return Err(String::from(
-            "HTML export is not supported in the Rust interactive CLI yet. Use /export <path.jsonl>.",
-        ));
-    }
-
-    let output_path = Path::new(output_path);
-    if output_path.is_absolute() {
-        Ok(output_path.to_path_buf())
+    let resolved_path = {
+        let output_path = Path::new(output_path);
+        if output_path.is_absolute() {
+            output_path.to_path_buf()
+        } else {
+            cwd.join(output_path)
+        }
+    };
+    let format = if output_path.ends_with(".jsonl") {
+        ExportFormat::Jsonl
     } else {
-        Ok(cwd.join(output_path))
-    }
+        ExportFormat::Html
+    };
+    (resolved_path, format)
 }
 
 fn export_interactive_session(
@@ -3442,24 +3496,53 @@ fn export_interactive_session(
     let session_manager = session_manager
         .lock()
         .expect("session manager mutex poisoned");
-    let output_path = resolve_export_path(cwd, &session_manager, output_path)?;
-    session_manager
-        .export_branch_jsonl(&output_path)
-        .map_err(|error| error.to_string())
+    let (output_path, format) = resolve_export_target(cwd, &session_manager, output_path);
+    match format {
+        ExportFormat::Html => export_html::export_session_to_html(&session_manager, &output_path),
+        ExportFormat::Jsonl => session_manager
+            .export_branch_jsonl(&output_path)
+            .map_err(|error| error.to_string()),
+    }
+}
+
+fn share_viewer_url(gist_id: &str) -> String {
+    let base_url = env::var("PI_SHARE_VIEWER_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| String::from(DEFAULT_SHARE_VIEWER_URL));
+    format!("{base_url}#{gist_id}")
+}
+
+fn parse_gist_id(gist_url: &str) -> Option<&str> {
+    gist_url.trim().trim_end_matches('/').rsplit('/').next()
+}
+
+fn parse_shared_session_links(output: &[u8]) -> Result<SharedSessionLinks, String> {
+    let gist_url = String::from_utf8_lossy(output)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| String::from("Failed to parse gist URL from gh output"))?;
+    let gist_id = parse_gist_id(&gist_url)
+        .filter(|gist_id| !gist_id.is_empty())
+        .ok_or_else(|| String::from("Failed to parse gist URL from gh output"))?;
+
+    Ok(SharedSessionLinks {
+        preview_url: share_viewer_url(gist_id),
+        gist_url,
+    })
 }
 
 fn share_interactive_session(
     session_manager: &Arc<Mutex<SessionManager>>,
     cwd: &Path,
-) -> Result<String, String> {
+) -> Result<SharedSessionLinks, String> {
     let temp_file = {
         let session_manager = session_manager
             .lock()
             .expect("session manager mutex poisoned");
-        env::temp_dir().join(format!(
-            "pi-session-{}.jsonl",
-            session_manager.get_session_id()
-        ))
+        env::temp_dir().join(export_html::default_html_file_name(&session_manager))
     };
 
     export_interactive_session(session_manager, cwd, temp_file.to_str())?;
@@ -3488,12 +3571,30 @@ fn share_interactive_session(
         return Err(message);
     }
 
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| String::from("Failed to parse gist URL from gh output"))
+    parse_shared_session_links(&output.stdout)
+}
+
+fn export_session_file_to_html(
+    cwd: &Path,
+    input_path: &str,
+    output_path: Option<&str>,
+) -> Result<String, String> {
+    let input_path = resolve_session_path(cwd, input_path);
+    let session_manager =
+        SessionManager::open(&input_path, None, None).map_err(|error| error.to_string())?;
+    let output_path = if let Some(output_path) = output_path.filter(|path| !path.trim().is_empty())
+    {
+        let output_path = Path::new(output_path);
+        if output_path.is_absolute() {
+            output_path.to_path_buf()
+        } else {
+            cwd.join(output_path)
+        }
+    } else {
+        cwd.join(export_html::default_html_file_name(&session_manager))
+    };
+
+    export_html::export_session_to_html(&session_manager, output_path)
 }
 
 fn last_assistant_message_text(core: &CodingAgentCore) -> Option<String> {
@@ -4011,7 +4112,10 @@ fn handle_interactive_slash_command(
             return true;
         };
         match share_interactive_session(session_manager, &slash_command_context.cwd) {
-            Ok(url) => status_handle.set_message(format!("Shared session: {url}")),
+            Ok(links) => status_handle.set_message(format!(
+                "Share URL: {}\nGist: {}",
+                links.preview_url, links.gist_url
+            )),
             Err(error) => status_handle.set_message(format!("Error: {error}")),
         }
         return true;
@@ -4560,11 +4664,6 @@ fn render_no_models_message(models_json_path: Option<&Path>) -> String {
 }
 
 fn unsupported_flag_message(parsed: &Args) -> Option<String> {
-    if parsed.export.is_some() {
-        return Some(String::from(
-            "--export is not supported in the Rust CLI yet",
-        ));
-    }
     if parsed.no_tools
         || parsed.tools.is_some()
         || parsed.extensions.is_some()
@@ -4604,11 +4703,11 @@ fn render_help() -> String {
         "  - --provider, --model, --models, --api-key, --system-prompt, --append-system-prompt, --thinking",
         "  - --continue, --resume, --session, --fork, --no-session, --session-dir",
         "  - --list-models [search]",
+        "  - --export <session.jsonl> [out.html]",
         "  - @file text/image preprocessing",
         "",
         "Not yet supported:",
         "  - rpc mode",
-        "  - export",
     ]
     .join("\n")
 }
@@ -5541,6 +5640,88 @@ mod tests {
     }
 
     #[test]
+    fn slash_export_command_defaults_to_html_snapshot() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "slash-export-html-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "slash-export-html-faux-1".into(),
+                name: Some("Slash Export HTML Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("slash-export-html-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("slash-export-html-cwd");
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(cwd.clone()),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
+        let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
+        manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("export html"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        let expected_export_path = cwd.join(export_html::default_html_file_name(&manager));
+        let session_manager = Arc::new(Mutex::new(manager));
+        let status_handle = shell.status_handle();
+        let footer_state_handle = shell.footer_state_handle();
+        let exit_requested = Arc::new(AtomicBool::new(false));
+        let transition_request = Arc::new(Mutex::new(None));
+        let slash_command_context = test_slash_command_context(&keybindings, cwd.clone());
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/export",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            Some(&session_manager),
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+
+        let exported = fs::read_to_string(&expected_export_path).expect("expected exported html");
+        assert!(exported.contains("<!DOCTYPE html>"), "content: {exported}");
+        assert!(
+            exported.contains("Current branch snapshot"),
+            "content: {exported}"
+        );
+        assert!(exported.contains("export html"), "content: {exported}");
+
+        faux.unregister();
+    }
+
+    #[test]
     fn slash_export_command_writes_jsonl_session_snapshot() {
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             provider: "slash-export-faux".into(),
@@ -5624,6 +5805,55 @@ mod tests {
         assert!(exported.contains("export me"), "content: {exported}");
 
         faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn run_command_exports_session_file_to_html() {
+        let cwd = unique_temp_dir("run-command-export");
+        let input_path = cwd.join("source-session.jsonl");
+        let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
+        manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("export from cli"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        manager.export_branch_jsonl(&input_path).unwrap();
+        let expected_output = cwd.join("pi-session-source-session.html");
+
+        let result = run_command(RunCommandOptions {
+            args: vec![
+                String::from("--export"),
+                input_path.to_string_lossy().into_owned(),
+            ],
+            stdin_is_tty: true,
+            stdin_content: None,
+            auth_source: Arc::new(MemoryAuthStorage::default()),
+            built_in_models: Vec::new(),
+            models_json_path: None,
+            agent_dir: None,
+            cwd: cwd.clone(),
+            default_system_prompt: String::new(),
+            version: String::from("0.1.0"),
+            stream_options: StreamOptions::default(),
+        })
+        .await;
+
+        assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+        assert_eq!(result.stdout.trim(), expected_output.to_string_lossy());
+        let exported = fs::read_to_string(&expected_output).expect("expected exported html");
+        assert!(exported.contains("export from cli"), "content: {exported}");
+    }
+
+    #[test]
+    fn parse_shared_session_links_builds_share_viewer_url() {
+        let links = parse_shared_session_links(b"https://gist.github.com/badlogic/abc123\n")
+            .expect("expected gist links");
+
+        assert_eq!(links.gist_url, "https://gist.github.com/badlogic/abc123");
+        assert_eq!(links.preview_url, "https://pi.dev/session/#abc123");
     }
 
     #[tokio::test]
