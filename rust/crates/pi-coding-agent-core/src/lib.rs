@@ -7,6 +7,7 @@ pub mod model_registry;
 pub mod model_resolver;
 pub mod runtime;
 pub mod skill_block;
+pub mod system_prompt;
 
 pub use auth::{
     AuthApiKeyFuture, AuthFileSource, AuthSource, ChainedAuthSource, MemoryAuthStorage,
@@ -36,6 +37,12 @@ pub use runtime::{
     CodingAgentCore, CodingAgentCoreOptions, CreateCodingAgentCoreResult, create_coding_agent_core,
 };
 pub use skill_block::{ParsedSkillBlock, parse_skill_block};
+pub use system_prompt::{
+    BuildSystemPromptOptions, ContextFile, LoadedSystemPromptResources,
+    build_default_pi_system_prompt, build_system_prompt, discover_append_system_prompt_file,
+    discover_system_prompt_file, load_project_context_files, load_system_prompt_resources,
+    resolve_prompt_input,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodingAgentCoreError {

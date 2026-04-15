@@ -9,7 +9,7 @@ use pi_coding_agent_core::{
     AuthSource, BootstrapDiagnosticLevel, CodingAgentCore, CodingAgentCoreError,
     CodingAgentCoreOptions, FooterDataProvider, ModelRegistry, ScopedModel,
     SessionBootstrapOptions, create_coding_agent_core, find_exact_model_reference_match,
-    resolve_cli_model, resolve_model_scope,
+    resolve_cli_model, resolve_model_scope, resolve_prompt_input,
 };
 use pi_coding_agent_tui::{
     ExternalEditorCommandRunner, ExternalEditorHost, FooterStateHandle, InteractiveCoreBinding,
@@ -36,6 +36,7 @@ use tokio::time::sleep;
 const NO_MODELS_ENV_HINT: &str = "  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.";
 const API_KEY_MODEL_REQUIREMENT: &str =
     "--api-key requires a model to be specified via --model, --provider/--model, or --models";
+const FINALIZED_SYSTEM_PROMPT_PREFIX: &str = "\0pi-final-system-prompt\n";
 
 pub struct RunCommandOptions {
     pub args: Vec<String>,
@@ -614,6 +615,11 @@ async fn run_interactive_command_with_runtime(
     exit_code
 }
 
+pub fn finalize_system_prompt(prompt: impl Into<String>) -> String {
+    let prompt = prompt.into();
+    format!("{FINALIZED_SYSTEM_PROMPT_PREFIX}{prompt}")
+}
+
 pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
     let RunCommandOptions {
         args,
@@ -947,15 +953,20 @@ fn resolve_system_prompt(
     override_system_prompt: Option<&str>,
     append_system_prompt: Option<&str>,
 ) -> String {
-    let mut system_prompt = override_system_prompt
-        .unwrap_or(default_system_prompt)
-        .to_string();
+    if let Some(finalized_prompt) =
+        default_system_prompt.strip_prefix(FINALIZED_SYSTEM_PROMPT_PREFIX)
+    {
+        return finalized_prompt.to_owned();
+    }
 
-    if let Some(append_system_prompt) = append_system_prompt {
+    let mut system_prompt = resolve_prompt_input(override_system_prompt)
+        .unwrap_or_else(|| default_system_prompt.to_string());
+
+    if let Some(append_system_prompt) = resolve_prompt_input(append_system_prompt) {
         if !system_prompt.is_empty() && !append_system_prompt.is_empty() {
-            system_prompt.push('\n');
+            system_prompt.push_str("\n\n");
         }
-        system_prompt.push_str(append_system_prompt);
+        system_prompt.push_str(&append_system_prompt);
     }
 
     system_prompt
@@ -1621,6 +1632,31 @@ mod tests {
         }
 
         result
+    }
+
+    #[test]
+    fn resolve_system_prompt_reads_file_inputs_and_uses_blank_line_separator() {
+        let temp_dir = unique_temp_dir("resolve-system-prompt");
+        let prompt_path = temp_dir.join("SYSTEM.md");
+        let append_path = temp_dir.join("APPEND_SYSTEM.md");
+        fs::write(&prompt_path, "system from file\n").unwrap();
+        fs::write(&append_path, "append from file\n").unwrap();
+
+        let resolved = resolve_system_prompt(
+            "default prompt",
+            Some(prompt_path.to_str().unwrap()),
+            Some(append_path.to_str().unwrap()),
+        );
+
+        assert_eq!(resolved, "system from file\n\n\nappend from file\n");
+    }
+
+    #[test]
+    fn resolve_system_prompt_returns_finalized_prompts_without_reapplying_args() {
+        let finalized = finalize_system_prompt("final prompt");
+        let resolved = resolve_system_prompt(&finalized, Some("override"), Some("append"));
+
+        assert_eq!(resolved, "final prompt");
     }
 
     #[derive(Clone)]

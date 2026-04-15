@@ -1,9 +1,9 @@
 use pi_ai::{StreamOptions, built_in_models};
 use pi_coding_agent_cli::{
-    AppMode, AuthFileSource, ChainedAuthSource, EnvAuthSource, RunCommandOptions, parse_args,
-    resolve_app_mode, run_command, run_interactive_command,
+    AppMode, AuthFileSource, ChainedAuthSource, EnvAuthSource, RunCommandOptions,
+    finalize_system_prompt, parse_args, resolve_app_mode, run_command, run_interactive_command,
 };
-use pi_coding_agent_core::refresh_auth_file_oauth;
+use pi_coding_agent_core::{build_default_pi_system_prompt, refresh_auth_file_oauth};
 use pi_coding_agent_tui::migrate_keybindings_file;
 use std::{
     env,
@@ -44,6 +44,12 @@ async fn main() -> ExitCode {
     let built_in_models = built_in_models().to_vec();
     let models_json_path = Some(agent_dir.join("models.json"));
     let version = env!("CARGO_PKG_VERSION").to_string();
+    let finalized_default_system_prompt = finalize_system_prompt(build_default_pi_system_prompt(
+        &cwd,
+        &agent_dir,
+        parsed.system_prompt.as_deref(),
+        parsed.append_system_prompt.as_deref(),
+    ));
 
     if matches!(
         resolve_app_mode(&parsed, stdin_is_tty),
@@ -62,7 +68,7 @@ async fn main() -> ExitCode {
             models_json_path: models_json_path.clone(),
             agent_dir: Some(agent_dir.clone()),
             cwd: cwd.clone(),
-            default_system_prompt: String::new(),
+            default_system_prompt: finalized_default_system_prompt.clone(),
             version: version.clone(),
             stream_options: StreamOptions::default(),
         })
@@ -84,7 +90,7 @@ async fn main() -> ExitCode {
         models_json_path,
         agent_dir: Some(agent_dir),
         cwd,
-        default_system_prompt: String::new(),
+        default_system_prompt: finalized_default_system_prompt,
         version,
         stream_options: StreamOptions::default(),
     })

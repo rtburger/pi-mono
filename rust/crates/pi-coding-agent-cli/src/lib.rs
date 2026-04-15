@@ -17,6 +17,6 @@ pub use initial_message::{InitialMessageResult, build_initial_message};
 pub use pi_coding_agent_core::{AuthFileSource, ChainedAuthSource};
 pub use print_mode::{PrintModeOptions, PrintModeRunResult, run_print_mode};
 pub use runner::{
-    RunCommandOptions, RunCommandResult, run_command, run_interactive_command,
-    run_interactive_command_with_terminal,
+    RunCommandOptions, RunCommandResult, finalize_system_prompt, run_command,
+    run_interactive_command, run_interactive_command_with_terminal,
 };
