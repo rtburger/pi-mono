@@ -1,5 +1,5 @@
 use crate::args::PrintOutputMode;
-use pi_agent::{AgentEvent, AgentMessage, AgentToolResult};
+use pi_agent::{AgentEvent, AgentMessage, AgentToolResult, AgentUnsubscribe};
 use pi_coding_agent_core::CodingAgentCore;
 use pi_events::{AssistantContent, Message, StopReason, UserContent};
 use serde_json::{Value, json};
@@ -41,12 +41,12 @@ pub async fn run_print_mode(
     let mut stdout = String::new();
     let mut stderr = String::new();
     let mut exit_code = 0;
-    let mut subscription = None;
+    let mut subscription: Option<AgentUnsubscribe> = None;
     let json_lines = Arc::new(Mutex::new(Vec::<String>::new()));
 
     if options.mode == PrintOutputMode::Json {
         let lines = json_lines.clone();
-        let subscription_id = core.agent().subscribe(move |event, _signal| {
+        let unsubscribe = core.agent().subscribe(move |event, _signal| {
             let lines = lines.clone();
             async move {
                 let line = serde_json::to_string(&agent_event_to_json(&event))
@@ -54,13 +54,13 @@ pub async fn run_print_mode(
                 lines.lock().unwrap().push(line);
             }
         });
-        subscription = Some(subscription_id);
+        subscription = Some(unsubscribe);
     }
 
     let run_result = run_prompts(core, &options).await;
 
-    if let Some(subscription_id) = subscription {
-        core.agent().unsubscribe(subscription_id);
+    if let Some(unsubscribe) = subscription {
+        let _ = unsubscribe();
     }
 
     if options.mode == PrintOutputMode::Json {

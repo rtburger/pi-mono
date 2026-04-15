@@ -2,8 +2,8 @@ use crate::{
     AfterToolCallContext, AfterToolCallHook, AfterToolCallResult, AgentContext, AgentError,
     AgentEvent, AgentEventStream, AgentLoopConfig, AgentMessage, AgentState, AssistantStreamer,
     BeforeToolCallContext, BeforeToolCallHook, BeforeToolCallResult, ConvertToLlmHook,
-    DefaultAssistantStreamer, GetApiKeyHook, ToolExecutionMode, TransformContextHook, agent_loop,
-    agent_loop_continue,
+    CustomAgentMessage, DefaultAssistantStreamer, GetApiKeyHook, ToolExecutionMode,
+    TransformContextHook, agent_loop, agent_loop_continue,
 };
 use futures::StreamExt;
 use pi_ai::{AiError, PayloadHook, StreamOptions, ThinkingBudgets, Transport};
@@ -22,6 +22,98 @@ use tokio::sync::watch;
 
 type ListenerFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 type Listener = Arc<dyn Fn(AgentEvent, watch::Receiver<bool>) -> ListenerFuture + Send + Sync>;
+
+pub type AgentUnsubscribe = Box<dyn FnOnce() -> bool + Send + 'static>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PromptInput {
+    Text(String),
+    TextWithImages {
+        text: String,
+        images: Vec<UserContent>,
+    },
+    Message(AgentMessage),
+    Messages(Vec<AgentMessage>),
+}
+
+impl PromptInput {
+    fn into_messages(self) -> Vec<AgentMessage> {
+        match self {
+            Self::Text(text) => vec![
+                Message::User {
+                    content: vec![UserContent::Text { text }],
+                    timestamp: now_ms(),
+                }
+                .into(),
+            ],
+            Self::TextWithImages { text, images } => {
+                let mut content = Vec::with_capacity(images.len() + 1);
+                content.push(UserContent::Text { text });
+                content.extend(images);
+                vec![
+                    Message::User {
+                        content,
+                        timestamp: now_ms(),
+                    }
+                    .into(),
+                ]
+            }
+            Self::Message(message) => vec![message],
+            Self::Messages(messages) => messages,
+        }
+    }
+}
+
+impl From<&str> for PromptInput {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_string())
+    }
+}
+
+impl From<String> for PromptInput {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<Message> for PromptInput {
+    fn from(message: Message) -> Self {
+        Self::Message(message.into())
+    }
+}
+
+impl From<AgentMessage> for PromptInput {
+    fn from(message: AgentMessage) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<CustomAgentMessage> for PromptInput {
+    fn from(message: CustomAgentMessage) -> Self {
+        Self::Message(message.into())
+    }
+}
+
+impl<M> From<Vec<M>> for PromptInput
+where
+    M: Into<AgentMessage>,
+{
+    fn from(messages: Vec<M>) -> Self {
+        Self::Messages(messages.into_iter().map(Into::into).collect())
+    }
+}
+
+impl<T> From<(T, Vec<UserContent>)> for PromptInput
+where
+    T: Into<String>,
+{
+    fn from((text, images): (T, Vec<UserContent>)) -> Self {
+        Self::TextWithImages {
+            text: text.into(),
+            images,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QueueMode {
@@ -175,7 +267,17 @@ impl Agent {
         updater(&mut inner.state)
     }
 
-    pub fn subscribe<F, Fut>(&self, listener: F) -> usize
+    pub fn subscribe<F, Fut>(&self, listener: F) -> AgentUnsubscribe
+    where
+        F: Fn(AgentEvent, watch::Receiver<bool>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let id = self.subscribe_id(listener);
+        let agent = self.clone();
+        Box::new(move || agent.unsubscribe(id))
+    }
+
+    pub fn subscribe_id<F, Fut>(&self, listener: F) -> usize
     where
         F: Fn(AgentEvent, watch::Receiver<bool>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
@@ -426,7 +528,7 @@ impl Agent {
     }
 
     pub async fn prompt_text(&self, text: impl Into<String>) -> Result<(), AgentError> {
-        self.prompt_text_with_images(text, Vec::new()).await
+        self.prompt(text.into()).await
     }
 
     pub async fn prompt_text_with_images(
@@ -434,21 +536,22 @@ impl Agent {
         text: impl Into<String>,
         images: Vec<UserContent>,
     ) -> Result<(), AgentError> {
-        let mut content = Vec::with_capacity(images.len() + 1);
-        content.push(UserContent::Text { text: text.into() });
-        content.extend(images);
-        self.prompt(Message::User {
-            content,
-            timestamp: now_ms(),
-        })
-        .await
+        self.prompt((text.into(), images)).await
     }
 
-    pub async fn prompt<M>(&self, message: M) -> Result<(), AgentError>
+    pub async fn prompt_with_images(
+        &self,
+        text: impl Into<String>,
+        images: Vec<UserContent>,
+    ) -> Result<(), AgentError> {
+        self.prompt((text.into(), images)).await
+    }
+
+    pub async fn prompt<P>(&self, input: P) -> Result<(), AgentError>
     where
-        M: Into<AgentMessage>,
+        P: Into<PromptInput>,
     {
-        self.run_request(RunRequest::Prompt(vec![message.into()]))
+        self.run_request(RunRequest::Prompt(input.into().into_messages()))
             .await
     }
 

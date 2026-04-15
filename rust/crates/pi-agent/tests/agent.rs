@@ -14,7 +14,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -236,7 +236,7 @@ async fn prompt_waits_for_async_agent_end_listeners_and_wait_for_idle() {
     let agent = Agent::with_parts(AgentState::new(model()), streamer, StreamOptions::default());
     let entered = listener_entered.clone();
     let release = release_listener.clone();
-    agent.subscribe(move |event, _signal| {
+    let _unsubscribe = agent.subscribe(move |event, _signal| {
         let entered = entered.clone();
         let release = release.clone();
         async move {
@@ -271,6 +271,46 @@ async fn prompt_waits_for_async_agent_end_listeners_and_wait_for_idle() {
 }
 
 #[tokio::test]
+async fn subscribe_returns_unsubscribe_closure_like_typescript() {
+    let listener_calls = Arc::new(AtomicUsize::new(0));
+    let streamer = Arc::new(
+        |_model: Model,
+         _context: Context,
+         _options: StreamOptions|
+         -> Result<AssistantEventStream, AiError> {
+            let message = assistant_message("ok", StopReason::Stop, 20);
+            Ok(Box::pin(try_stream! {
+                yield AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                };
+            }))
+        },
+    );
+
+    let agent = Agent::with_parts(AgentState::new(model()), streamer, StreamOptions::default());
+    let listener_calls_for_subscription = listener_calls.clone();
+    let unsubscribe = agent.subscribe(move |_event, _signal| {
+        let listener_calls_for_subscription = listener_calls_for_subscription.clone();
+        async move {
+            listener_calls_for_subscription.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
+    agent.prompt("hello").await.unwrap();
+    let calls_before_unsubscribe = listener_calls.load(Ordering::Relaxed);
+    assert!(calls_before_unsubscribe > 0);
+
+    let _ = unsubscribe();
+
+    agent.prompt("hello again").await.unwrap();
+    assert_eq!(
+        listener_calls.load(Ordering::Relaxed),
+        calls_before_unsubscribe
+    );
+}
+
+#[tokio::test]
 async fn abort_marks_signal_and_records_aborted_message() {
     let streamer = Arc::new(
         |_model: Model,
@@ -301,7 +341,7 @@ async fn abort_marks_signal_and_records_aborted_message() {
     let abort_seen = Arc::new(Mutex::new(false));
     let abort_seen_listener = abort_seen.clone();
     let agent = Agent::with_parts(AgentState::new(model()), streamer, StreamOptions::default());
-    agent.subscribe(move |event, signal| {
+    let _unsubscribe = agent.subscribe(move |event, signal| {
         let abort_seen_listener = abort_seen_listener.clone();
         async move {
             if matches!(event, AgentEvent::AgentStart) {
@@ -489,6 +529,114 @@ async fn prompt_text_with_images_preserves_text_then_images() {
                 },
             ],
         )
+        .await
+        .unwrap();
+
+    let messages = seen_context_messages.lock().unwrap().clone();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].len(), 1);
+    assert!(matches!(
+        &messages[0][0],
+        Message::User { content, .. }
+            if content == &vec![
+                UserContent::Text { text: String::from("look") },
+                UserContent::Image {
+                    data: String::from("aGVsbG8="),
+                    mime_type: String::from("image/png"),
+                },
+                UserContent::Image {
+                    data: String::from("aW1hZ2U="),
+                    mime_type: String::from("image/jpeg"),
+                },
+            ]
+    ));
+}
+
+#[tokio::test]
+async fn prompt_accepts_text_like_typescript_prompt_string_overload() {
+    let seen_context_messages = Arc::new(Mutex::new(Vec::new()));
+    let streamer = Arc::new({
+        let seen_context_messages = seen_context_messages.clone();
+        move |_model: Model,
+              context: Context,
+              _options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            seen_context_messages
+                .lock()
+                .unwrap()
+                .push(context.messages.clone());
+
+            let message = assistant_message("ok", StopReason::Stop, 20);
+            Ok(Box::pin(try_stream! {
+                yield AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                };
+            }))
+        }
+    });
+
+    let agent = Agent::with_parts(AgentState::new(model()), streamer, StreamOptions::default());
+
+    agent.prompt("hello").await.unwrap();
+
+    let messages = seen_context_messages.lock().unwrap().clone();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].len(), 1);
+    assert!(matches!(
+        &messages[0][0],
+        Message::User { content, .. }
+            if content == &vec![UserContent::Text {
+                text: String::from("hello"),
+            }]
+    ));
+
+    let state = agent.state();
+    assert_eq!(state.messages.len(), 2);
+    assert!(message_has_user_text(&state.messages[0], "hello"));
+    assert!(is_standard_assistant_message(&state.messages[1]));
+}
+
+#[tokio::test]
+async fn prompt_accepts_text_and_images_tuple_like_typescript_prompt_overload() {
+    let seen_context_messages = Arc::new(Mutex::new(Vec::new()));
+    let streamer = Arc::new({
+        let seen_context_messages = seen_context_messages.clone();
+        move |_model: Model,
+              context: Context,
+              _options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            seen_context_messages
+                .lock()
+                .unwrap()
+                .push(context.messages.clone());
+
+            let message = assistant_message("ok", StopReason::Stop, 20);
+            Ok(Box::pin(try_stream! {
+                yield AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                };
+            }))
+        }
+    });
+
+    let agent = Agent::with_parts(AgentState::new(model()), streamer, StreamOptions::default());
+
+    agent
+        .prompt((
+            "look",
+            vec![
+                UserContent::Image {
+                    data: "aGVsbG8=".into(),
+                    mime_type: "image/png".into(),
+                },
+                UserContent::Image {
+                    data: "aW1hZ2U=".into(),
+                    mime_type: "image/jpeg".into(),
+                },
+            ],
+        ))
         .await
         .unwrap();
 
@@ -1121,7 +1269,7 @@ async fn wrapper_runs_tool_flow_and_tracks_pending_tool_calls() {
     let pending_snapshots = Arc::new(Mutex::new(Vec::new()));
     let pending_agent = agent.clone();
     let pending_snapshots_listener = pending_snapshots.clone();
-    agent.subscribe(move |event, _signal| {
+    let _unsubscribe = agent.subscribe(move |event, _signal| {
         let pending_agent = pending_agent.clone();
         let pending_snapshots_listener = pending_snapshots_listener.clone();
         async move {
@@ -1222,7 +1370,7 @@ async fn wrapper_preserves_pending_tool_call_iteration_order_like_typescript_set
     let pending_snapshots = Arc::new(Mutex::new(Vec::new()));
     let pending_agent = agent.clone();
     let pending_snapshots_listener = pending_snapshots.clone();
-    agent.subscribe(move |event, _signal| {
+    let _unsubscribe = agent.subscribe(move |event, _signal| {
         let pending_agent = pending_agent.clone();
         let pending_snapshots_listener = pending_snapshots_listener.clone();
         async move {
@@ -1314,7 +1462,7 @@ async fn wrapper_forwards_tool_execution_updates_to_listeners() {
     let update_snapshots = Arc::new(Mutex::new(Vec::new()));
     let update_snapshots_listener = update_snapshots.clone();
     let update_agent = agent.clone();
-    agent.subscribe(move |event, _signal| {
+    let _unsubscribe = agent.subscribe(move |event, _signal| {
         let update_snapshots_listener = update_snapshots_listener.clone();
         let update_agent = update_agent.clone();
         async move {
@@ -1595,7 +1743,7 @@ async fn wrapper_can_switch_to_sequential_tool_execution() {
 
     let tool_result_ids = Arc::new(Mutex::new(Vec::new()));
     let tool_result_ids_listener = tool_result_ids.clone();
-    agent.subscribe(move |event, _signal| {
+    let _unsubscribe = agent.subscribe(move |event, _signal| {
         let tool_result_ids_listener = tool_result_ids_listener.clone();
         async move {
             if let AgentEvent::MessageEnd {

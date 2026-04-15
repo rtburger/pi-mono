@@ -8,7 +8,7 @@ mod state;
 mod tool;
 mod validation;
 
-pub use agent::{Agent, QueueMode};
+pub use agent::{Agent, AgentUnsubscribe, PromptInput, QueueMode};
 pub use error::AgentError;
 pub use r#loop::{
     AfterToolCallContext, AfterToolCallHook, AfterToolCallResult, AgentEvent, AgentEventStream,

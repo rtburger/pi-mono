@@ -1,6 +1,6 @@
 use crate::startup_shell::{ShellUpdateHandle, tool_result_from_user_content, user_message_text};
 use crate::{FooterState, StartupShellComponent, StatusHandle};
-use pi_agent::{Agent, AgentEvent, ThinkingLevel};
+use pi_agent::{AgentEvent, AgentUnsubscribe, ThinkingLevel};
 use pi_coding_agent_core::CodingAgentCore;
 use pi_events::{AssistantMessage, Message, UserContent};
 use pi_tui::RenderHandle;
@@ -41,8 +41,7 @@ impl PendingMessageState {
 }
 
 pub struct InteractiveCoreBinding {
-    agent: Agent,
-    listener_id: usize,
+    unsubscribe: Option<AgentUnsubscribe>,
 }
 
 impl InteractiveCoreBinding {
@@ -73,8 +72,7 @@ impl InteractiveCoreBinding {
         );
         sync_existing_state(&core, &update_handle, &status_handle);
 
-        let agent = core.agent();
-        let listener_id = agent.subscribe(move |event, _signal| {
+        let unsubscribe = core.agent().subscribe(move |event, _signal| {
             let update_handle = update_handle.clone();
             let status_handle = status_handle.clone();
             let pending_messages = pending_messages.clone();
@@ -83,13 +81,17 @@ impl InteractiveCoreBinding {
             })
         });
 
-        Self { agent, listener_id }
+        Self {
+            unsubscribe: Some(unsubscribe),
+        }
     }
 }
 
 impl Drop for InteractiveCoreBinding {
     fn drop(&mut self) {
-        let _ = self.agent.unsubscribe(self.listener_id);
+        if let Some(unsubscribe) = self.unsubscribe.take() {
+            let _ = unsubscribe();
+        }
     }
 }
 
