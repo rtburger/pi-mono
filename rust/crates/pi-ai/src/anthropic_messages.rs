@@ -51,6 +51,7 @@ pub struct AnthropicOptions {
     pub effort: Option<String>,
     pub interleaved_thinking: bool,
     pub metadata_user_id: Option<String>,
+    pub tool_choice: Option<AnthropicToolChoice>,
 }
 
 impl Default for AnthropicOptions {
@@ -67,6 +68,7 @@ impl Default for AnthropicOptions {
             effort: None,
             interleaved_thinking: true,
             metadata_user_id: None,
+            tool_choice: None,
         }
     }
 }
@@ -91,6 +93,8 @@ pub struct AnthropicRequestParams {
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<AnthropicToolDefinition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<AnthropicToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<AnthropicThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,6 +174,15 @@ pub struct AnthropicToolDefinition {
     pub input_schema: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicToolChoice {
+    Auto,
+    Any,
+    None,
+    Tool { name: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicThinkingConfig {
@@ -246,6 +259,7 @@ pub fn build_anthropic_request_params(
             None
         },
         tools: (!context.tools.is_empty()).then(|| convert_tools(&context.tools, is_oauth_token)),
+        tool_choice: options.tool_choice.clone(),
         thinking,
         output_config,
         metadata,
@@ -1115,6 +1129,10 @@ fn anthropic_options_from_stream_options(
             .get("user_id")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
+        tool_choice: options
+            .tool_choice
+            .as_ref()
+            .and_then(anthropic_tool_choice_from_stream_choice),
         ..AnthropicOptions::default()
     };
 
@@ -1133,6 +1151,27 @@ fn anthropic_options_from_stream_options(
     }
 
     mapped
+}
+
+fn anthropic_tool_choice_from_stream_choice(
+    tool_choice: &crate::openai_completions::OpenAiCompletionsToolChoice,
+) -> Option<AnthropicToolChoice> {
+    match tool_choice {
+        crate::openai_completions::OpenAiCompletionsToolChoice::Mode(
+            crate::openai_completions::OpenAiCompletionsToolChoiceMode::Auto,
+        ) => Some(AnthropicToolChoice::Auto),
+        crate::openai_completions::OpenAiCompletionsToolChoice::Mode(
+            crate::openai_completions::OpenAiCompletionsToolChoiceMode::None,
+        ) => Some(AnthropicToolChoice::None),
+        crate::openai_completions::OpenAiCompletionsToolChoice::Mode(
+            crate::openai_completions::OpenAiCompletionsToolChoiceMode::Required,
+        ) => Some(AnthropicToolChoice::Any),
+        crate::openai_completions::OpenAiCompletionsToolChoice::Function(function) => {
+            Some(AnthropicToolChoice::Tool {
+                name: function.function.name.clone(),
+            })
+        }
+    }
 }
 
 fn build_runtime_request_headers(

@@ -16,6 +16,16 @@ use std::env;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiResponsesServiceTier {
+    Auto,
+    Default,
+    Flex,
+    Scale,
+    Priority,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct OpenAiResponsesParamsOptions {
     pub max_output_tokens: Option<u64>,
@@ -24,6 +34,7 @@ pub struct OpenAiResponsesParamsOptions {
     pub reasoning_summary: Option<String>,
     pub session_id: Option<String>,
     pub cache_retention: Option<String>,
+    pub service_tier: Option<OpenAiResponsesServiceTier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,6 +63,8 @@ pub struct OpenAiResponsesRequestParams {
     pub include: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ResponsesToolDefinition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<OpenAiResponsesServiceTier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +206,7 @@ pub fn build_openai_responses_request_params(
         } else {
             Some(convert_openai_responses_tools(&context.tools))
         },
+        service_tier: options.service_tier,
     }
 }
 
@@ -869,6 +883,7 @@ pub(crate) enum OpenAiResponsesBlockKind {
 pub(crate) struct OpenAiResponsesStreamState {
     output: AssistantMessage,
     model_cost: ModelCost,
+    requested_service_tier: Option<OpenAiResponsesServiceTier>,
     current_block_index: Option<usize>,
     current_block_kind: Option<OpenAiResponsesBlockKind>,
     current_tool_json: String,
@@ -876,12 +891,20 @@ pub(crate) struct OpenAiResponsesStreamState {
 
 impl OpenAiResponsesStreamState {
     pub(crate) fn new(model: &Model) -> Self {
+        Self::with_requested_service_tier(model, None)
+    }
+
+    pub(crate) fn with_requested_service_tier(
+        model: &Model,
+        requested_service_tier: Option<OpenAiResponsesServiceTier>,
+    ) -> Self {
         let mut output =
             AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone());
         output.timestamp = now_ms();
         Self {
             output,
             model_cost: model.cost,
+            requested_service_tier,
             current_block_index: None,
             current_block_kind: None,
             current_tool_json: String::new(),
@@ -1217,6 +1240,10 @@ impl OpenAiResponsesStreamState {
                     .map(ToOwned::to_owned)
                     .or(self.output.response_id.clone());
                 apply_usage_from_response(&mut self.output, &response, self.model_cost);
+                apply_service_tier_pricing(
+                    &mut self.output.usage,
+                    response_service_tier(&response).or(self.requested_service_tier),
+                );
                 self.output.stop_reason =
                     map_response_status(response.get("status").and_then(Value::as_str));
                 if self
@@ -1319,7 +1346,14 @@ pub fn stream_openai_responses_http<T>(
 where
     T: Serialize + Send + Sync + 'static,
 {
-    stream_openai_responses_http_with_headers(model, params, api_key, signal, BTreeMap::new())
+    stream_openai_responses_http_with_runtime_options(
+        model,
+        params,
+        api_key,
+        signal,
+        None,
+        BTreeMap::new(),
+    )
 }
 
 pub fn stream_openai_responses_http_with_headers<T>(
@@ -1332,9 +1366,30 @@ pub fn stream_openai_responses_http_with_headers<T>(
 where
     T: Serialize + Send + Sync + 'static,
 {
+    stream_openai_responses_http_with_runtime_options(
+        model,
+        params,
+        api_key,
+        signal,
+        None,
+        request_headers,
+    )
+}
+
+fn stream_openai_responses_http_with_runtime_options<T>(
+    model: Model,
+    params: T,
+    api_key: String,
+    signal: Option<tokio::sync::watch::Receiver<bool>>,
+    requested_service_tier: Option<OpenAiResponsesServiceTier>,
+    request_headers: BTreeMap<String, String>,
+) -> AssistantEventStream
+where
+    T: Serialize + Send + Sync + 'static,
+{
     Box::pin(stream! {
         let mut signal = signal;
-        let mut state = OpenAiResponsesStreamState::new(&model);
+        let mut state = OpenAiResponsesStreamState::with_requested_service_tier(&model, requested_service_tier);
 
         if is_signal_aborted(&signal) {
             yield Ok(state.aborted_event());
@@ -1554,6 +1609,41 @@ fn parse_streaming_json_map(input: &str) -> BTreeMap<String, Value> {
     crate::partial_json::parse_partial_json_map(input)
 }
 
+fn response_service_tier(
+    response: &serde_json::Map<String, Value>,
+) -> Option<OpenAiResponsesServiceTier> {
+    match response.get("service_tier").and_then(Value::as_str) {
+        Some("auto") => Some(OpenAiResponsesServiceTier::Auto),
+        Some("default") => Some(OpenAiResponsesServiceTier::Default),
+        Some("flex") => Some(OpenAiResponsesServiceTier::Flex),
+        Some("scale") => Some(OpenAiResponsesServiceTier::Scale),
+        Some("priority") => Some(OpenAiResponsesServiceTier::Priority),
+        _ => None,
+    }
+}
+
+fn service_tier_cost_multiplier(service_tier: Option<OpenAiResponsesServiceTier>) -> f64 {
+    match service_tier {
+        Some(OpenAiResponsesServiceTier::Flex) => 0.5,
+        Some(OpenAiResponsesServiceTier::Priority) => 2.0,
+        _ => 1.0,
+    }
+}
+
+fn apply_service_tier_pricing(usage: &mut Usage, service_tier: Option<OpenAiResponsesServiceTier>) {
+    let multiplier = service_tier_cost_multiplier(service_tier);
+    if (multiplier - 1.0).abs() < f64::EPSILON {
+        return;
+    }
+
+    usage.cost.input *= multiplier;
+    usage.cost.output *= multiplier;
+    usage.cost.cache_read *= multiplier;
+    usage.cost.cache_write *= multiplier;
+    usage.cost.total =
+        usage.cost.input + usage.cost.output + usage.cost.cache_read + usage.cost.cache_write;
+}
+
 fn apply_usage_from_response(
     output: &mut AssistantMessage,
     response: &serde_json::Map<String, Value>,
@@ -1682,6 +1772,7 @@ impl AiProvider for OpenAiResponsesProvider {
                         crate::CacheRetention::Short => "short".into(),
                         crate::CacheRetention::Long => "long".into(),
                     }),
+                    service_tier: options.service_tier,
                 },
             );
             let payload = match crate::apply_payload_hook(&model, params, options.on_payload.as_ref()).await {
@@ -1702,11 +1793,12 @@ impl AiProvider for OpenAiResponsesProvider {
                 .or_else(|| crate::get_env_api_key(&model.provider));
 
             let mut inner = match api_key {
-                Some(api_key) => stream_openai_responses_http_with_headers(
+                Some(api_key) => stream_openai_responses_http_with_runtime_options(
                     model,
                     payload,
                     api_key,
                     options.signal.clone(),
+                    options.service_tier,
                     request_headers,
                 ),
                 None => Box::pin(stream! {

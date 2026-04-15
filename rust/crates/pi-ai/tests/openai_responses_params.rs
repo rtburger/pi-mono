@@ -1,6 +1,7 @@
 use pi_ai::openai_responses::{
     OpenAiResponsesConvertOptions, OpenAiResponsesParamsOptions, OpenAiResponsesReasoning,
-    ResponsesInputItem, ResponsesToolDefinition, build_openai_responses_request_params,
+    OpenAiResponsesServiceTier, ResponsesInputItem, ResponsesToolDefinition,
+    build_openai_responses_request_params,
 };
 use pi_events::{Context, Message, Model, ToolDefinition, UserContent};
 use serde_json::{Value, json};
@@ -129,6 +130,26 @@ fn includes_tools_in_request_params_when_present() {
         }
         other => panic!("expected function tool definition, got {other:?}"),
     }
+}
+
+#[test]
+fn includes_service_tier_when_requested() {
+    let params = build_openai_responses_request_params(
+        &model("openai", "gpt-5-mini", true),
+        &simple_context(),
+        &["openai", "openai-codex"],
+        OpenAiResponsesConvertOptions::default(),
+        OpenAiResponsesParamsOptions {
+            service_tier: Some(OpenAiResponsesServiceTier::Flex),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(params.service_tier, Some(OpenAiResponsesServiceTier::Flex));
+    assert_eq!(
+        serde_json::to_value(&params).unwrap()["service_tier"],
+        "flex"
+    );
 }
 
 #[test]

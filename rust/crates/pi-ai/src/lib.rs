@@ -130,6 +130,7 @@ pub struct StreamOptions {
     pub reasoning_effort: Option<String>,
     pub reasoning_summary: Option<String>,
     pub tool_choice: Option<crate::openai_completions::OpenAiCompletionsToolChoice>,
+    pub service_tier: Option<crate::openai_responses::OpenAiResponsesServiceTier>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +185,7 @@ pub struct SimpleStreamOptions {
     pub reasoning: Option<ThinkingLevel>,
     pub thinking_budgets: ThinkingBudgets,
     pub tool_choice: Option<crate::openai_completions::OpenAiCompletionsToolChoice>,
+    pub service_tier: Option<crate::openai_responses::OpenAiResponsesServiceTier>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -328,6 +330,7 @@ fn map_simple_stream_options(model: &Model, options: SimpleStreamOptions) -> Str
         reasoning,
         thinking_budgets,
         tool_choice,
+        service_tier,
     } = options;
 
     let base_max_tokens = max_tokens
@@ -373,6 +376,7 @@ fn map_simple_stream_options(model: &Model, options: SimpleStreamOptions) -> Str
         reasoning_effort,
         reasoning_summary: None,
         tool_choice,
+        service_tier,
     }
 }
 

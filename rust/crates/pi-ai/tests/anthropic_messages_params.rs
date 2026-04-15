@@ -1,7 +1,7 @@
 use pi_ai::CacheRetention;
 use pi_ai::anthropic_messages::{
     AnthropicContentBlock, AnthropicMessageContent, AnthropicOptions, AnthropicThinkingConfig,
-    build_anthropic_request_params, convert_anthropic_messages,
+    AnthropicToolChoice, build_anthropic_request_params, convert_anthropic_messages,
 };
 use pi_events::{
     AssistantContent, Context, Message, Model, StopReason, ToolDefinition, Usage, UserContent,
@@ -54,6 +54,51 @@ fn simple_context() -> Context {
         }],
         tools: vec![],
     }
+}
+
+#[test]
+fn build_params_serializes_tool_choice_modes_and_named_tools() {
+    let context = Context {
+        tools: vec![tool("read")],
+        ..simple_context()
+    };
+
+    let any = build_anthropic_request_params(
+        &model("claude-sonnet-4-5", "https://api.anthropic.com/v1"),
+        &context,
+        false,
+        &AnthropicOptions {
+            tool_choice: Some(AnthropicToolChoice::Any),
+            ..AnthropicOptions::default()
+        },
+    );
+    assert_eq!(any.tool_choice, Some(AnthropicToolChoice::Any));
+    assert_eq!(
+        serde_json::to_value(&any).unwrap()["tool_choice"],
+        json!({ "type": "any" })
+    );
+
+    let named = build_anthropic_request_params(
+        &model("claude-sonnet-4-5", "https://api.anthropic.com/v1"),
+        &context,
+        false,
+        &AnthropicOptions {
+            tool_choice: Some(AnthropicToolChoice::Tool {
+                name: "read".into(),
+            }),
+            ..AnthropicOptions::default()
+        },
+    );
+    assert_eq!(
+        named.tool_choice,
+        Some(AnthropicToolChoice::Tool {
+            name: "read".into(),
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(&named).unwrap()["tool_choice"],
+        json!({ "type": "tool", "name": "read" })
+    );
 }
 
 #[test]

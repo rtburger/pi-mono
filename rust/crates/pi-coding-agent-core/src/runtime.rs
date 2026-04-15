@@ -256,6 +256,7 @@ fn map_stream_options_to_simple_options(
         reasoning,
         thinking_budgets,
         tool_choice: options.tool_choice,
+        service_tier: options.service_tier,
     }
 }
 

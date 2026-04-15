@@ -229,6 +229,7 @@ async fn passes_runtime_options_into_http_request_body() {
             reasoning_summary: Some("detailed".into()),
             session_id: Some("session-1".into()),
             cache_retention: Some("short".into()),
+            service_tier: None,
         },
     );
 

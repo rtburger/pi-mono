@@ -3,6 +3,7 @@ use pi_ai::openai_completions::{
     OpenAiCompletionsFunctionChoice, OpenAiCompletionsToolChoice,
     OpenAiCompletionsToolChoiceFunction,
 };
+use pi_ai::openai_responses::OpenAiResponsesServiceTier;
 use pi_ai::{
     FauxResponse, PayloadHook, RegisterFauxProviderOptions, SimpleStreamOptions, ThinkingLevel,
     complete_simple, register_faux_provider,
@@ -135,33 +136,34 @@ fn openai_codex_token() -> String {
     )
 }
 
-async fn capture_simple_payload(model: Model) -> Value {
+async fn capture_simple_payload_with_context(
+    model: Model,
+    context: Context,
+    mut options: SimpleStreamOptions,
+) -> Value {
     let captured = Arc::new(Mutex::new(None));
     let captured_for_hook = Arc::clone(&captured);
 
-    let _response = complete_simple(
-        model,
-        base_context(),
-        SimpleStreamOptions {
-            api_key: Some("test-key".into()),
-            on_payload: Some(PayloadHook::new(move |payload, _model| {
-                let captured_for_hook = Arc::clone(&captured_for_hook);
-                async move {
-                    *captured_for_hook.lock().unwrap() = Some(payload.clone());
-                    Ok(Some(payload))
-                }
-            })),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
+    options.api_key = options.api_key.or_else(|| Some("test-key".into()));
+    options.on_payload = Some(PayloadHook::new(move |payload, _model| {
+        let captured_for_hook = Arc::clone(&captured_for_hook);
+        async move {
+            *captured_for_hook.lock().unwrap() = Some(payload.clone());
+            Ok(Some(payload))
+        }
+    }));
+
+    let _response = complete_simple(model, context, options).await.unwrap();
 
     captured
         .lock()
         .unwrap()
         .clone()
         .expect("payload should be captured before request failure")
+}
+
+async fn capture_simple_payload(model: Model) -> Value {
+    capture_simple_payload_with_context(model, base_context(), SimpleStreamOptions::default()).await
 }
 
 #[tokio::test]
@@ -322,6 +324,46 @@ async fn simple_anthropic_disables_thinking_for_adaptive_reasoning_models_by_def
         Some(&json!({ "type": "disabled" }))
     );
     assert!(payload.get("output_config").is_none());
+}
+
+#[tokio::test]
+async fn simple_openai_responses_passes_service_tier_into_request_body() {
+    let payload = capture_simple_payload_with_context(
+        openai_responses_model("http://127.0.0.1:9".into(), 64_000),
+        base_context(),
+        SimpleStreamOptions {
+            service_tier: Some(OpenAiResponsesServiceTier::Flex),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert_eq!(payload.get("service_tier"), Some(&json!("flex")));
+}
+
+#[tokio::test]
+async fn simple_anthropic_maps_function_tool_choice_to_named_tool() {
+    let payload = capture_simple_payload_with_context(
+        anthropic_model("http://127.0.0.1:9".into(), 40_000),
+        context_with_tool(),
+        SimpleStreamOptions {
+            tool_choice: Some(OpenAiCompletionsToolChoice::Function(
+                OpenAiCompletionsFunctionChoice {
+                    choice_type: "function".into(),
+                    function: OpenAiCompletionsToolChoiceFunction {
+                        name: "calculator".into(),
+                    },
+                },
+            )),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert_eq!(
+        payload.get("tool_choice"),
+        Some(&json!({ "type": "tool", "name": "calculator" }))
+    );
 }
 
 #[tokio::test]
