@@ -24,10 +24,11 @@ use pi_coding_agent_core::{
     CodingAgentCoreOptions, CompactionResult, CompactionSettings, ContextUsageEstimate,
     CustomMessage, CustomMessageContent, ExistingSessionSelection, FooterDataProvider,
     ModelRegistry, NewSessionOptions, ScopedModel, SessionBootstrapOptions, SessionEntry,
-    SessionHeader, SessionInfo, SessionManager, calculate_context_tokens, compact,
-    create_coding_agent_core, estimate_context_tokens, find_exact_model_reference_match,
-    get_default_session_dir, parse_thinking_level, prepare_compaction, resolve_cli_model,
-    resolve_model_scope, resolve_prompt_input, restore_model_from_session, should_compact,
+    SessionHeader, SessionInfo, SessionManager, build_default_pi_system_prompt,
+    calculate_context_tokens, compact, create_coding_agent_core, estimate_context_tokens,
+    find_exact_model_reference_match, get_default_session_dir, parse_thinking_level,
+    prepare_compaction, resolve_cli_model, resolve_model_scope, resolve_prompt_input,
+    restore_model_from_session, should_compact,
 };
 use pi_coding_agent_tui::{
     CustomMessageComponent, DEFAULT_APP_KEYBINDINGS, ExternalEditorCommandRunner,
@@ -887,6 +888,13 @@ async fn run_interactive_command_with_runtime(
             None
         };
 
+        let default_system_prompt_for_iteration = resolve_interactive_default_system_prompt(
+            &default_system_prompt,
+            &current_cwd,
+            agent_dir.as_deref(),
+            &parsed_for_iteration,
+        );
+
         let outcome = run_interactive_iteration(InteractiveIterationOptions {
             parsed: parsed_for_iteration,
             stdin_is_tty,
@@ -896,7 +904,7 @@ async fn run_interactive_command_with_runtime(
             models_json_path: models_json_path.clone(),
             agent_dir: agent_dir.clone(),
             cwd: current_cwd.clone(),
-            default_system_prompt: default_system_prompt.clone(),
+            default_system_prompt: default_system_prompt_for_iteration,
             version: version.clone(),
             stream_options: stream_options.clone(),
             runtime: runtime.clone(),
@@ -1369,6 +1377,24 @@ fn create_keybindings_manager(agent_dir: Option<&Path>) -> KeybindingsManager {
     };
     keybindings.reload();
     keybindings
+}
+
+fn resolve_interactive_default_system_prompt(
+    default_system_prompt: &str,
+    cwd: &Path,
+    agent_dir: Option<&Path>,
+    parsed: &Args,
+) -> String {
+    let Some(agent_dir) = agent_dir else {
+        return default_system_prompt.to_owned();
+    };
+
+    finalize_system_prompt(build_default_pi_system_prompt(
+        cwd,
+        agent_dir,
+        parsed.system_prompt.as_deref(),
+        parsed.append_system_prompt.as_deref(),
+    ))
 }
 
 fn sanitize_interactive_follow_up_args(parsed: &Args) -> Args {
@@ -1875,7 +1901,9 @@ async fn resolve_interactive_transition(
                 cwd,
                 manager: Some(manager),
                 prefill_input: None,
-                initial_status_message: Some(String::from("Reloaded keybindings and settings")),
+                initial_status_message: Some(String::from(
+                    "Reloaded keybindings, prompts, and settings",
+                )),
                 bootstrap_defaults: Some(BootstrapDefaults::from_model(
                     &session_context.model,
                     session_context.thinking_level,
@@ -3907,7 +3935,7 @@ fn build_interactive_slash_commands(
         simple_slash_command("new", "Start a new session"),
         simple_slash_command("compact", "Compact the current session context"),
         simple_slash_command("resume", "Resume a different session"),
-        simple_slash_command("reload", "Reload keybindings and settings"),
+        simple_slash_command("reload", "Reload keybindings, prompts, and settings"),
         SlashCommand {
             name: String::from("quit"),
             description: Some(String::from("Quit pi")),
@@ -6201,6 +6229,41 @@ mod tests {
         let resolved = resolve_system_prompt(&finalized, Some("override"), Some("append"));
 
         assert_eq!(resolved, "final prompt");
+    }
+
+    #[test]
+    fn interactive_default_system_prompt_reloads_prompt_resources() {
+        let cwd = unique_temp_dir("interactive-default-system-prompt-cwd");
+        let agent_dir = unique_temp_dir("interactive-default-system-prompt-agent");
+        fs::create_dir_all(cwd.join(".pi")).unwrap();
+        fs::write(cwd.join(".pi").join("SYSTEM.md"), "initial system\n").unwrap();
+        fs::write(cwd.join("AGENTS.md"), "initial agents\n").unwrap();
+
+        let parsed = Args::default();
+        let initial = resolve_interactive_default_system_prompt(
+            "cached prompt",
+            &cwd,
+            Some(agent_dir.as_path()),
+            &parsed,
+        );
+
+        assert!(initial.contains("initial system\n"), "prompt: {initial}");
+        assert!(initial.contains("initial agents\n"), "prompt: {initial}");
+
+        fs::write(cwd.join(".pi").join("SYSTEM.md"), "updated system\n").unwrap();
+        fs::write(cwd.join("AGENTS.md"), "updated agents\n").unwrap();
+
+        let reloaded = resolve_interactive_default_system_prompt(
+            "cached prompt",
+            &cwd,
+            Some(agent_dir.as_path()),
+            &parsed,
+        );
+
+        assert!(reloaded.contains("updated system\n"), "prompt: {reloaded}");
+        assert!(reloaded.contains("updated agents\n"), "prompt: {reloaded}");
+        assert!(!reloaded.contains("initial system\n"), "prompt: {reloaded}");
+        assert!(!reloaded.contains("initial agents\n"), "prompt: {reloaded}");
     }
 
     #[test]
