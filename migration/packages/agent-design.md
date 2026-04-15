@@ -147,12 +147,8 @@ The Rust workspace already has a non-empty `pi-agent` crate with the intended mo
 - `Agent::prompt_text_with_images()` now mirrors the TS string-plus-images prompt shape by preserving the text block first and then appending image content blocks in order.
 - `AgentMessage::is_assistant()` now follows the message role string, so custom messages with role `assistant` are treated the same way as standard assistant messages during continue validation.
 - Error tool results now use empty-object details (`{}`) instead of null, matching the TS blocked/validation-failure tool result shape.
+- `Agent::continue()` now accepts transcripts whose last message is a tool result and preserves that tool-result turn in the LLM context, matching the TS continue-from-tool-result e2e scenario.
 
 ## Recommended next step
 
-Validate the existing Rust `pi-agent` crate against the TS edge cases that are easiest to freeze into fixtures first:
-- queued steering after tool batches
-- `continue()` from assistant tails with queued messages
-- async listener barrier timing
-- parallel tool ordering
-- decide whether transcript tool-result details should be preserved across the shared message schema before expanding this slice
+Validate the remaining batch-prompt shape (`prompt_messages` / TS `prompt([...])`) and compare it against a small TS-derived regression before moving to the next unresolved slice.

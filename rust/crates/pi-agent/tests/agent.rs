@@ -359,6 +359,93 @@ async fn continue_uses_existing_state_and_updates_transcript() {
 }
 
 #[tokio::test]
+async fn continue_uses_existing_tool_result_state_and_updates_transcript() {
+    let seen_context_messages = Arc::new(Mutex::new(Vec::new()));
+    let streamer = Arc::new({
+        let seen_context_messages = seen_context_messages.clone();
+        move |_model: Model,
+              context: Context,
+              _options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            seen_context_messages
+                .lock()
+                .unwrap()
+                .push(context.messages.clone());
+
+            let message = assistant_message("The answer is 8.", StopReason::Stop, 30);
+            Ok(Box::pin(try_stream! {
+                yield AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                };
+            }))
+        }
+    });
+
+    let mut initial_state = AgentState::new(model());
+    initial_state
+        .messages
+        .push(user_message("What is 5 + 3?", 10).into());
+    let assistant_tool_call = assistant_tool_call_message(
+        "calc-1",
+        "calculate",
+        serde_json::Map::from_iter([(
+            String::from("expression"),
+            Value::String("5 + 3".into()),
+        )]),
+        11,
+    );
+    initial_state.messages.push(
+        Message::Assistant {
+            content: assistant_tool_call.content,
+            api: assistant_tool_call.api,
+            provider: assistant_tool_call.provider,
+            model: assistant_tool_call.model,
+            response_id: assistant_tool_call.response_id,
+            usage: assistant_tool_call.usage,
+            stop_reason: assistant_tool_call.stop_reason,
+            error_message: assistant_tool_call.error_message,
+            timestamp: assistant_tool_call.timestamp,
+        }
+        .into(),
+    );
+    initial_state.messages.push(
+        Message::ToolResult {
+            tool_call_id: String::from("calc-1"),
+            tool_name: String::from("calculate"),
+            content: vec![UserContent::Text {
+                text: String::from("5 + 3 = 8"),
+            }],
+            details: Some(json!({ "value": 8 })),
+            is_error: false,
+            timestamp: 12,
+        }
+        .into(),
+    );
+    let agent = Agent::with_parts(initial_state, streamer, StreamOptions::default());
+
+    agent.r#continue().await.unwrap();
+
+    let contexts = seen_context_messages.lock().unwrap().clone();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].len(), 3);
+    assert!(matches!(
+        &contexts[0][2],
+        Message::ToolResult { tool_call_id, .. } if tool_call_id == "calc-1"
+    ));
+
+    let state = agent.state();
+    assert_eq!(state.messages.len(), 4);
+    assert!(is_standard_user_message(&state.messages[0]));
+    assert!(matches!(
+        &state.messages[1],
+        AgentMessage::Standard(Message::Assistant { stop_reason, .. }) if stop_reason == &StopReason::ToolUse
+    ));
+    assert!(is_standard_tool_result_message(&state.messages[2]));
+    assert!(is_standard_assistant_message(&state.messages[3]));
+}
+
+#[tokio::test]
 async fn prompt_text_with_images_preserves_text_then_images() {
     let seen_context_messages = Arc::new(Mutex::new(Vec::new()));
     let streamer = Arc::new({
