@@ -149,6 +149,7 @@ The Rust workspace already has a non-empty `pi-agent` crate with the intended mo
 - Error tool results now use empty-object details (`{}`) instead of null, matching the TS blocked/validation-failure tool result shape.
 - `Agent::continue()` now accepts transcripts whose last message is a tool result and preserves that tool-result turn in the LLM context, matching the TS continue-from-tool-result e2e scenario.
 - Batch prompt shape is now pinned as well: `Agent::prompt_messages(...)` preserves multiple prompt messages in order and forwards them to the streamer unchanged, matching the TS `prompt([...])` batch path.
+- `Agent::continue()` now prefers queued steering messages over queued follow-up messages when both are present on an assistant tail, and the follow-up queue is still drained in the same continuation run after the steering turn completes.
 
 ## Recommended next step
 

@@ -775,6 +775,72 @@ async fn continue_keeps_steering_queue_one_at_a_time_from_assistant_tail() {
 }
 
 #[tokio::test]
+async fn continue_prefers_queued_steering_messages_over_follow_up_messages_from_assistant_tail() {
+    let response_count = Arc::new(Mutex::new(0usize));
+    let streamer = Arc::new({
+        let response_count = response_count.clone();
+        move |_model: Model,
+              _context: Context,
+              _options: StreamOptions|
+              -> Result<AssistantEventStream, AiError> {
+            let response_count = response_count.clone();
+            Ok(Box::pin(try_stream! {
+                let next_count = {
+                    let mut response_count = response_count.lock().unwrap();
+                    *response_count += 1;
+                    *response_count
+                };
+                let message = assistant_message(
+                    &format!("processed {next_count}"),
+                    StopReason::Stop,
+                    20 + next_count as u64,
+                );
+                yield AssistantEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                };
+            }))
+        }
+    });
+
+    let mut initial_state = AgentState::new(model());
+    initial_state.messages.push(user_message("initial", 10).into());
+    initial_state.messages.push(
+        Message::Assistant {
+            content: vec![AssistantContent::Text {
+                text: String::from("initial response"),
+                text_signature: None,
+            }],
+            api: String::from("faux:test"),
+            provider: String::from("faux"),
+            model: String::from("mock"),
+            response_id: None,
+            usage: usage(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 11,
+        }
+        .into(),
+    );
+
+    let agent = Agent::with_parts(initial_state, streamer, StreamOptions::default());
+    agent.steer(user_message("steering", 12));
+    agent.follow_up(user_message("follow up", 13));
+
+    agent.r#continue().await.unwrap();
+
+    assert_eq!(*response_count.lock().unwrap(), 2);
+    assert!(!agent.has_queued_messages());
+
+    let state = agent.state();
+    assert_eq!(state.messages.len(), 6);
+    assert!(message_has_user_text(&state.messages[2], "steering"));
+    assert!(is_standard_assistant_message(&state.messages[3]));
+    assert!(message_has_user_text(&state.messages[4], "follow up"));
+    assert!(is_standard_assistant_message(&state.messages[5]));
+}
+
+#[tokio::test]
 async fn prompt_drains_all_follow_up_messages_when_mode_is_all() {
     let response_count = Arc::new(Mutex::new(0usize));
     let saw_follow_ups_in_context = Arc::new(Mutex::new(false));
