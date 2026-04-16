@@ -234,6 +234,111 @@ async fn run_command_print_mode_expands_skill_commands_from_project_resources() 
 }
 
 #[tokio::test]
+async fn run_command_print_mode_accepts_extension_flags_without_rejecting() {
+    let provider = unique_name("extension-provider");
+    let model_id = unique_name("extension-model");
+    let (api, recorded) = register_recording_provider("done");
+    let built_in_model = model(&api, &provider, &model_id);
+    let cwd = unique_temp_dir("resources-extension-flags");
+    let extension_path = cwd.join("demo-extension.ts");
+    fs::write(&extension_path, "export default function () {}\n").unwrap();
+
+    let result = run_command(RunCommandOptions {
+        args: vec![
+            String::from("-p"),
+            String::from("--provider"),
+            provider.clone(),
+            String::from("--model"),
+            model_id.clone(),
+            String::from("--no-extensions"),
+            String::from("--extension"),
+            extension_path.to_string_lossy().into_owned(),
+            String::from("hello"),
+        ],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            provider.as_str(),
+            "token",
+        )])),
+        built_in_models: vec![built_in_model],
+        models_json_path: None,
+        agent_dir: Some(cwd.join("agent")),
+        cwd: cwd.clone(),
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+    assert!(
+        !result
+            .stderr
+            .contains("Extension loading is not supported in the Rust CLI yet"),
+        "stderr: {}",
+        result.stderr
+    );
+    let request = recorded.lock().unwrap().clone();
+    let context = request.context.expect("expected recorded context");
+    assert_eq!(last_user_text(&context), "hello");
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
+async fn run_command_warns_for_missing_extension_paths() {
+    let provider = unique_name("missing-extension-provider");
+    let model_id = unique_name("missing-extension-model");
+    let (api, recorded) = register_recording_provider("done");
+    let built_in_model = model(&api, &provider, &model_id);
+    let cwd = unique_temp_dir("resources-missing-extension");
+    let missing_extension_path = cwd.join("missing-extension.ts");
+
+    let result = run_command(RunCommandOptions {
+        args: vec![
+            String::from("-p"),
+            String::from("--provider"),
+            provider.clone(),
+            String::from("--model"),
+            model_id.clone(),
+            String::from("--extension"),
+            missing_extension_path.to_string_lossy().into_owned(),
+            String::from("hello"),
+        ],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            provider.as_str(),
+            "token",
+        )])),
+        built_in_models: vec![built_in_model],
+        models_json_path: None,
+        agent_dir: Some(cwd.join("agent")),
+        cwd: cwd.clone(),
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+    assert!(
+        result.stderr.contains(&format!(
+            "Warning: Extension path does not exist: {}",
+            missing_extension_path.display()
+        )),
+        "stderr: {}",
+        result.stderr
+    );
+    let request = recorded.lock().unwrap().clone();
+    let context = request.context.expect("expected recorded context");
+    assert_eq!(last_user_text(&context), "hello");
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
 async fn run_command_rpc_get_commands_lists_prompt_templates_and_skills() {
     let provider = unique_name("rpc-resources-provider");
     let model_id = unique_name("rpc-resources-model");

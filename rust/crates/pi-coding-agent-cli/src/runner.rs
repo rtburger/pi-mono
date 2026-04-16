@@ -7824,12 +7824,7 @@ fn render_no_models_message(models_json_path: Option<&Path>) -> String {
     output
 }
 
-fn unsupported_flag_message(parsed: &Args) -> Option<String> {
-    if parsed.extensions.is_some() || parsed.no_extensions {
-        return Some(String::from(
-            "Extension loading is not supported in the Rust CLI yet",
-        ));
-    }
+fn unsupported_flag_message(_parsed: &Args) -> Option<String> {
     None
 }
 
@@ -7856,6 +7851,9 @@ fn render_help() -> String {
         "  - --continue, --resume, --session, --fork, --no-session, --session-dir",
         "  - --list-models [search]",
         "  - --export <session.jsonl> [out.html]",
+        "  - --extension/-e, --no-extensions (path validation only)",
+        "  - --skill, --no-skills, --prompt-template, --no-prompt-templates",
+        "  - --theme, --no-themes (path validation only)",
         "  - @file text/image preprocessing",
         "",
         "RPC mode limitations:",

@@ -31,6 +31,10 @@ pub fn load_cli_resources(
 ) -> LoadedCliResources {
     let mut warnings = Vec::new();
 
+    if let Some(extension_paths) = parsed.extensions.as_ref() {
+        warnings.extend(validate_resource_paths(cwd, extension_paths, "Extension"));
+    }
+
     let prompt_templates =
         load_prompt_templates(pi_coding_agent_core::LoadPromptTemplatesOptions {
             cwd: cwd.to_path_buf(),
@@ -54,15 +58,7 @@ pub fn load_cli_resources(
     warnings.extend(skills.diagnostics.iter().map(format_resource_diagnostic));
 
     if let Some(theme_paths) = parsed.themes.as_ref() {
-        for theme_path in theme_paths {
-            let resolved = resolve_from_cwd(cwd, theme_path);
-            if !resolved.exists() {
-                warnings.push(format!(
-                    "Warning: Theme path does not exist: {}",
-                    resolved.display()
-                ));
-            }
-        }
+        warnings.extend(validate_resource_paths(cwd, theme_paths, "Theme"));
     }
 
     LoadedCliResources {
@@ -186,6 +182,16 @@ fn format_resource_diagnostic(diagnostic: &pi_coding_agent_core::ResourceDiagnos
         Some(path) => format!("Warning: {} ({path})", diagnostic.message),
         None => format!("Warning: {}", diagnostic.message),
     }
+}
+
+fn validate_resource_paths(cwd: &Path, paths: &[String], kind: &str) -> Vec<String> {
+    paths.iter()
+        .filter_map(|path| {
+            let resolved = resolve_from_cwd(cwd, path);
+            (!resolved.exists())
+                .then(|| format!("Warning: {kind} path does not exist: {}", resolved.display()))
+        })
+        .collect()
 }
 
 fn join_prompt_sections(sections: &[String]) -> Option<String> {
