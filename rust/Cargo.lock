@@ -1457,6 +1457,7 @@ dependencies = [
  "pi-config",
  "pi-events",
  "pi-tui",
+ "serde",
  "serde_json",
  "tokio",
 ]

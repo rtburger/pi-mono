@@ -1,9 +1,9 @@
 use crate::{Args, ToolName};
 use pi_agent::AgentTool;
 use pi_coding_agent_core::{
-    BuildSystemPromptOptions, PromptTemplate, Skill, build_system_prompt, expand_prompt_template,
-    expand_skill_command, load_prompt_templates, load_skills, load_system_prompt_resources,
-    resolve_prompt_input,
+    BuildSystemPromptOptions, PromptTemplate, Skill, SourceInfo, build_system_prompt,
+    expand_prompt_template, expand_skill_command, load_prompt_templates, load_skills,
+    load_system_prompt_resources, resolve_prompt_input,
 };
 use pi_coding_agent_tools::{
     create_bash_tool, create_edit_tool, create_find_tool, create_grep_tool, create_ls_tool,
@@ -22,6 +22,12 @@ pub struct LoadedCliResources {
     pub prompt_templates: Vec<PromptTemplate>,
     pub skills: Vec<Skill>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionResourcePath {
+    pub path: String,
+    pub extension_path: String,
 }
 
 pub fn load_cli_resources(
@@ -66,6 +72,65 @@ pub fn load_cli_resources(
         skills: skills.skills,
         warnings,
     }
+}
+
+pub fn extend_cli_resources_from_extensions(
+    resources: &mut LoadedCliResources,
+    cwd: &Path,
+    skill_paths: &[ExtensionResourcePath],
+    prompt_paths: &[ExtensionResourcePath],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    for entry in skill_paths {
+        let loaded = load_skills(pi_coding_agent_core::LoadSkillsOptions {
+            cwd: cwd.to_path_buf(),
+            agent_dir: None,
+            skill_paths: vec![entry.path.clone()],
+            include_defaults: false,
+        });
+        warnings.extend(loaded.diagnostics.iter().map(format_resource_diagnostic));
+
+        for mut skill in loaded.skills {
+            skill.source_info = source_info_for_extension_resource(&skill.file_path, &entry.extension_path);
+            if let Some(existing) = resources.skills.iter().find(|existing| existing.name == skill.name) {
+                warnings.push(format!(
+                    "Warning: Skill name collision for {} (keeping {}) ({})",
+                    skill.name, existing.file_path, skill.file_path
+                ));
+                continue;
+            }
+            resources.skills.push(skill);
+        }
+    }
+
+    for entry in prompt_paths {
+        let loaded = load_prompt_templates(pi_coding_agent_core::LoadPromptTemplatesOptions {
+            cwd: cwd.to_path_buf(),
+            agent_dir: None,
+            prompt_paths: vec![entry.path.clone()],
+            include_defaults: false,
+        });
+        warnings.extend(loaded.diagnostics.iter().map(format_resource_diagnostic));
+
+        for mut prompt in loaded.prompts {
+            prompt.source_info = source_info_for_extension_resource(&prompt.file_path, &entry.extension_path);
+            if let Some(existing) = resources
+                .prompt_templates
+                .iter()
+                .find(|existing| existing.name == prompt.name)
+            {
+                warnings.push(format!(
+                    "Warning: Prompt template name collision for /{} (keeping {}) ({})",
+                    prompt.name, existing.file_path, prompt.file_path
+                ));
+                continue;
+            }
+            resources.prompt_templates.push(prompt);
+        }
+    }
+
+    warnings
 }
 
 pub fn build_selected_tools(
@@ -192,6 +257,36 @@ fn validate_resource_paths(cwd: &Path, paths: &[String], kind: &str) -> Vec<Stri
                 .then(|| format!("Warning: {kind} path does not exist: {}", resolved.display()))
         })
         .collect()
+}
+
+fn extension_source_label(extension_path: &str) -> String {
+    if extension_path.starts_with('<') {
+        return format!("extension:{}", extension_path.trim_matches(&['<', '>'][..]));
+    }
+
+    let base = Path::new(extension_path)
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .unwrap_or(extension_path);
+    let name = base.strip_suffix(".ts").or_else(|| base.strip_suffix(".js")).unwrap_or(base);
+    format!("extension:{name}")
+}
+
+fn source_info_for_extension_resource(resource_path: &str, extension_path: &str) -> SourceInfo {
+    let base_dir = if extension_path.starts_with('<') {
+        None
+    } else {
+        Path::new(extension_path)
+            .parent()
+            .map(|parent| parent.display().to_string())
+    };
+    SourceInfo {
+        path: resource_path.to_owned(),
+        source: extension_source_label(extension_path),
+        scope: String::from("temporary"),
+        origin: String::from("top-level"),
+        base_dir,
+    }
 }
 
 fn join_prompt_sections(sections: &[String]) -> Option<String> {

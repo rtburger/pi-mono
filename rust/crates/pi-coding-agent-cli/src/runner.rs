@@ -1,5 +1,7 @@
 #[path = "export_html.rs"]
 mod export_html;
+#[path = "rpc_extensions.rs"]
+mod rpc_extensions;
 
 use crate::{
     AppMode, Args, Diagnostic, DiagnosticKind, ListModels, OverlayAuthSource, PrintModeOptions,
@@ -12,7 +14,8 @@ use crate::{
     list_models::render_list_models,
     parse_args, process_file_arguments, resolve_app_mode,
     resources::{
-        LoadedCliResources, build_runtime_system_prompt, build_selected_tools, load_cli_resources,
+        ExtensionResourcePath, LoadedCliResources, build_runtime_system_prompt,
+        build_selected_tools, extend_cli_resources_from_extensions, load_cli_resources,
         preprocess_prompt_text,
     },
     run_print_mode,
@@ -20,7 +23,7 @@ use crate::{
     to_print_output_mode,
     tree_picker::{TreePickerComponent, TreePickerItem},
 };
-use pi_agent::{AgentUnsubscribe, ThinkingLevel};
+use pi_agent::{AgentUnsubscribe, BeforeToolCallResult, ThinkingLevel};
 use pi_ai::{
     StreamOptions, ThinkingBudgets, is_context_overflow, models_are_equal, supports_xhigh,
 };
@@ -63,6 +66,10 @@ use std::{
 };
 use tokio::time::sleep;
 
+use rpc_extensions::{
+    RpcExtensionCommandInfo, RpcExtensionHost, RpcExtensionHostStartOptions,
+    RpcToolCallResult, should_start_extension_host,
+};
 use serde_json::{Value, json};
 
 const NO_MODELS_ENV_HINT: &str = "  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.";
@@ -3655,6 +3662,7 @@ struct RpcState {
     scoped_models: Vec<ScopedModel>,
     runtime_settings: LoadedRuntimeSettings,
     resources: LoadedCliResources,
+    extension_host: Option<RpcExtensionHost>,
     auto_compaction_enabled: bool,
     auto_retry_enabled: bool,
     is_compacting: Arc<AtomicBool>,
@@ -3670,6 +3678,7 @@ struct RpcSnapshot {
     scoped_models: Vec<ScopedModel>,
     runtime_settings: LoadedRuntimeSettings,
     resources: LoadedCliResources,
+    extension_host: Option<RpcExtensionHost>,
     auto_compaction_enabled: bool,
     is_compacting: Arc<AtomicBool>,
 }
@@ -3713,6 +3722,7 @@ impl RpcShared {
             scoped_models: state.scoped_models.clone(),
             runtime_settings: state.runtime_settings.clone(),
             resources: state.resources.clone(),
+            extension_host: state.extension_host.clone(),
             auto_compaction_enabled: state.auto_compaction_enabled,
             is_compacting: state.is_compacting.clone(),
         }
@@ -3726,17 +3736,25 @@ impl RpcShared {
             .clone()
     }
 
-    fn replace_state(&self, mut next: RpcState) {
+    async fn replace_state(&self, mut next: RpcState) {
         attach_rpc_event_subscription(&mut next, self.stdout_emitter.clone());
 
-        let mut state = self.state.lock().expect("rpc state mutex poisoned");
-        if let Some(unsubscribe) = state.event_unsubscribe.take() {
-            let _ = unsubscribe();
+        let previous_extension_host = {
+            let mut state = self.state.lock().expect("rpc state mutex poisoned");
+            if let Some(unsubscribe) = state.event_unsubscribe.take() {
+                let _ = unsubscribe();
+            }
+            if let Some(bash_abort_tx) = state.bash_abort_tx.take() {
+                let _ = bash_abort_tx.send(true);
+            }
+            let previous_extension_host = state.extension_host.clone();
+            *state = next;
+            previous_extension_host
+        };
+
+        if let Some(extension_host) = previous_extension_host {
+            let _ = extension_host.shutdown().await;
         }
-        if let Some(bash_abort_tx) = state.bash_abort_tx.take() {
-            let _ = bash_abort_tx.send(true);
-        }
-        *state = next;
     }
 
     fn abort_active(&self) {
@@ -3750,6 +3768,18 @@ impl RpcShared {
             .clone()
         {
             let _ = bash_abort_tx.send(true);
+        }
+    }
+
+    async fn shutdown_extension_host(&self) {
+        let extension_host = self
+            .state
+            .lock()
+            .expect("rpc state mutex poisoned")
+            .extension_host
+            .clone();
+        if let Some(extension_host) = extension_host {
+            let _ = extension_host.shutdown().await;
         }
     }
 }
@@ -3895,7 +3925,9 @@ async fn run_rpc_processor(
         initial_session_support,
         stdout_emitter,
         stderr_emitter.clone(),
-    ) {
+    )
+    .await
+    {
         Ok(shared) => shared,
         Err(error_output) => {
             if !error_output.is_empty() {
@@ -3937,11 +3969,12 @@ async fn run_rpc_processor(
     } else {
         shared.abort_active();
     }
+    shared.shutdown_extension_host().await;
 
     0
 }
 
-fn create_rpc_shared(
+async fn create_rpc_shared(
     options: RpcPreparedOptions,
     initial_session_support: Option<SessionSupport>,
     stdout_emitter: TextEmitter,
@@ -3970,7 +4003,12 @@ fn create_rpc_shared(
         initial_session_support,
         None,
         None,
-    )?;
+        String::from("startup"),
+        None,
+        stdout_emitter.clone(),
+        stderr_emitter.clone(),
+    )
+    .await?;
     stderr.push_str(&bootstrap_output);
     attach_rpc_event_subscription(&mut state, stdout_emitter.clone());
 
@@ -4019,7 +4057,7 @@ fn resolve_rpc_scoped_models(
     Vec::new()
 }
 
-fn build_rpc_state(
+async fn build_rpc_state(
     options: &RpcPreparedOptions,
     cwd: &Path,
     runtime_settings: LoadedRuntimeSettings,
@@ -4027,8 +4065,12 @@ fn build_rpc_state(
     session_support_override: Option<SessionSupport>,
     manager_override: Option<SessionManager>,
     bootstrap_defaults: Option<BootstrapDefaults>,
+    session_start_reason: String,
+    previous_session_file: Option<String>,
+    stdout_emitter: TextEmitter,
+    stderr_emitter: TextEmitter,
 ) -> Result<(RpcState, String), String> {
-    let resources = load_cli_resources(&options.parsed, cwd, options.agent_dir.as_deref());
+    let mut resources = load_cli_resources(&options.parsed, cwd, options.agent_dir.as_deref());
     let mut resource_output = String::new();
     for warning in &resources.warnings {
         push_line(&mut resource_output, warning);
@@ -4145,16 +4187,131 @@ fn build_rpc_state(
         return Err(bootstrap_output);
     }
 
+    let session_manager = session_support.as_ref().map(|support| support.manager.clone());
+    let mut extension_host = None;
+    if should_start_extension_host(
+        cwd,
+        options.agent_dir.as_deref(),
+        options.parsed.extensions.as_deref().unwrap_or(&[]),
+        options.parsed.no_extensions,
+    ) {
+        let start_result = RpcExtensionHost::start(RpcExtensionHostStartOptions {
+            cwd: cwd.to_path_buf(),
+            agent_dir: options.agent_dir.clone(),
+            extension_paths: options.parsed.extensions.clone().unwrap_or_default(),
+            no_extensions: options.parsed.no_extensions,
+            flag_values: unknown_flags_to_json(&options.parsed.unknown_flags),
+            state: rpc_extension_state_json(
+                &created.core,
+                session_manager.as_ref(),
+                &resources,
+                &[],
+            ),
+            session_start_reason,
+            previous_session_file,
+            stdout_emitter,
+            stderr_emitter,
+        })
+        .await?;
+
+        let diagnostics_output = render_extension_diagnostics(&start_result.init.diagnostics);
+        if start_result
+            .init
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.level == "error")
+        {
+            return Err(diagnostics_output);
+        }
+        resource_output.push_str(&diagnostics_output);
+
+        if let Some(host) = start_result.host {
+            let skill_paths = start_result
+                .init
+                .skill_paths
+                .into_iter()
+                .map(|entry| ExtensionResourcePath {
+                    path: entry.path,
+                    extension_path: entry.extension_path,
+                })
+                .collect::<Vec<_>>();
+            let prompt_paths = start_result
+                .init
+                .prompt_paths
+                .into_iter()
+                .map(|entry| ExtensionResourcePath {
+                    path: entry.path,
+                    extension_path: entry.extension_path,
+                })
+                .collect::<Vec<_>>();
+            for warning in
+                extend_cli_resources_from_extensions(&mut resources, cwd, &skill_paths, &prompt_paths)
+            {
+                push_line(&mut resource_output, &warning);
+            }
+
+            let extension_commands = host.commands();
+            let extension_system_prompt = build_runtime_system_prompt(
+                &default_system_prompt,
+                &options.parsed,
+                cwd,
+                options.agent_dir.as_deref(),
+                &selected_tool_names,
+                &resources,
+            );
+            created.core.agent().update_state(|state| {
+                state.system_prompt = extension_system_prompt.clone();
+            });
+            host.update_state(rpc_extension_state_json(
+                &created.core,
+                session_manager.as_ref(),
+                &resources,
+                &extension_commands,
+            ))
+            .await?;
+
+            let before_tool_call_host = host.clone();
+            created.core.agent().set_before_tool_call(move |context, _signal| {
+                let before_tool_call_host = before_tool_call_host.clone();
+                async move {
+                    let input = context
+                        .args
+                        .lock()
+                        .expect("rpc before_tool_call args mutex poisoned")
+                        .clone();
+                    match before_tool_call_host
+                        .tool_call(&context.tool_name, &context.tool_call_id, input)
+                        .await
+                    {
+                        Ok(Some(RpcToolCallResult { block: true, reason })) => {
+                            Some(BeforeToolCallResult {
+                                block: true,
+                                reason,
+                            })
+                        }
+                        Ok(_) => None,
+                        Err(error) => Some(BeforeToolCallResult {
+                            block: true,
+                            reason: Some(format!(
+                                "Extension failed, blocking execution: {error}"
+                            )),
+                        }),
+                    }
+                }
+            });
+            extension_host = Some(host);
+        }
+    }
+
     Ok((
         RpcState {
             core: created.core,
-            session_manager: session_support
-                .as_ref()
-                .map(|support| support.manager.clone()),
+            session_manager,
             cwd: cwd.to_path_buf(),
             scoped_models,
             runtime_settings: runtime_settings.clone(),
             resources,
+            extension_host,
             auto_compaction_enabled: runtime_settings.settings.compaction.enabled,
             auto_retry_enabled: true,
             is_compacting: Arc::new(AtomicBool::new(false)),
@@ -4166,12 +4323,18 @@ fn build_rpc_state(
 }
 
 fn attach_rpc_event_subscription(state: &mut RpcState, stdout_emitter: TextEmitter) {
+    let extension_host = state.extension_host.clone();
     let unsubscribe = state.core.agent().subscribe(move |event, _signal| {
         let stdout_emitter = stdout_emitter.clone();
+        let extension_host = extension_host.clone();
         Box::pin(async move {
-            let line = serde_json::to_string(&rpc_agent_event_to_json(&event))
+            let event_json = rpc_agent_event_to_json(&event);
+            let line = serde_json::to_string(&event_json)
                 .expect("rpc event serialization must succeed");
             stdout_emitter(format!("{line}\n"));
+            if let Some(extension_host) = extension_host {
+                let _ = extension_host.emit_event(event_json).await;
+            }
         })
     });
     state.event_unsubscribe = Some(unsubscribe);
@@ -4199,6 +4362,10 @@ async fn handle_rpc_input_line(
         .and_then(Value::as_str)
         .is_some_and(|command_type| command_type == "extension_ui_response")
     {
+        let extension_host = shared.snapshot().extension_host;
+        if let Some(extension_host) = extension_host {
+            let _ = extension_host.deliver_ui_response(parsed.clone()).await;
+        }
         return;
     }
 
@@ -4226,6 +4393,23 @@ async fn handle_rpc_input_line(
             };
             let streaming_behavior = optional_string_field(command, "streamingBehavior");
             let snapshot = shared.snapshot();
+            if let Some((command_name, args)) = parse_rpc_extension_command(&message)
+                && let Some(extension_host) = snapshot.extension_host.clone()
+                && extension_host.has_command(&command_name)
+            {
+                let task = spawn_rpc_extension_command_task(
+                    shared.clone(),
+                    id.clone(),
+                    command_name,
+                    args,
+                );
+                if let Some(background_tasks) = background_tasks {
+                    background_tasks.push(task);
+                }
+                shared.emit_response(id.as_deref(), "prompt", None);
+                return;
+            }
+
             let prepared_message = preprocess_prompt_text(&message, &snapshot.resources);
             if snapshot.core.state().is_streaming {
                 if streaming_behavior.as_deref() == Some("steer") {
@@ -4261,18 +4445,22 @@ async fn handle_rpc_input_line(
                     return;
                 }
             };
-            let resources = {
-                shared
-                    .state
-                    .lock()
-                    .expect("rpc state mutex poisoned")
-                    .resources
-                    .clone()
-            };
+            let snapshot = shared.snapshot();
+            if let Some((command_name, _)) = parse_rpc_extension_command(&message)
+                && let Some(extension_host) = snapshot.extension_host.clone()
+                && extension_host.has_command(&command_name)
+            {
+                shared.emit_error(
+                    id.as_deref(),
+                    "steer",
+                    "Extension commands cannot be queued with steer",
+                );
+                return;
+            }
             queue_rpc_message(
                 &shared.current_core(),
                 "steer",
-                preprocess_prompt_text(&message, &resources),
+                preprocess_prompt_text(&message, &snapshot.resources),
                 images,
             );
             shared.emit_response(id.as_deref(), "steer", None);
@@ -4292,18 +4480,22 @@ async fn handle_rpc_input_line(
                     return;
                 }
             };
-            let resources = {
-                shared
-                    .state
-                    .lock()
-                    .expect("rpc state mutex poisoned")
-                    .resources
-                    .clone()
-            };
+            let snapshot = shared.snapshot();
+            if let Some((command_name, _)) = parse_rpc_extension_command(&message)
+                && let Some(extension_host) = snapshot.extension_host.clone()
+                && extension_host.has_command(&command_name)
+            {
+                shared.emit_error(
+                    id.as_deref(),
+                    "follow_up",
+                    "Extension commands cannot be queued with follow_up",
+                );
+                return;
+            }
             queue_rpc_message(
                 &shared.current_core(),
                 "follow_up",
-                preprocess_prompt_text(&message, &resources),
+                preprocess_prompt_text(&message, &snapshot.resources),
                 images,
             );
             shared.emit_response(id.as_deref(), "follow_up", None);
@@ -4321,6 +4513,23 @@ async fn handle_rpc_input_line(
                     "Cannot create a new session while a request is running",
                 );
                 return;
+            }
+            if let Some(extension_host) = snapshot.extension_host.clone() {
+                match extension_host.before_switch("new", None).await {
+                    Ok(true) => {
+                        shared.emit_response(
+                            id.as_deref(),
+                            "new_session",
+                            Some(json!({ "cancelled": true })),
+                        );
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        shared.emit_error(id.as_deref(), "new_session", error);
+                        return;
+                    }
+                }
             }
             let parent_session = optional_string_field(command, "parentSession");
             let mut manager = match recreate_session_manager_from_rpc(&snapshot) {
@@ -4346,12 +4555,18 @@ async fn handle_rpc_input_line(
                     &snapshot.core.state().model,
                     snapshot.core.state().thinking_level,
                 )),
-            ) {
+                String::from("new"),
+                current_rpc_session_file(snapshot.session_manager.as_ref()),
+                shared.stdout_emitter.clone(),
+                shared.stderr_emitter.clone(),
+            )
+            .await
+            {
                 Ok((next_state, bootstrap_output)) => {
                     if !bootstrap_output.is_empty() {
                         shared.emit_stderr(bootstrap_output);
                     }
-                    shared.replace_state(next_state);
+                    shared.replace_state(next_state).await;
                     shared.emit_response(
                         id.as_deref(),
                         "new_session",
@@ -4402,11 +4617,14 @@ async fn handle_rpc_input_line(
                 None,
                 snapshot.session_manager.as_ref(),
             ) {
-                Ok(()) => shared.emit_response(
-                    id.as_deref(),
-                    "set_model",
-                    Some(model_to_rpc_json(&snapshot.core.state().model)),
-                ),
+                Ok(()) => {
+                    sync_rpc_extension_state(&shared).await;
+                    shared.emit_response(
+                        id.as_deref(),
+                        "set_model",
+                        Some(model_to_rpc_json(&snapshot.core.state().model)),
+                    )
+                }
                 Err(error) => shared.emit_error(id.as_deref(), "set_model", error),
             }
         }
@@ -4419,15 +4637,18 @@ async fn handle_rpc_input_line(
                 snapshot.session_manager.as_ref(),
                 "forward",
             ) {
-                Ok(Some(result)) => shared.emit_response(
-                    id.as_deref(),
-                    "cycle_model",
-                    Some(json!({
-                        "model": model_to_rpc_json(&result.model),
-                        "thinkingLevel": thinking_level_label(result.thinking_level),
-                        "isScoped": !snapshot.scoped_models.is_empty(),
-                    })),
-                ),
+                Ok(Some(result)) => {
+                    sync_rpc_extension_state(&shared).await;
+                    shared.emit_response(
+                        id.as_deref(),
+                        "cycle_model",
+                        Some(json!({
+                            "model": model_to_rpc_json(&result.model),
+                            "thinkingLevel": thinking_level_label(result.thinking_level),
+                            "isScoped": !snapshot.scoped_models.is_empty(),
+                        })),
+                    )
+                }
                 Ok(None) => shared.emit_response(id.as_deref(), "cycle_model", Some(Value::Null)),
                 Err(error) => shared.emit_error(id.as_deref(), "cycle_model", error),
             }
@@ -4466,18 +4687,24 @@ async fn handle_rpc_input_line(
                 Some(level),
                 snapshot.session_manager.as_ref(),
             ) {
-                Ok(()) => shared.emit_response(id.as_deref(), "set_thinking_level", None),
+                Ok(()) => {
+                    sync_rpc_extension_state(&shared).await;
+                    shared.emit_response(id.as_deref(), "set_thinking_level", None)
+                }
                 Err(error) => shared.emit_error(id.as_deref(), "set_thinking_level", error),
             }
         }
         "cycle_thinking_level" => {
             let snapshot = shared.snapshot();
             match cycle_rpc_thinking_level(&snapshot.core, snapshot.session_manager.as_ref()) {
-                Ok(Some(level)) => shared.emit_response(
-                    id.as_deref(),
-                    "cycle_thinking_level",
-                    Some(json!({ "level": thinking_level_label(level) })),
-                ),
+                Ok(Some(level)) => {
+                    sync_rpc_extension_state(&shared).await;
+                    shared.emit_response(
+                        id.as_deref(),
+                        "cycle_thinking_level",
+                        Some(json!({ "level": thinking_level_label(level) })),
+                    )
+                }
                 Ok(None) => {
                     shared.emit_response(id.as_deref(), "cycle_thinking_level", Some(Value::Null))
                 }
@@ -4712,12 +4939,18 @@ async fn handle_rpc_input_line(
                 None,
                 Some(manager),
                 None,
-            ) {
+                String::from("resume"),
+                current_rpc_session_file(snapshot.session_manager.as_ref()),
+                shared.stdout_emitter.clone(),
+                shared.stderr_emitter.clone(),
+            )
+            .await
+            {
                 Ok((next_state, bootstrap_output)) => {
                     if !bootstrap_output.is_empty() {
                         shared.emit_stderr(bootstrap_output);
                     }
-                    shared.replace_state(next_state);
+                    shared.replace_state(next_state).await;
                     shared.emit_response(
                         id.as_deref(),
                         "switch_session",
@@ -4784,12 +5017,18 @@ async fn handle_rpc_input_line(
                 None,
                 Some(manager),
                 bootstrap_defaults,
-            ) {
+                String::from("fork"),
+                current_rpc_session_file(snapshot.session_manager.as_ref()),
+                shared.stdout_emitter.clone(),
+                shared.stderr_emitter.clone(),
+            )
+            .await
+            {
                 Ok((next_state, bootstrap_output)) => {
                     if !bootstrap_output.is_empty() {
                         shared.emit_stderr(bootstrap_output);
                     }
-                    shared.replace_state(next_state);
+                    shared.replace_state(next_state).await;
                     shared.emit_response(
                         id.as_deref(),
                         "fork",
@@ -4853,12 +5092,15 @@ async fn handle_rpc_input_line(
                 );
                 return;
             };
-            match session_manager
+            let append_result = session_manager
                 .lock()
                 .expect("rpc session manager mutex poisoned")
-                .append_session_info(&name)
-            {
-                Ok(_) => shared.emit_response(id.as_deref(), "set_session_name", None),
+                .append_session_info(&name);
+            match append_result {
+                Ok(_) => {
+                    sync_rpc_extension_state(&shared).await;
+                    shared.emit_response(id.as_deref(), "set_session_name", None)
+                }
                 Err(error) => {
                     shared.emit_error(id.as_deref(), "set_session_name", error.to_string())
                 }
@@ -4881,18 +5123,31 @@ async fn handle_rpc_input_line(
         "get_commands" => {
             let snapshot = shared.snapshot();
             let mut commands = snapshot
-                .resources
-                .prompt_templates
-                .iter()
-                .map(|template| {
-                    json!({
-                        "name": template.name,
-                        "description": template.description,
-                        "source": "prompt",
-                        "sourceInfo": template.source_info,
-                    })
+                .extension_host
+                .as_ref()
+                .map(|extension_host| {
+                    extension_host
+                        .commands()
+                        .into_iter()
+                        .map(|command| {
+                            json!({
+                                "name": command.name,
+                                "description": command.description,
+                                "source": "extension",
+                                "sourceInfo": command.source_info,
+                            })
+                        })
+                        .collect::<Vec<_>>()
                 })
-                .collect::<Vec<_>>();
+                .unwrap_or_default();
+            commands.extend(snapshot.resources.prompt_templates.iter().map(|template| {
+                json!({
+                    "name": template.name,
+                    "description": template.description,
+                    "source": "prompt",
+                    "sourceInfo": template.source_info,
+                })
+            }));
             commands.extend(snapshot.resources.skills.iter().map(|skill| {
                 json!({
                     "name": format!("skill:{}", skill.name),
@@ -4991,6 +5246,144 @@ fn spawn_rpc_prompt_task(
         if let Err(error) = result {
             shared.emit_error(id.as_deref(), "prompt", error);
         }
+    })
+}
+
+fn parse_rpc_extension_command(text: &str) -> Option<(String, String)> {
+    let command = text.strip_prefix('/')?;
+    let (name, args) = match command.split_once(' ') {
+        Some((name, args)) => (name, args.trim()),
+        None => (command, ""),
+    };
+    (!name.is_empty()).then(|| (name.to_owned(), args.to_owned()))
+}
+
+fn spawn_rpc_extension_command_task(
+    shared: RpcShared,
+    id: Option<String>,
+    command_name: String,
+    args: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let extension_host = shared.snapshot().extension_host;
+        let Some(extension_host) = extension_host else {
+            return;
+        };
+        match extension_host.execute_command(&command_name, &args).await {
+            Ok(true) => {}
+            Ok(false) => {
+                shared.emit_error(
+                    id.as_deref(),
+                    "prompt",
+                    format!("Unknown extension command: /{command_name}"),
+                );
+            }
+            Err(error) => shared.emit_error(id.as_deref(), "prompt", error),
+        }
+    })
+}
+
+async fn sync_rpc_extension_state(shared: &RpcShared) {
+    let snapshot = shared.snapshot();
+    let Some(extension_host) = snapshot.extension_host else {
+        return;
+    };
+    let _ = extension_host
+        .update_state(rpc_extension_state_json(
+            &snapshot.core,
+            snapshot.session_manager.as_ref(),
+            &snapshot.resources,
+            &extension_host.commands(),
+        ))
+        .await;
+}
+
+fn current_rpc_session_file(session_manager: Option<&Arc<Mutex<SessionManager>>>) -> Option<String> {
+    session_manager.and_then(|session_manager| {
+        session_manager
+            .lock()
+            .expect("rpc session manager mutex poisoned")
+            .get_session_file()
+            .map(str::to_owned)
+    })
+}
+
+fn unknown_flags_to_json(flags: &BTreeMap<String, crate::UnknownFlagValue>) -> Value {
+    let mut values = serde_json::Map::new();
+    for (name, value) in flags {
+        let value = match value {
+            crate::UnknownFlagValue::Bool(value) => Value::Bool(*value),
+            crate::UnknownFlagValue::String(value) => Value::String(value.clone()),
+        };
+        values.insert(name.clone(), value);
+    }
+    Value::Object(values)
+}
+
+fn render_extension_diagnostics(
+    diagnostics: &[rpc_extensions::RpcExtensionDiagnostic],
+) -> String {
+    let mut output = String::new();
+    for diagnostic in diagnostics {
+        let label = match diagnostic.level.as_str() {
+            "error" => "Error",
+            _ => "Warning",
+        };
+        push_line(&mut output, &format!("{label}: {}", diagnostic.message));
+    }
+    output
+}
+
+fn rpc_extension_state_json(
+    core: &CodingAgentCore,
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
+    resources: &LoadedCliResources,
+    extension_commands: &[RpcExtensionCommandInfo],
+) -> Value {
+    let state = core.state();
+    let active_tools = state
+        .tools
+        .iter()
+        .map(|tool| Value::String(tool.definition.name.clone()))
+        .collect::<Vec<_>>();
+    let mut commands = extension_commands
+        .iter()
+        .map(|command| {
+            json!({
+                "name": command.name,
+                "description": command.description,
+                "source": "extension",
+                "sourceInfo": command.source_info,
+            })
+        })
+        .collect::<Vec<_>>();
+    commands.extend(resources.prompt_templates.iter().map(|template| {
+        json!({
+            "name": template.name,
+            "description": template.description,
+            "source": "prompt",
+            "sourceInfo": template.source_info,
+        })
+    }));
+    commands.extend(resources.skills.iter().map(|skill| {
+        json!({
+            "name": format!("skill:{}", skill.name),
+            "description": skill.description,
+            "source": "skill",
+            "sourceInfo": skill.source_info,
+        })
+    }));
+
+    json!({
+        "model": model_to_rpc_json(&state.model),
+        "thinkingLevel": thinking_level_label(state.thinking_level),
+        "isIdle": !state.is_streaming,
+        "hasPendingMessages": core.agent().has_queued_messages(),
+        "systemPrompt": state.system_prompt,
+        "sessionName": current_session_name(session_manager),
+        "activeTools": active_tools.clone(),
+        "allTools": active_tools,
+        "commands": commands,
     })
 }
 
@@ -7990,14 +8383,13 @@ fn render_help() -> String {
         "  - --continue, --resume, --session, --fork, --no-session, --session-dir",
         "  - --list-models [search]",
         "  - --export <session.jsonl> [out.html]",
-        "  - --extension/-e, --no-extensions (path validation only)",
+        "  - --extension/-e, --no-extensions (RPC extension commands/resources/UI bridge)",
         "  - --skill, --no-skills, --prompt-template, --no-prompt-templates",
         "  - --theme, --no-themes (path validation only)",
         "  - @file text/image preprocessing",
         "",
         "RPC mode limitations:",
         "  - @file arguments are rejected",
-        "  - extension UI and package resources are not loaded yet",
     ]
     .join("\n")
 }
@@ -8648,6 +9040,153 @@ mod tests {
         );
 
         assert!(stderr.is_empty(), "stderr: {stderr}");
+    }
+
+    #[tokio::test]
+    async fn rpc_extension_ui_response_resolves_pending_dialog_request() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "rpc-extension-ui-response-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "rpc-extension-ui-response-faux-1".into(),
+                name: Some("RPC Extension UI Response Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("rpc-extension-ui-response-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("rpc-extension-ui-response");
+        let extension_path = cwd.join("rpc-input-extension.ts");
+        fs::write(
+            &extension_path,
+            r#"export default function (pi) {
+	pi.registerCommand("rpc-input", {
+		description: "Prompt for input",
+		handler: async (_args, ctx) => {
+			const value = await ctx.ui.input("Enter a value", "type something...");
+			ctx.ui.notify(value ? `You entered: ${value}` : "Input cancelled", "info");
+		},
+	});
+}
+"#,
+        )
+        .unwrap();
+
+        let stdout = Arc::new(Mutex::new(String::new()));
+        let stderr = Arc::new(Mutex::new(String::new()));
+        let stdout_emitter: TextEmitter = Arc::new({
+            let stdout = stdout.clone();
+            move |text| {
+                stdout
+                    .lock()
+                    .expect("rpc stdout buffer mutex poisoned")
+                    .push_str(&text);
+            }
+        });
+        let stderr_emitter: TextEmitter = Arc::new({
+            let stderr = stderr.clone();
+            move |text| {
+                stderr
+                    .lock()
+                    .expect("rpc stderr buffer mutex poisoned")
+                    .push_str(&text);
+            }
+        });
+
+        let shared = create_rpc_shared(
+            RpcPreparedOptions {
+                parsed: parse_args(&vec![
+                    String::from("--mode"),
+                    String::from("rpc"),
+                    String::from("--provider"),
+                    model.provider.clone(),
+                    String::from("--model"),
+                    model.id.clone(),
+                    String::from("--extension"),
+                    extension_path.to_string_lossy().into_owned(),
+                ]),
+                initial_stderr: String::new(),
+                stdin_content: None,
+                auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                    model.provider.as_str(),
+                    "token",
+                )])),
+                built_in_models: vec![model.clone()],
+                models_json_path: None,
+                agent_dir: Some(cwd.join("agent")),
+                cwd: cwd.clone(),
+                default_system_prompt: String::new(),
+                stream_options: StreamOptions::default(),
+            },
+            None,
+            stdout_emitter,
+            stderr_emitter,
+        )
+        .await
+        .expect("expected rpc shared state");
+
+        let mut background_tasks = Vec::new();
+        handle_rpc_input_line(
+            shared.clone(),
+            r#"{"id":"cmd-1","type":"prompt","message":"/rpc-input"}"#,
+            Some(&mut background_tasks),
+        )
+        .await;
+
+        let request_id = timeout(Duration::from_secs(2), async {
+            loop {
+                let stdout = stdout
+                    .lock()
+                    .expect("rpc stdout buffer mutex poisoned")
+                    .clone();
+                let lines = stdout
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .collect::<Vec<_>>();
+                if let Some(request_id) = lines.iter().find_map(|line| {
+                    (line.get("type").and_then(Value::as_str) == Some("extension_ui_request")
+                        && line.get("method").and_then(Value::as_str) == Some("input"))
+                    .then(|| line.get("id").and_then(Value::as_str).map(ToOwned::to_owned))
+                    .flatten()
+                }) {
+                    break request_id;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("expected extension input request");
+
+        handle_rpc_input_line(
+            shared.clone(),
+            &format!(
+                "{{\"type\":\"extension_ui_response\",\"id\":\"{request_id}\",\"value\":\"hello from host\"}}"
+            ),
+            Some(&mut background_tasks),
+        )
+        .await;
+
+        for task in background_tasks {
+            let _ = task.await;
+        }
+        sleep(Duration::from_millis(50)).await;
+
+        let stdout = stdout
+            .lock()
+            .expect("rpc stdout buffer mutex poisoned")
+            .clone();
+        assert!(stdout.contains("Enter a value"), "stdout: {stdout}");
+        assert!(stdout.contains("You entered: hello from host"), "stdout: {stdout}");
+        assert!(
+            stderr
+                .lock()
+                .expect("rpc stderr buffer mutex poisoned")
+                .is_empty()
+        );
+
+        shared.shutdown_extension_host().await;
+        faux.unregister();
     }
 
     #[test]

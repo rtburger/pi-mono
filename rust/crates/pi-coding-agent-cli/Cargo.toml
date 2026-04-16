@@ -14,6 +14,7 @@ pi-coding-agent-tui = { path = "../pi-coding-agent-tui" }
 pi-config = { path = "../pi-config" }
 pi-events = { path = "../pi-events" }
 pi-tui = { path = "../pi-tui" }
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 
