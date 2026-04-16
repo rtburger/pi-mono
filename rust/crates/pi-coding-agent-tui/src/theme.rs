@@ -1,8 +1,9 @@
 use crate::{KeyHintStyler, StartupHeaderStyler};
+use pi_agent::ThinkingLevel;
 use pi_coding_agent_core::{ResourceDiagnostic, SourceInfo};
 use serde::Deserialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
@@ -17,6 +18,8 @@ const ANSI_ITALIC_ON: &str = "\x1b[3m";
 const ANSI_ITALIC_OFF: &str = "\x1b[23m";
 const ANSI_UNDERLINE_ON: &str = "\x1b[4m";
 const ANSI_UNDERLINE_OFF: &str = "\x1b[24m";
+const ANSI_INVERSE_ON: &str = "\x1b[7m";
+const ANSI_INVERSE_OFF: &str = "\x1b[27m";
 const ANSI_STRIKETHROUGH_ON: &str = "\x1b[9m";
 const ANSI_STRIKETHROUGH_OFF: &str = "\x1b[29m";
 
@@ -110,6 +113,19 @@ pub struct ThemeSelectionResult {
     pub applied_theme_name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeInfo {
+    pub name: String,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ThemeExportColors {
+    pub page_bg: Option<String>,
+    pub card_bg: Option<String>,
+    pub info_bg: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Theme {
     inner: Arc<ThemeInner>,
@@ -121,6 +137,8 @@ struct ThemeInner {
     source_path: Option<String>,
     source_info: Option<SourceInfo>,
     mode: ColorMode,
+    resolved_colors: BTreeMap<String, ResolvedColor>,
+    export_colors: ThemeExportColors,
     fg_codes: BTreeMap<String, String>,
     bg_codes: BTreeMap<String, String>,
 }
@@ -138,6 +156,16 @@ struct ThemeJson {
     #[serde(default)]
     vars: BTreeMap<String, ColorValue>,
     colors: BTreeMap<String, ColorValue>,
+    #[serde(default)]
+    export: ThemeExportJson,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ThemeExportJson {
+    page_bg: Option<ColorValue>,
+    card_bg: Option<ColorValue>,
+    info_bg: Option<ColorValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -153,6 +181,8 @@ impl Theme {
         mode: ColorMode,
         source_path: Option<String>,
         source_info: Option<SourceInfo>,
+        resolved_colors: BTreeMap<String, ResolvedColor>,
+        export_colors: ThemeExportColors,
         fg_codes: BTreeMap<String, String>,
         bg_codes: BTreeMap<String, String>,
     ) -> Self {
@@ -162,6 +192,8 @@ impl Theme {
                 source_path,
                 source_info,
                 mode,
+                resolved_colors,
+                export_colors,
                 fg_codes,
                 bg_codes,
             }),
@@ -184,6 +216,10 @@ impl Theme {
         self.inner.mode
     }
 
+    pub fn get_color_mode(&self) -> ColorMode {
+        self.mode()
+    }
+
     pub fn fg(&self, color: &str, text: impl AsRef<str>) -> String {
         let ansi = self.fg_code(color);
         format!("{ansi}{}{}", text.as_ref(), ANSI_RESET_FG)
@@ -202,12 +238,20 @@ impl Theme {
             .unwrap_or(ANSI_RESET_FG)
     }
 
+    pub fn get_fg_ansi(&self, color: &str) -> &str {
+        self.fg_code(color)
+    }
+
     pub fn bg_code(&self, color: &str) -> &str {
         self.inner
             .bg_codes
             .get(color)
             .map(String::as_str)
             .unwrap_or(ANSI_RESET_BG)
+    }
+
+    pub fn get_bg_ansi(&self, color: &str) -> &str {
+        self.bg_code(color)
     }
 
     pub fn bold(&self, text: impl AsRef<str>) -> String {
@@ -222,11 +266,44 @@ impl Theme {
         format!("{ANSI_UNDERLINE_ON}{}{ANSI_UNDERLINE_OFF}", text.as_ref())
     }
 
+    pub fn inverse(&self, text: impl AsRef<str>) -> String {
+        format!("{ANSI_INVERSE_ON}{}{ANSI_INVERSE_OFF}", text.as_ref())
+    }
+
     pub fn strikethrough(&self, text: impl AsRef<str>) -> String {
         format!(
             "{ANSI_STRIKETHROUGH_ON}{}{ANSI_STRIKETHROUGH_OFF}",
             text.as_ref()
         )
+    }
+
+    pub fn get_thinking_border_color(
+        &self,
+        level: ThinkingLevel,
+    ) -> impl Fn(&str) -> String + Send + Sync + 'static {
+        let theme = self.clone();
+        let color = match level {
+            ThinkingLevel::Off => "thinkingOff",
+            ThinkingLevel::Minimal => "thinkingMinimal",
+            ThinkingLevel::Low => "thinkingLow",
+            ThinkingLevel::Medium => "thinkingMedium",
+            ThinkingLevel::High => "thinkingHigh",
+            ThinkingLevel::XHigh => "thinkingXhigh",
+        };
+        move |line| theme.fg(color, line)
+    }
+
+    pub fn get_bash_mode_border_color(&self) -> impl Fn(&str) -> String + Send + Sync + 'static {
+        let theme = self.clone();
+        move |line| theme.fg("bashMode", line)
+    }
+
+    pub fn export_colors(&self) -> &ThemeExportColors {
+        &self.inner.export_colors
+    }
+
+    fn resolved_colors(&self) -> &BTreeMap<String, ResolvedColor> {
+        &self.inner.resolved_colors
     }
 
     pub fn background_fill(&self, color: &str) -> impl Fn(&str) -> String + Send + Sync + 'static {
@@ -331,6 +408,61 @@ pub fn set_registered_themes(themes: Vec<Theme>) {
         .into_iter()
         .map(|theme| (theme.name().to_owned(), theme))
         .collect();
+}
+
+pub fn get_available_themes() -> Vec<String> {
+    let registry = theme_registry()
+        .lock()
+        .expect("theme registry mutex poisoned");
+    let mut themes = BTreeSet::new();
+    themes.extend(built_in_themes().keys().cloned());
+    themes.extend(registry.registered.keys().cloned());
+    themes.into_iter().collect()
+}
+
+pub fn get_available_themes_with_paths() -> Vec<ThemeInfo> {
+    let registry = theme_registry()
+        .lock()
+        .expect("theme registry mutex poisoned");
+    let mut themes = BTreeMap::<String, ThemeInfo>::new();
+
+    for (name, theme) in built_in_themes() {
+        themes.insert(
+            name.clone(),
+            ThemeInfo {
+                name: name.clone(),
+                path: theme.source_path().map(ToOwned::to_owned),
+            },
+        );
+    }
+
+    for theme in registry.registered.values() {
+        themes.entry(theme.name().to_owned()).or_insert(ThemeInfo {
+            name: theme.name().to_owned(),
+            path: theme.source_path().map(ToOwned::to_owned),
+        });
+    }
+
+    themes.into_values().collect()
+}
+
+pub fn get_theme_by_name(name: &str) -> Option<Theme> {
+    let registry = theme_registry()
+        .lock()
+        .expect("theme registry mutex poisoned");
+    registry
+        .registered
+        .get(name)
+        .cloned()
+        .or_else(|| built_in_theme(name))
+}
+
+pub fn set_theme_instance(theme: Theme) {
+    let mut registry = theme_registry()
+        .lock()
+        .expect("theme registry mutex poisoned");
+    registry.current = theme;
+    registry.current_name = String::from("<in-memory>");
 }
 
 pub fn init_theme(theme_name: Option<&str>) -> ThemeSelectionResult {
@@ -444,8 +576,15 @@ pub fn load_themes(options: LoadThemesOptions) -> LoadThemesResult {
 }
 
 pub fn load_theme_from_path(path: impl AsRef<Path>) -> Result<Theme, String> {
+    load_theme_from_path_with_mode(path, detect_color_mode())
+}
+
+pub fn load_theme_from_path_with_mode(
+    path: impl AsRef<Path>,
+    mode: ColorMode,
+) -> Result<Theme, String> {
     let path = path.as_ref();
-    load_theme_file(path, source_info_for_path(path, None))
+    load_theme_file_with_mode(path, source_info_for_path(path, None), mode)
 }
 
 fn theme_registry() -> &'static Mutex<ThemeRegistry> {
@@ -481,7 +620,8 @@ fn built_in_theme(name: &str) -> Option<Theme> {
 }
 
 fn load_builtin_theme(name: &str, content: &str) -> Theme {
-    parse_theme_content(name, content, None, None).expect("builtin theme must be valid")
+    parse_theme_content(name, content, None, None, detect_color_mode())
+        .expect("builtin theme must be valid")
 }
 
 fn load_themes_from_dir(
@@ -552,12 +692,21 @@ fn add_theme(
 }
 
 fn load_theme_file(path: &Path, source_info: SourceInfo) -> Result<Theme, String> {
+    load_theme_file_with_mode(path, source_info, detect_color_mode())
+}
+
+fn load_theme_file_with_mode(
+    path: &Path,
+    source_info: SourceInfo,
+    mode: ColorMode,
+) -> Result<Theme, String> {
     let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
     parse_theme_content(
         &path.display().to_string(),
         &content,
         Some(path.display().to_string()),
         Some(source_info),
+        mode,
     )
 }
 
@@ -566,11 +715,12 @@ fn parse_theme_content(
     content: &str,
     source_path: Option<String>,
     source_info: Option<SourceInfo>,
+    mode: ColorMode,
 ) -> Result<Theme, String> {
     let parsed: ThemeJson = serde_json::from_str(content)
         .map_err(|error| format!("Failed to parse theme {label}: {error}"))?;
     validate_theme_json(label, &parsed)?;
-    create_theme(parsed, detect_color_mode(), source_path, source_info)
+    create_theme(parsed, mode, source_path, source_info)
 }
 
 fn create_theme(
@@ -579,29 +729,54 @@ fn create_theme(
     source_path: Option<String>,
     source_info: Option<SourceInfo>,
 ) -> Result<Theme, String> {
+    let ThemeJson {
+        name,
+        vars,
+        colors,
+        export,
+    } = parsed;
+    let mut resolved_colors = BTreeMap::new();
     let mut fg_codes = BTreeMap::new();
     let mut bg_codes = BTreeMap::new();
 
-    for (name, value) in &parsed.colors {
-        let resolved = resolve_color_value(value, &parsed.vars, &mut Vec::new())?;
-        let ansi = if BG_COLOR_KEYS.contains(&name.as_str()) {
+    for (token, value) in &colors {
+        let resolved = resolve_color_value(value, &vars, &mut Vec::new())?;
+        let ansi = if BG_COLOR_KEYS.contains(&token.as_str()) {
             bg_ansi(&resolved, mode)?
         } else {
             fg_ansi(&resolved, mode)?
         };
 
-        if BG_COLOR_KEYS.contains(&name.as_str()) {
-            bg_codes.insert(name.clone(), ansi);
+        if BG_COLOR_KEYS.contains(&token.as_str()) {
+            bg_codes.insert(token.clone(), ansi);
         } else {
-            fg_codes.insert(name.clone(), ansi);
+            fg_codes.insert(token.clone(), ansi);
         }
+        resolved_colors.insert(token.clone(), resolved);
     }
 
+    let page_bg = resolve_optional_color(export.page_bg.as_ref(), &vars)?;
+    let card_bg = resolve_optional_color(export.card_bg.as_ref(), &vars)?;
+    let info_bg = resolve_optional_color(export.info_bg.as_ref(), &vars)?;
+    let export_colors = ThemeExportColors {
+        page_bg: page_bg
+            .as_ref()
+            .and_then(|color| resolved_color_to_css(color, None)),
+        card_bg: card_bg
+            .as_ref()
+            .and_then(|color| resolved_color_to_css(color, None)),
+        info_bg: info_bg
+            .as_ref()
+            .and_then(|color| resolved_color_to_css(color, None)),
+    };
+
     Ok(Theme::new(
-        parsed.name,
+        name,
         mode,
         source_path,
         source_info,
+        resolved_colors,
+        export_colors,
         fg_codes,
         bg_codes,
     ))
@@ -749,6 +924,86 @@ fn detect_default_theme_name() -> String {
     String::from("dark")
 }
 
+fn resolve_theme_for_lookup(theme_name: Option<&str>) -> Result<(Theme, String), String> {
+    match theme_name {
+        Some(name) => get_theme_by_name(name)
+            .map(|theme| (theme, name.to_owned()))
+            .ok_or_else(|| format!("Theme not found: {name}")),
+        None => Ok((current_theme(), current_theme_name())),
+    }
+}
+
+pub fn get_resolved_theme_colors(
+    theme_name: Option<&str>,
+) -> Result<BTreeMap<String, String>, String> {
+    let (theme, effective_name) = resolve_theme_for_lookup(theme_name)?;
+    let default_text = if effective_name == "light" {
+        "#000000"
+    } else {
+        "#e5e5e7"
+    };
+
+    Ok(theme
+        .resolved_colors()
+        .iter()
+        .filter_map(|(key, color)| {
+            resolved_color_to_css(color, Some(default_text)).map(|value| (key.clone(), value))
+        })
+        .collect())
+}
+
+pub fn is_light_theme(theme_name: Option<&str>) -> bool {
+    theme_name == Some("light")
+}
+
+pub fn get_theme_export_colors(theme_name: Option<&str>) -> Result<ThemeExportColors, String> {
+    let (theme, _) = resolve_theme_for_lookup(theme_name)?;
+    Ok(theme.export_colors().clone())
+}
+
+fn resolve_optional_color(
+    value: Option<&ColorValue>,
+    vars: &BTreeMap<String, ColorValue>,
+) -> Result<Option<ResolvedColor>, String> {
+    value
+        .map(|color| resolve_color_value(color, vars, &mut Vec::new()))
+        .transpose()
+}
+
+fn resolved_color_to_css(color: &ResolvedColor, default_text: Option<&str>) -> Option<String> {
+    match color {
+        ResolvedColor::Default => default_text.map(ToOwned::to_owned),
+        ResolvedColor::Hex(hex) => Some(hex.clone()),
+        ResolvedColor::Ansi256(index) => Some(ansi_256_to_hex(*index)),
+    }
+}
+
+fn ansi_256_to_hex(index: u8) -> String {
+    const BASIC_COLORS: [&str; 16] = [
+        "#000000", "#800000", "#008000", "#808000", "#000080", "#800080", "#008080", "#c0c0c0",
+        "#808080", "#ff0000", "#00ff00", "#ffff00", "#0000ff", "#ff00ff", "#00ffff", "#ffffff",
+    ];
+
+    if index < 16 {
+        return BASIC_COLORS[index as usize].to_owned();
+    }
+
+    if index < 232 {
+        let cube_index = index - 16;
+        let r = cube_index / 36;
+        let g = (cube_index % 36) / 6;
+        let b = cube_index % 6;
+        let to_hex = |value: u8| {
+            let channel = if value == 0 { 0 } else { 55 + value * 40 };
+            format!("{channel:02x}")
+        };
+        return format!("#{}{}{}", to_hex(r), to_hex(g), to_hex(b));
+    }
+
+    let gray = 8 + (index - 232) * 10;
+    format!("#{gray:02x}{gray:02x}{gray:02x}")
+}
+
 fn hex_to_rgb(hex: &str) -> Result<(u8, u8, u8), String> {
     validate_hex(hex)?;
     let cleaned = hex.trim_start_matches('#');
@@ -764,7 +1019,23 @@ fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
     let r_index = closest_cube_index(r);
     let g_index = closest_cube_index(g);
     let b_index = closest_cube_index(b);
-    16 + 36 * r_index + 6 * g_index + b_index
+    let cube_r = CUBE_VALUES[r_index as usize];
+    let cube_g = CUBE_VALUES[g_index as usize];
+    let cube_b = CUBE_VALUES[b_index as usize];
+    let cube_index = 16 + 36 * r_index + 6 * g_index + b_index;
+    let cube_distance = color_distance(r, g, b, cube_r, cube_g, cube_b);
+
+    let gray = ((299 * u32::from(r) + 587 * u32::from(g) + 114 * u32::from(b) + 500) / 1000) as u8;
+    let gray_index = closest_gray_index(gray);
+    let gray_value = 8 + gray_index * 10;
+    let gray_distance = color_distance(r, g, b, gray_value, gray_value, gray_value);
+
+    let spread = r.max(g).max(b) - r.min(g).min(b);
+    if spread < 10 && gray_distance < cube_distance {
+        return 232 + gray_index;
+    }
+
+    cube_index
 }
 
 fn closest_cube_index(value: u8) -> u8 {
@@ -778,6 +1049,27 @@ fn closest_cube_index(value: u8) -> u8 {
         }
     }
     min_index
+}
+
+fn closest_gray_index(value: u8) -> u8 {
+    let mut min_distance = u16::MAX;
+    let mut min_index = 0u8;
+    for index in 0..24u8 {
+        let gray = 8 + index * 10;
+        let distance = value.abs_diff(gray) as u16;
+        if distance < min_distance {
+            min_distance = distance;
+            min_index = index;
+        }
+    }
+    min_index
+}
+
+fn color_distance(r1: u8, g1: u8, b1: u8, r2: u8, g2: u8, b2: u8) -> u32 {
+    let dr = i32::from(r1) - i32::from(r2);
+    let dg = i32::from(g1) - i32::from(g2);
+    let db = i32::from(b1) - i32::from(b2);
+    (dr * dr) as u32 * 299 + (dg * dg) as u32 * 587 + (db * db) as u32 * 114
 }
 
 fn normalize_path(input: &str) -> String {

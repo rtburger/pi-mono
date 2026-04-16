@@ -49,9 +49,12 @@ pub use startup_header::{
 };
 pub use startup_shell::{StartupShellComponent, StatusHandle};
 pub use theme::{
-    ColorMode, LoadThemesOptions, LoadThemesResult, Theme, ThemeSelectionResult,
-    ThemedKeyHintStyler, current_theme, current_theme_name, init_theme, load_theme_from_path,
-    load_themes, set_registered_themes, set_theme,
+    ColorMode, LoadThemesOptions, LoadThemesResult, Theme, ThemeExportColors, ThemeInfo,
+    ThemeSelectionResult, ThemedKeyHintStyler, current_theme, current_theme_name,
+    get_available_themes, get_available_themes_with_paths, get_resolved_theme_colors,
+    get_theme_by_name, get_theme_export_colors, init_theme, is_light_theme, load_theme_from_path,
+    load_theme_from_path_with_mode, load_themes, set_registered_themes, set_theme,
+    set_theme_instance,
 };
 pub use tool_execution::{
     ToolExecutionComponent, ToolExecutionOptions, ToolExecutionRendererDefinition,
