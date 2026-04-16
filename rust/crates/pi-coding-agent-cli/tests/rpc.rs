@@ -7,8 +7,7 @@ use pi_ai::{
 use pi_coding_agent_cli::{RunCommandOptions, run_command};
 use pi_coding_agent_core::MemoryAuthStorage;
 use pi_events::{
-    AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason,
-    Usage,
+    AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, StopReason, Usage,
 };
 use serde_json::Value;
 use std::{
@@ -564,7 +563,11 @@ async fn run_command_rpc_mode_emits_extension_ui_requests() {
     assert!(methods.contains(&"setStatus"), "stdout: {}", result.stdout);
     assert!(methods.contains(&"setWidget"), "stdout: {}", result.stdout);
     assert!(methods.contains(&"setTitle"), "stdout: {}", result.stdout);
-    assert!(methods.contains(&"set_editor_text"), "stdout: {}", result.stdout);
+    assert!(
+        methods.contains(&"set_editor_text"),
+        "stdout: {}",
+        result.stdout
+    );
     assert!(methods.contains(&"notify"), "stdout: {}", result.stdout);
 
     unregister_provider(&api);

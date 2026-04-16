@@ -2,9 +2,9 @@ use crate::{
     AssistantMessageComponent, BuiltInHeaderComponent, ClipboardImageSource, CustomEditor,
     DEFAULT_HIDDEN_THINKING_LABEL, ExtensionEditorComponent, ExternalEditorCommandRunner,
     ExternalEditorHost, FooterComponent, FooterState, FooterStateHandle, KeyHintStyler,
-    KeybindingsManager, ModelSelectorComponent, PendingMessagesComponent, PlainKeyHintStyler,
-    StartupHeaderStyler, ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult,
-    TranscriptComponent, UserMessageComponent, paste_clipboard_image_into_shell,
+    KeybindingsManager, ModelSelectorComponent, PendingMessagesComponent, StartupHeaderStyler,
+    ThemedKeyHintStyler, ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult,
+    TranscriptComponent, UserMessageComponent, current_theme, paste_clipboard_image_into_shell,
 };
 use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
 use pi_events::{AssistantMessage, Model, UserContent};
@@ -378,7 +378,10 @@ impl StartupShellComponent {
             .lock()
             .expect("status message mutex poisoned")
             .as_ref()
-            .map(|message| vec![truncate_to_width(message, width, "...", false)])
+            .map(|message| {
+                let styled = current_theme().fg("dim", message);
+                vec![truncate_to_width(&styled, width, "...", false)]
+            })
             .unwrap_or_default()
     }
 
@@ -613,7 +616,7 @@ impl StartupShellComponent {
                 follow_up,
             } => {
                 self.pending_messages.borrow_mut().set_messages(
-                    &PlainKeyHintStyler,
+                    &ThemedKeyHintStyler,
                     steering,
                     follow_up,
                 );

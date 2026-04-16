@@ -634,9 +634,10 @@ fn built_in_edit_renderer_applies_colored_intraline_diff_rendering() {
     let rendered = component.render(120).join("\n");
     let plain = strip_ansi(&rendered);
 
-    assert!(rendered.contains("\x1b[90m 1    alpha\x1b[0m"));
-    assert!(rendered.contains("\x1b[31m-2    "));
-    assert!(rendered.contains("\x1b[32m+2    "));
+    assert!(rendered.contains("\x1b["));
+    assert!(rendered.contains(" 1    alpha\x1b[0m"));
+    assert!(rendered.contains("-2    "));
+    assert!(rendered.contains("+2    "));
     assert!(rendered.contains("\x1b[7mbefore "));
     assert!(rendered.contains("\x1b[7mafter "));
     assert!(!rendered.contains("\x1b[7m   before"));

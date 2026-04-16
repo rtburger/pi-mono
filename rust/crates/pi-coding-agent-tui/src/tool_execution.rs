@@ -1,4 +1,4 @@
-use crate::{KeybindingsManager, key_text};
+use crate::{KeybindingsManager, current_theme, key_text};
 use pi_events::{ToolResultMessage, UserContent};
 use pi_tui::{Component, Container, Spacer, Text};
 use serde_json::Value;
@@ -335,7 +335,11 @@ impl<TState> ToolExecutionComponent<TState> {
             "edit" => format_edit_call(&self.args),
             _ => return None,
         };
-        Some(Box::new(Text::new(text, 0, 0)))
+        Some(Box::new(Text::new(
+            current_theme().fg("toolTitle", text),
+            0,
+            0,
+        )))
     }
 
     fn build_built_in_result_component(
@@ -348,11 +352,19 @@ impl<TState> ToolExecutionComponent<TState> {
             "edit" => format_edit_result(result, self.text_output()),
             _ => return None,
         }?;
-        Some(Box::new(Text::new(text, 0, 0)))
+        Some(Box::new(Text::new(
+            current_theme().fg("toolOutput", text),
+            0,
+            0,
+        )))
     }
 
     fn create_call_fallback(&self) -> Box<dyn Component> {
-        Box::new(Text::new(self.tool_name.clone(), 0, 0))
+        Box::new(Text::new(
+            current_theme().fg("toolTitle", &self.tool_name),
+            0,
+            0,
+        ))
     }
 
     fn create_result_fallback(&self) -> Option<Box<dyn Component>> {
@@ -360,7 +372,11 @@ impl<TState> ToolExecutionComponent<TState> {
         if output.is_empty() {
             return None;
         }
-        Some(Box::new(Text::new(output, 0, 0)))
+        Some(Box::new(Text::new(
+            current_theme().fg("toolOutput", output),
+            0,
+            0,
+        )))
     }
 
     fn format_tool_execution(&self) -> String {
@@ -546,9 +562,6 @@ fn trim_trailing_empty_lines(text: &str) -> String {
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_INVERSE_ON: &str = "\x1b[7m";
 const ANSI_INVERSE_OFF: &str = "\x1b[27m";
-const ANSI_DIFF_CONTEXT: &str = "\x1b[90m";
-const ANSI_DIFF_REMOVED: &str = "\x1b[31m";
-const ANSI_DIFF_ADDED: &str = "\x1b[32m";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedDiffLine {
@@ -565,13 +578,17 @@ enum WordDiffPart {
 }
 
 fn render_diff(diff_text: &str) -> String {
+    let theme = current_theme();
     let mut rendered = Vec::new();
     let lines = diff_text.split('\n').collect::<Vec<_>>();
     let mut index = 0usize;
 
     while index < lines.len() {
         let Some(parsed) = parse_diff_line(lines[index]) else {
-            rendered.push(colorize_diff_line(ANSI_DIFF_CONTEXT, lines[index]));
+            rendered.push(colorize_diff_line(
+                theme.fg_code("toolDiffContext"),
+                lines[index],
+            ));
             index += 1;
             continue;
         };
@@ -606,23 +623,23 @@ fn render_diff(diff_text: &str) -> String {
                     let (removed_content, added_content) =
                         render_intra_line_diff(&removed_lines[0].content, &added_lines[0].content);
                     rendered.push(colorize_diff_line(
-                        ANSI_DIFF_REMOVED,
+                        theme.fg_code("toolDiffRemoved"),
                         &format!("-{} {}", removed_lines[0].line_num, removed_content),
                     ));
                     rendered.push(colorize_diff_line(
-                        ANSI_DIFF_ADDED,
+                        theme.fg_code("toolDiffAdded"),
                         &format!("+{} {}", added_lines[0].line_num, added_content),
                     ));
                 } else {
                     for line in removed_lines {
                         rendered.push(colorize_diff_line(
-                            ANSI_DIFF_REMOVED,
+                            theme.fg_code("toolDiffRemoved"),
                             &format!("-{} {}", line.line_num, replace_tabs(&line.content)),
                         ));
                     }
                     for line in added_lines {
                         rendered.push(colorize_diff_line(
-                            ANSI_DIFF_ADDED,
+                            theme.fg_code("toolDiffAdded"),
                             &format!("+{} {}", line.line_num, replace_tabs(&line.content)),
                         ));
                     }
@@ -630,14 +647,14 @@ fn render_diff(diff_text: &str) -> String {
             }
             '+' => {
                 rendered.push(colorize_diff_line(
-                    ANSI_DIFF_ADDED,
+                    theme.fg_code("toolDiffAdded"),
                     &format!("+{} {}", parsed.line_num, replace_tabs(&parsed.content)),
                 ));
                 index += 1;
             }
             _ => {
                 rendered.push(colorize_diff_line(
-                    ANSI_DIFF_CONTEXT,
+                    theme.fg_code("toolDiffContext"),
                     &format!(" {} {}", parsed.line_num, replace_tabs(&parsed.content)),
                 ));
                 index += 1;

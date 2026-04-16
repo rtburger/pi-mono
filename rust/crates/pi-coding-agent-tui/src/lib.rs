@@ -14,6 +14,7 @@ mod pending_messages;
 mod skill_invocation;
 mod startup_header;
 mod startup_shell;
+mod theme;
 mod tool_execution;
 mod transcript;
 mod user_message;
@@ -47,6 +48,11 @@ pub use startup_header::{
     build_condensed_changelog_notice, build_startup_header_text,
 };
 pub use startup_shell::{StartupShellComponent, StatusHandle};
+pub use theme::{
+    ColorMode, LoadThemesOptions, LoadThemesResult, Theme, ThemeSelectionResult,
+    ThemedKeyHintStyler, current_theme, current_theme_name, init_theme, load_theme_from_path,
+    load_themes, set_registered_themes, set_theme,
+};
 pub use tool_execution::{
     ToolExecutionComponent, ToolExecutionOptions, ToolExecutionRendererDefinition,
     ToolExecutionResult, ToolRenderContext, ToolRenderResultOptions,

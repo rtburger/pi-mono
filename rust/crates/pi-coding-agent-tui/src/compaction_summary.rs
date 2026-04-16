@@ -1,4 +1,4 @@
-use crate::{KeybindingsManager, key_text};
+use crate::{KeybindingsManager, current_theme, key_text};
 use pi_coding_agent_core::CompactionSummaryMessage;
 use pi_tui::{Component, Container, Spacer, Text};
 
@@ -31,25 +31,34 @@ impl CompactionSummaryMessageComponent {
     fn rebuild(&mut self) {
         self.container.clear();
         self.container.add_child(Box::new(Spacer::new(1)));
-        self.container
-            .add_child(Box::new(Text::new("[compaction]", 1, 0)));
+        self.container.add_child(Box::new(Text::new(
+            current_theme().fg("accent", "[compaction]"),
+            1,
+            0,
+        )));
         self.container.add_child(Box::new(Spacer::new(1)));
 
         let tokens_before = format_with_commas(self.message.tokens_before);
         if self.expanded {
             self.container.add_child(Box::new(Text::new(
-                format!(
-                    "Compacted from {tokens_before} tokens\n\n{}",
-                    self.message.summary
+                current_theme().fg(
+                    "text",
+                    format!(
+                        "Compacted from {tokens_before} tokens\n\n{}",
+                        self.message.summary
+                    ),
                 ),
                 1,
                 0,
             )));
         } else {
             self.container.add_child(Box::new(Text::new(
-                format!(
-                    "Compacted from {tokens_before} tokens ({} to expand)",
-                    self.expand_key_text
+                current_theme().fg(
+                    "dim",
+                    format!(
+                        "Compacted from {tokens_before} tokens ({} to expand)",
+                        self.expand_key_text
+                    ),
                 ),
                 1,
                 0,

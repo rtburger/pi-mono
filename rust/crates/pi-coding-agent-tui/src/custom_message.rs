@@ -1,3 +1,4 @@
+use crate::current_theme;
 use pi_coding_agent_core::{CustomMessage, CustomMessageContent};
 use pi_events::UserContent;
 use pi_tui::{Component, Container, Spacer, Text};
@@ -27,18 +28,27 @@ impl CustomMessageComponent {
     }
 
     fn rebuild(&mut self) {
+        let theme = current_theme();
         self.container.clear();
         self.container.add_child(Box::new(Spacer::new(1)));
-        self.container
-            .add_child(Box::new(Text::new(self.rendered_text(), 1, 1)));
+        self.container.add_child(Box::new(Text::with_custom_bg_fn(
+            self.rendered_text(),
+            1,
+            1,
+            theme.background_fill("customMessageBg"),
+        )));
     }
 
     fn rendered_text(&self) -> String {
-        let mut text = format!("[{}]", self.message.custom_type);
+        let theme = current_theme();
+        let mut text = theme.fg(
+            "customMessageLabel",
+            format!("[{}]", self.message.custom_type),
+        );
         let body = extract_text_content(&self.message.content);
         if !body.is_empty() {
             text.push_str("\n\n");
-            text.push_str(&body);
+            text.push_str(&theme.fg("customMessageText", body));
         }
         text
     }

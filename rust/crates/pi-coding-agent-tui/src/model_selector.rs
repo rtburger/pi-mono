@@ -1,4 +1,4 @@
-use crate::{KeybindingsManager, PlainKeyHintStyler, key_hint};
+use crate::{KeybindingsManager, ThemedKeyHintStyler, key_hint};
 use pi_events::Model;
 use pi_tui::{Component, Input, fuzzy_filter, matches_key, truncate_to_width};
 use std::{borrow::Cow, cell::Cell, ops::Deref};
@@ -107,7 +107,7 @@ impl ModelSelectorComponent {
     }
 
     fn render_hint_line(&self, width: usize) -> String {
-        let styler = PlainKeyHintStyler;
+        let styler = ThemedKeyHintStyler;
         let hint = format!(
             "{}  {}  {}",
             key_hint(&self.keybindings, &styler, "tui.select.confirm", "select"),

@@ -1,4 +1,4 @@
-use crate::{CustomEditor, KeybindingsManager, PlainKeyHintStyler, key_hint};
+use crate::{CustomEditor, KeybindingsManager, ThemedKeyHintStyler, key_hint};
 use pi_tui::{Component, matches_key, truncate_to_width};
 use std::{
     cell::Cell,
@@ -161,7 +161,7 @@ impl ExtensionEditorComponent {
     }
 
     fn render_hint_line(&self, width: usize) -> String {
-        let styler = PlainKeyHintStyler;
+        let styler = ThemedKeyHintStyler;
         let mut hint = key_hint(&self.keybindings, &styler, "tui.select.confirm", "submit");
         hint.push_str("  ");
         hint.push_str(&key_hint(

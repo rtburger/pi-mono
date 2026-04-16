@@ -9,6 +9,7 @@ use pi_coding_agent_tools::{
     create_bash_tool, create_edit_tool, create_find_tool, create_grep_tool, create_ls_tool,
     create_read_tool, create_read_tool_with_auto_resize_flag, create_write_tool,
 };
+use pi_coding_agent_tui::{LoadThemesOptions, Theme, load_themes};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -21,6 +22,7 @@ const FINALIZED_SYSTEM_PROMPT_PREFIX: &str = "\0pi-final-system-prompt\n";
 pub struct LoadedCliResources {
     pub prompt_templates: Vec<PromptTemplate>,
     pub skills: Vec<Skill>,
+    pub themes: Vec<Theme>,
     pub warnings: Vec<String>,
 }
 
@@ -63,13 +65,18 @@ pub fn load_cli_resources(
     });
     warnings.extend(skills.diagnostics.iter().map(format_resource_diagnostic));
 
-    if let Some(theme_paths) = parsed.themes.as_ref() {
-        warnings.extend(validate_resource_paths(cwd, theme_paths, "Theme"));
-    }
+    let themes = load_themes(LoadThemesOptions {
+        cwd: cwd.to_path_buf(),
+        agent_dir: agent_dir.map(Path::to_path_buf),
+        theme_paths: parsed.themes.clone().unwrap_or_default(),
+        include_defaults: !parsed.no_themes,
+    });
+    warnings.extend(themes.diagnostics.iter().map(format_resource_diagnostic));
 
     LoadedCliResources {
         prompt_templates: prompt_templates.prompts,
         skills: skills.skills,
+        themes: themes.themes,
         warnings,
     }
 }
@@ -79,6 +86,7 @@ pub fn extend_cli_resources_from_extensions(
     cwd: &Path,
     skill_paths: &[ExtensionResourcePath],
     prompt_paths: &[ExtensionResourcePath],
+    theme_paths: &[ExtensionResourcePath],
 ) -> Vec<String> {
     let mut warnings = Vec::new();
 
@@ -92,8 +100,13 @@ pub fn extend_cli_resources_from_extensions(
         warnings.extend(loaded.diagnostics.iter().map(format_resource_diagnostic));
 
         for mut skill in loaded.skills {
-            skill.source_info = source_info_for_extension_resource(&skill.file_path, &entry.extension_path);
-            if let Some(existing) = resources.skills.iter().find(|existing| existing.name == skill.name) {
+            skill.source_info =
+                source_info_for_extension_resource(&skill.file_path, &entry.extension_path);
+            if let Some(existing) = resources
+                .skills
+                .iter()
+                .find(|existing| existing.name == skill.name)
+            {
                 warnings.push(format!(
                     "Warning: Skill name collision for {} (keeping {}) ({})",
                     skill.name, existing.file_path, skill.file_path
@@ -114,7 +127,8 @@ pub fn extend_cli_resources_from_extensions(
         warnings.extend(loaded.diagnostics.iter().map(format_resource_diagnostic));
 
         for mut prompt in loaded.prompts {
-            prompt.source_info = source_info_for_extension_resource(&prompt.file_path, &entry.extension_path);
+            prompt.source_info =
+                source_info_for_extension_resource(&prompt.file_path, &entry.extension_path);
             if let Some(existing) = resources
                 .prompt_templates
                 .iter()
@@ -127,6 +141,33 @@ pub fn extend_cli_resources_from_extensions(
                 continue;
             }
             resources.prompt_templates.push(prompt);
+        }
+    }
+
+    for entry in theme_paths {
+        let loaded = load_themes(LoadThemesOptions {
+            cwd: cwd.to_path_buf(),
+            agent_dir: None,
+            theme_paths: vec![entry.path.clone()],
+            include_defaults: false,
+        });
+        warnings.extend(loaded.diagnostics.iter().map(format_resource_diagnostic));
+
+        for theme in loaded.themes {
+            if let Some(existing) = resources
+                .themes
+                .iter()
+                .find(|existing| existing.name() == theme.name())
+            {
+                warnings.push(format!(
+                    "Warning: Theme name collision for {} (keeping {}) ({})",
+                    theme.name(),
+                    existing.source_path().unwrap_or("<builtin>"),
+                    theme.source_path().unwrap_or("<in-memory>")
+                ));
+                continue;
+            }
+            resources.themes.push(theme);
         }
     }
 
@@ -250,11 +291,16 @@ fn format_resource_diagnostic(diagnostic: &pi_coding_agent_core::ResourceDiagnos
 }
 
 fn validate_resource_paths(cwd: &Path, paths: &[String], kind: &str) -> Vec<String> {
-    paths.iter()
+    paths
+        .iter()
         .filter_map(|path| {
             let resolved = resolve_from_cwd(cwd, path);
-            (!resolved.exists())
-                .then(|| format!("Warning: {kind} path does not exist: {}", resolved.display()))
+            (!resolved.exists()).then(|| {
+                format!(
+                    "Warning: {kind} path does not exist: {}",
+                    resolved.display()
+                )
+            })
         })
         .collect()
 }
@@ -268,7 +314,10 @@ fn extension_source_label(extension_path: &str) -> String {
         .file_name()
         .and_then(|file_name| file_name.to_str())
         .unwrap_or(extension_path);
-    let name = base.strip_suffix(".ts").or_else(|| base.strip_suffix(".js")).unwrap_or(base);
+    let name = base
+        .strip_suffix(".ts")
+        .or_else(|| base.strip_suffix(".js"))
+        .unwrap_or(base);
     format!("extension:{name}")
 }
 

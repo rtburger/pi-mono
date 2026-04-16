@@ -1,3 +1,4 @@
+use crate::current_theme;
 use pi_events::{AssistantContent, AssistantMessage, StopReason};
 use pi_tui::{Component, Container, Spacer, Text};
 
@@ -62,8 +63,11 @@ impl AssistantMessageComponent {
         for (index, content) in message.content.iter().enumerate() {
             match content {
                 AssistantContent::Text { text, .. } if !text.trim().is_empty() => {
-                    self.content_container
-                        .add_child(Box::new(Text::new(text.trim(), 1, 0)));
+                    self.content_container.add_child(Box::new(Text::new(
+                        current_theme().fg("text", text.trim()),
+                        1,
+                        0,
+                    )));
                 }
                 AssistantContent::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
                     let has_visible_content_after = message
@@ -74,13 +78,13 @@ impl AssistantMessageComponent {
 
                     if self.hide_thinking_block {
                         self.content_container.add_child(Box::new(Text::new(
-                            self.hidden_thinking_label.clone(),
+                            current_theme().fg("thinkingText", &self.hidden_thinking_label),
                             1,
                             0,
                         )));
                     } else {
                         self.content_container.add_child(Box::new(Text::new(
-                            thinking.trim(),
+                            current_theme().fg("thinkingText", thinking.trim()),
                             1,
                             0,
                         )));
@@ -107,14 +111,17 @@ impl AssistantMessageComponent {
                         Some(message) => message.to_string(),
                     };
                     self.content_container.add_child(Box::new(Spacer::new(1)));
-                    self.content_container
-                        .add_child(Box::new(Text::new(abort_message, 1, 0)));
+                    self.content_container.add_child(Box::new(Text::new(
+                        current_theme().fg("warning", abort_message),
+                        1,
+                        0,
+                    )));
                 }
                 StopReason::Error => {
                     let error_message = message.error_message.as_deref().unwrap_or("Unknown error");
                     self.content_container.add_child(Box::new(Spacer::new(1)));
                     self.content_container.add_child(Box::new(Text::new(
-                        format!("Error: {error_message}"),
+                        current_theme().fg("error", format!("Error: {error_message}")),
                         1,
                         0,
                     )));

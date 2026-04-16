@@ -73,6 +73,7 @@ pub struct RuntimeSettings {
     pub images: ImageSettings,
     pub compaction: CompactionSettings,
     pub thinking_budgets: ThinkingBudgetsSettings,
+    pub theme: Option<String>,
     pub editor_padding_x: usize,
     pub autocomplete_max_visible: usize,
     pub enabled_models: Option<Vec<String>>,
@@ -84,6 +85,7 @@ impl Default for RuntimeSettings {
             images: ImageSettings::default(),
             compaction: CompactionSettings::default(),
             thinking_budgets: ThinkingBudgetsSettings::default(),
+            theme: None,
             editor_padding_x: 0,
             autocomplete_max_visible: 5,
             enabled_models: None,
@@ -106,6 +108,7 @@ struct RawSettings {
     compaction: RawCompactionSettings,
     #[serde(default)]
     thinking_budgets: RawThinkingBudgetsSettings,
+    theme: Option<String>,
     editor_padding_x: Option<f64>,
     autocomplete_max_visible: Option<f64>,
     enabled_models: Option<Vec<String>>,
@@ -184,6 +187,14 @@ fn apply_settings_file(loaded: &mut LoadedRuntimeSettings, scope: SettingsScope,
     }
     if let Some(high) = parsed.thinking_budgets.high {
         loaded.settings.thinking_budgets.high = Some(high);
+    }
+
+    if let Some(theme) = parsed
+        .theme
+        .map(|theme| theme.trim().to_owned())
+        .filter(|theme| !theme.is_empty())
+    {
+        loaded.settings.theme = Some(theme);
     }
 
     if let Some(editor_padding_x) = parsed.editor_padding_x

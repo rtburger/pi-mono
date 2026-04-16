@@ -1,5 +1,5 @@
 use pi_coding_agent_core::SessionInfo;
-use pi_coding_agent_tui::{KeybindingsManager, PlainKeyHintStyler, key_hint};
+use pi_coding_agent_tui::{KeybindingsManager, ThemedKeyHintStyler, key_hint};
 use pi_tui::{Component, Input, fuzzy_filter, matches_key, truncate_to_width};
 use std::{borrow::Cow, cell::Cell, env, ops::Deref, time::SystemTime};
 
@@ -143,7 +143,7 @@ impl SessionPickerComponent {
     }
 
     fn render_hint_line(&self, width: usize) -> String {
-        let styler = PlainKeyHintStyler;
+        let styler = ThemedKeyHintStyler;
         let hint = [
             key_hint(&self.keybindings, &styler, "tui.select.confirm", "select"),
             key_hint(&self.keybindings, &styler, "tui.select.cancel", "cancel"),

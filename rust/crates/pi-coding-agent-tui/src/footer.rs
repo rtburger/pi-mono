@@ -1,3 +1,4 @@
+use crate::current_theme;
 use pi_coding_agent_core::{BranchChangeSubscription, FooterDataProvider, FooterDataSnapshot};
 use pi_events::Model;
 use pi_tui::{Component, RenderHandle, truncate_to_width, visible_width};
@@ -218,8 +219,8 @@ impl Component for FooterComponent {
         let mut lines = Vec::new();
 
         if has_pwd_line(&state) {
-            let pwd_line = truncate_to_width(&format_pwd(&state), width, "...", false);
-            lines.push(pwd_line);
+            let pwd_line = current_theme().fg("muted", format_pwd(&state));
+            lines.push(truncate_to_width(&pwd_line, width, "...", false));
         }
 
         if has_stats_line(&state) {
@@ -288,6 +289,7 @@ fn format_pwd(state: &FooterState) -> String {
 }
 
 fn render_stats_line(state: &FooterState, width: usize) -> String {
+    let theme = current_theme();
     let mut stats_parts = Vec::new();
     if state.usage_input > 0 {
         stats_parts.push(format!("↑{}", format_tokens(state.usage_input)));
@@ -372,20 +374,22 @@ fn render_stats_line(state: &FooterState, width: usize) -> String {
 
     let right_side_width = visible_width(&right_side);
     let total_needed = stats_left_width + 2 + right_side_width;
-    if total_needed <= width {
+    let line = if total_needed <= width {
         let padding_width = width.saturating_sub(stats_left_width + right_side_width);
-        return format!("{stats_left}{}{right_side}", " ".repeat(padding_width));
-    }
+        format!("{stats_left}{}{right_side}", " ".repeat(padding_width))
+    } else {
+        let available_for_right = width.saturating_sub(stats_left_width + 2);
+        if available_for_right == 0 {
+            stats_left
+        } else {
+            let truncated_right = truncate_to_width(&right_side, available_for_right, "", false);
+            let truncated_right_width = visible_width(&truncated_right);
+            let padding_width = width.saturating_sub(stats_left_width + truncated_right_width);
+            format!("{stats_left}{}{truncated_right}", " ".repeat(padding_width))
+        }
+    };
 
-    let available_for_right = width.saturating_sub(stats_left_width + 2);
-    if available_for_right == 0 {
-        return stats_left;
-    }
-
-    let truncated_right = truncate_to_width(&right_side, available_for_right, "", false);
-    let truncated_right_width = visible_width(&truncated_right);
-    let padding_width = width.saturating_sub(stats_left_width + truncated_right_width);
-    format!("{stats_left}{}{truncated_right}", " ".repeat(padding_width))
+    theme.fg("dim", line)
 }
 
 fn sanitize_status_text(text: &str) -> String {

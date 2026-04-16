@@ -38,10 +38,13 @@ use pi_coding_agent_core::{
     prepare_compaction, resolve_cli_model, resolve_model_scope, restore_model_from_session,
     should_compact,
 };
+#[cfg(test)]
+use pi_coding_agent_tui::PlainKeyHintStyler;
 use pi_coding_agent_tui::{
     CustomMessageComponent, DEFAULT_APP_KEYBINDINGS, ExternalEditorCommandRunner,
     ExternalEditorHost, FooterStateHandle, InteractiveCoreBinding, KeybindingsManager,
-    PlainKeyHintStyler, StartupShellComponent, StatusHandle, key_hint,
+    StartupShellComponent, StatusHandle, ThemedKeyHintStyler, init_theme, key_hint,
+    set_registered_themes,
 };
 use pi_config::{LoadedRuntimeSettings, ThinkingBudgetsSettings, load_runtime_settings};
 use pi_events::{AssistantContent, Message, Model, UserContent};
@@ -67,8 +70,8 @@ use std::{
 use tokio::time::sleep;
 
 use rpc_extensions::{
-    RpcExtensionCommandInfo, RpcExtensionHost, RpcExtensionHostStartOptions,
-    RpcToolCallResult, should_start_extension_host,
+    RpcExtensionCommandInfo, RpcExtensionHost, RpcExtensionHostStartOptions, RpcToolCallResult,
+    should_start_extension_host,
 };
 use serde_json::{Value, json};
 
@@ -1098,6 +1101,11 @@ async fn run_interactive_iteration(
     for warning in &resources.warnings {
         eprintln!("{warning}");
     }
+    set_registered_themes(resources.themes.clone());
+    let theme_result = init_theme(runtime_settings.settings.theme.as_deref());
+    if let Some(error) = theme_result.error.as_deref() {
+        eprintln!("Warning: {error}");
+    }
     let (selected_tool_names, selected_tools) = build_selected_tools(
         &parsed,
         &cwd,
@@ -1354,7 +1362,7 @@ async fn run_interactive_iteration(
         "Pi",
         &version,
         &keybindings,
-        &PlainKeyHintStyler,
+        &ThemedKeyHintStyler,
         true,
         None,
         false,
@@ -2415,7 +2423,7 @@ impl SettingsPickerComponent {
     }
 
     fn render_hint_line(&self, width: usize) -> String {
-        let styler = PlainKeyHintStyler;
+        let styler = ThemedKeyHintStyler;
         let hint = format!(
             "{}  {}  {}  {}",
             key_hint(&self.keybindings, &styler, "tui.select.up", "navigate"),
@@ -2726,7 +2734,7 @@ impl ScopedModelsPickerComponent {
     }
 
     fn render_hint_lines(&self, width: usize) -> Vec<String> {
-        let styler = PlainKeyHintStyler;
+        let styler = ThemedKeyHintStyler;
         let mut first = vec![
             key_hint(&self.keybindings, &styler, "tui.select.confirm", "toggle"),
             key_hint(&self.keybindings, &styler, "tui.select.up", "navigate"),
@@ -4187,7 +4195,9 @@ async fn build_rpc_state(
         return Err(bootstrap_output);
     }
 
-    let session_manager = session_support.as_ref().map(|support| support.manager.clone());
+    let session_manager = session_support
+        .as_ref()
+        .map(|support| support.manager.clone());
     let mut extension_host = None;
     if should_start_extension_host(
         cwd,
@@ -4244,9 +4254,22 @@ async fn build_rpc_state(
                     extension_path: entry.extension_path,
                 })
                 .collect::<Vec<_>>();
-            for warning in
-                extend_cli_resources_from_extensions(&mut resources, cwd, &skill_paths, &prompt_paths)
-            {
+            let theme_paths = start_result
+                .init
+                .theme_paths
+                .into_iter()
+                .map(|entry| ExtensionResourcePath {
+                    path: entry.path,
+                    extension_path: entry.extension_path,
+                })
+                .collect::<Vec<_>>();
+            for warning in extend_cli_resources_from_extensions(
+                &mut resources,
+                cwd,
+                &skill_paths,
+                &prompt_paths,
+                &theme_paths,
+            ) {
                 push_line(&mut resource_output, &warning);
             }
 
@@ -4271,34 +4294,38 @@ async fn build_rpc_state(
             .await?;
 
             let before_tool_call_host = host.clone();
-            created.core.agent().set_before_tool_call(move |context, _signal| {
-                let before_tool_call_host = before_tool_call_host.clone();
-                async move {
-                    let input = context
-                        .args
-                        .lock()
-                        .expect("rpc before_tool_call args mutex poisoned")
-                        .clone();
-                    match before_tool_call_host
-                        .tool_call(&context.tool_name, &context.tool_call_id, input)
-                        .await
-                    {
-                        Ok(Some(RpcToolCallResult { block: true, reason })) => {
-                            Some(BeforeToolCallResult {
+            created
+                .core
+                .agent()
+                .set_before_tool_call(move |context, _signal| {
+                    let before_tool_call_host = before_tool_call_host.clone();
+                    async move {
+                        let input = context
+                            .args
+                            .lock()
+                            .expect("rpc before_tool_call args mutex poisoned")
+                            .clone();
+                        match before_tool_call_host
+                            .tool_call(&context.tool_name, &context.tool_call_id, input)
+                            .await
+                        {
+                            Ok(Some(RpcToolCallResult {
                                 block: true,
                                 reason,
-                            })
+                            })) => Some(BeforeToolCallResult {
+                                block: true,
+                                reason,
+                            }),
+                            Ok(_) => None,
+                            Err(error) => Some(BeforeToolCallResult {
+                                block: true,
+                                reason: Some(format!(
+                                    "Extension failed, blocking execution: {error}"
+                                )),
+                            }),
                         }
-                        Ok(_) => None,
-                        Err(error) => Some(BeforeToolCallResult {
-                            block: true,
-                            reason: Some(format!(
-                                "Extension failed, blocking execution: {error}"
-                            )),
-                        }),
                     }
-                }
-            });
+                });
             extension_host = Some(host);
         }
     }
@@ -4329,8 +4356,8 @@ fn attach_rpc_event_subscription(state: &mut RpcState, stdout_emitter: TextEmitt
         let extension_host = extension_host.clone();
         Box::pin(async move {
             let event_json = rpc_agent_event_to_json(&event);
-            let line = serde_json::to_string(&event_json)
-                .expect("rpc event serialization must succeed");
+            let line =
+                serde_json::to_string(&event_json).expect("rpc event serialization must succeed");
             stdout_emitter(format!("{line}\n"));
             if let Some(extension_host) = extension_host {
                 let _ = extension_host.emit_event(event_json).await;
@@ -5298,7 +5325,9 @@ async fn sync_rpc_extension_state(shared: &RpcShared) {
         .await;
 }
 
-fn current_rpc_session_file(session_manager: Option<&Arc<Mutex<SessionManager>>>) -> Option<String> {
+fn current_rpc_session_file(
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
+) -> Option<String> {
     session_manager.and_then(|session_manager| {
         session_manager
             .lock()
@@ -5320,9 +5349,7 @@ fn unknown_flags_to_json(flags: &BTreeMap<String, crate::UnknownFlagValue>) -> V
     Value::Object(values)
 }
 
-fn render_extension_diagnostics(
-    diagnostics: &[rpc_extensions::RpcExtensionDiagnostic],
-) -> String {
+fn render_extension_diagnostics(diagnostics: &[rpc_extensions::RpcExtensionDiagnostic]) -> String {
     let mut output = String::new();
     for diagnostic in diagnostics {
         let label = match diagnostic.level.as_str() {
@@ -8385,7 +8412,7 @@ fn render_help() -> String {
         "  - --export <session.jsonl> [out.html]",
         "  - --extension/-e, --no-extensions (RPC extension commands/resources/UI bridge)",
         "  - --skill, --no-skills, --prompt-template, --no-prompt-templates",
-        "  - --theme, --no-themes (path validation only)",
+        "  - --theme, --no-themes",
         "  - @file text/image preprocessing",
         "",
         "RPC mode limitations:",
@@ -9147,7 +9174,11 @@ mod tests {
                 if let Some(request_id) = lines.iter().find_map(|line| {
                     (line.get("type").and_then(Value::as_str) == Some("extension_ui_request")
                         && line.get("method").and_then(Value::as_str) == Some("input"))
-                    .then(|| line.get("id").and_then(Value::as_str).map(ToOwned::to_owned))
+                    .then(|| {
+                        line.get("id")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned)
+                    })
                     .flatten()
                 }) {
                     break request_id;
@@ -9177,7 +9208,10 @@ mod tests {
             .expect("rpc stdout buffer mutex poisoned")
             .clone();
         assert!(stdout.contains("Enter a value"), "stdout: {stdout}");
-        assert!(stdout.contains("You entered: hello from host"), "stdout: {stdout}");
+        assert!(
+            stdout.contains("You entered: hello from host"),
+            "stdout: {stdout}"
+        );
         assert!(
             stderr
                 .lock()

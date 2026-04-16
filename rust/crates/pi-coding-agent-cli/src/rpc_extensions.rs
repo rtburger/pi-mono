@@ -236,7 +236,9 @@ impl RpcExtensionHost {
     }
 
     pub async fn update_state(&self, state: Value) -> Result<(), String> {
-        let _ = self.request("update_state", json!({ "state": state })).await?;
+        let _ = self
+            .request("update_state", json!({ "state": state }))
+            .await?;
         Ok(())
     }
 
@@ -377,7 +379,9 @@ fn spawn_stderr_reader(inner: Arc<RpcExtensionHostInner>, stderr: tokio::process
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    (inner.stderr_emitter)(format!("Warning: extension host stderr failed: {error}\n"));
+                    (inner.stderr_emitter)(format!(
+                        "Warning: extension host stderr failed: {error}\n"
+                    ));
                     break;
                 }
             }
@@ -396,7 +400,10 @@ fn handle_stdout_line(inner: &RpcExtensionHostInner, line: String) {
         }
     };
 
-    let message_type = value.get("type").and_then(Value::as_str).unwrap_or_default();
+    let message_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if message_type == "response" {
         let Some(request_id) = value.get("id").and_then(Value::as_str) else {
             return;

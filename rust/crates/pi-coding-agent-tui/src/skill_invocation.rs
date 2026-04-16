@@ -1,4 +1,4 @@
-use crate::{KeybindingsManager, key_text};
+use crate::{KeybindingsManager, current_theme, key_text};
 use pi_coding_agent_core::ParsedSkillBlock;
 use pi_tui::{Component, Container, Text};
 
@@ -32,18 +32,27 @@ impl SkillInvocationMessageComponent {
         self.container.clear();
 
         if self.expanded {
-            self.container
-                .add_child(Box::new(Text::new("[skill]", 0, 0)));
             self.container.add_child(Box::new(Text::new(
-                format!("{}\n\n{}", self.skill_block.name, self.skill_block.content),
+                current_theme().fg("accent", "[skill]"),
+                0,
+                0,
+            )));
+            self.container.add_child(Box::new(Text::new(
+                current_theme().fg(
+                    "text",
+                    format!("{}\n\n{}", self.skill_block.name, self.skill_block.content),
+                ),
                 0,
                 0,
             )));
         } else {
             self.container.add_child(Box::new(Text::new(
-                format!(
-                    "[skill] {} ({} to expand)",
-                    self.skill_block.name, self.expand_key_text
+                current_theme().fg(
+                    "dim",
+                    format!(
+                        "[skill] {} ({} to expand)",
+                        self.skill_block.name, self.expand_key_text
+                    ),
                 ),
                 0,
                 0,
