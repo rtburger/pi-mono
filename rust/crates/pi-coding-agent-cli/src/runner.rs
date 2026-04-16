@@ -71,6 +71,7 @@ use std::{
 };
 use tokio::{process::Command as TokioCommand, sync::watch, time::sleep};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rpc_extensions::{
     RpcExtensionCommandInfo, RpcExtensionHost, RpcExtensionHostStartOptions, RpcToolCallResult,
     should_start_extension_host,
@@ -7606,6 +7607,45 @@ struct SharedSessionLinks {
     preview_url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedCommandOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClipboardEnvironment {
+    is_macos: bool,
+    is_windows: bool,
+    is_termux: bool,
+    has_wayland_display: bool,
+    has_x11_display: bool,
+    is_wayland_session: bool,
+}
+
+impl ClipboardEnvironment {
+    fn detect() -> Self {
+        Self {
+            is_macos: cfg!(target_os = "macos"),
+            is_windows: cfg!(windows),
+            is_termux: env::var_os("TERMUX_VERSION").is_some(),
+            has_wayland_display: env::var_os("WAYLAND_DISPLAY").is_some(),
+            has_x11_display: env::var_os("DISPLAY").is_some(),
+            is_wayland_session: env::var_os("WAYLAND_DISPLAY").is_some()
+                || env::var("XDG_SESSION_TYPE")
+                    .ok()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("wayland")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClipboardCommandCandidate {
+    command: &'static str,
+    args: &'static [&'static str],
+}
+
 fn resolve_export_target(
     cwd: &Path,
     session_manager: &SessionManager,
@@ -7680,10 +7720,44 @@ fn parse_shared_session_links(output: &[u8]) -> Result<SharedSessionLinks, Strin
     })
 }
 
-fn share_interactive_session(
+fn run_captured_command(command: &str, args: &[&str]) -> Result<CapturedCommandOutput, String> {
+    let output = Command::new(command).args(args).output().map_err(|error| {
+        if command == "gh" && error.kind() == std::io::ErrorKind::NotFound {
+            String::from(
+                "GitHub CLI (gh) is not installed. Install it from https://cli.github.com/",
+            )
+        } else {
+            format!("Failed to run {command}: {error}")
+        }
+    })?;
+
+    Ok(CapturedCommandOutput {
+        success: output.status.success(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
+fn ensure_github_cli_ready_with(
+    mut run_gh: impl FnMut(&[&str]) -> Result<CapturedCommandOutput, String>,
+) -> Result<(), String> {
+    let output = run_gh(&["auth", "status"])?;
+    if output.success {
+        Ok(())
+    } else {
+        Err(String::from(
+            "GitHub CLI is not logged in. Run 'gh auth login' first.",
+        ))
+    }
+}
+
+fn share_interactive_session_with(
     session_manager: &Arc<Mutex<SessionManager>>,
     cwd: &Path,
+    mut run_gh: impl FnMut(&[&str]) -> Result<CapturedCommandOutput, String>,
 ) -> Result<SharedSessionLinks, String> {
+    ensure_github_cli_ready_with(&mut run_gh)?;
+
     let temp_file = {
         let session_manager = session_manager
             .lock()
@@ -7693,18 +7767,16 @@ fn share_interactive_session(
 
     export_interactive_session(session_manager, cwd, temp_file.to_str())?;
     let temp_file_string = temp_file.to_string_lossy().into_owned();
-    let output = Command::new("gh")
-        .args([
-            "gist",
-            "create",
-            "--public=false",
-            temp_file_string.as_str(),
-        ])
-        .output()
-        .map_err(|error| format!("Failed to run gh: {error}"))?;
+    let output = run_gh(&[
+        "gist",
+        "create",
+        "--public=false",
+        temp_file_string.as_str(),
+    ]);
     let _ = fs::remove_file(&temp_file);
+    let output = output?;
 
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         let message = if !stderr.is_empty() {
@@ -7718,6 +7790,15 @@ fn share_interactive_session(
     }
 
     parse_shared_session_links(&output.stdout)
+}
+
+fn share_interactive_session(
+    session_manager: &Arc<Mutex<SessionManager>>,
+    cwd: &Path,
+) -> Result<SharedSessionLinks, String> {
+    share_interactive_session_with(session_manager, cwd, |args| {
+        run_captured_command("gh", args)
+    })
 }
 
 fn export_session_file_to_html(
@@ -7766,33 +7847,87 @@ fn last_assistant_message_text(core: &CodingAgentCore) -> Option<String> {
         .next()
 }
 
-fn copy_text_to_system_clipboard(text: &str) -> Result<(), String> {
-    if cfg!(target_os = "macos") {
-        return run_clipboard_command("pbcopy", &[], text);
+fn clipboard_command_candidates(env: ClipboardEnvironment) -> Vec<ClipboardCommandCandidate> {
+    if env.is_macos {
+        return vec![ClipboardCommandCandidate {
+            command: "pbcopy",
+            args: &[],
+        }];
     }
 
-    if env::var_os("WAYLAND_DISPLAY").is_some()
-        && run_clipboard_command("wl-copy", &["--type", "text/plain"], text).is_ok()
-    {
-        return Ok(());
+    if env.is_windows {
+        return vec![
+            ClipboardCommandCandidate {
+                command: "clip",
+                args: &[],
+            },
+            ClipboardCommandCandidate {
+                command: "clip.exe",
+                args: &[],
+            },
+        ];
     }
 
-    if run_clipboard_command("xclip", &["-selection", "clipboard", "-in"], text).is_ok() {
-        return Ok(());
+    let mut candidates = Vec::new();
+    if env.is_termux {
+        candidates.push(ClipboardCommandCandidate {
+            command: "termux-clipboard-set",
+            args: &[],
+        });
     }
-    if run_clipboard_command("xsel", &["--clipboard", "--input"], text).is_ok() {
-        return Ok(());
+    if env.is_wayland_session && env.has_wayland_display {
+        candidates.push(ClipboardCommandCandidate {
+            command: "wl-copy",
+            args: &["--type", "text/plain"],
+        });
     }
-    if cfg!(windows) {
-        if run_clipboard_command("clip", &[], text).is_ok() {
-            return Ok(());
+    if env.has_x11_display {
+        candidates.push(ClipboardCommandCandidate {
+            command: "xclip",
+            args: &["-selection", "clipboard", "-in"],
+        });
+        candidates.push(ClipboardCommandCandidate {
+            command: "xsel",
+            args: &["--clipboard", "--input"],
+        });
+    }
+    candidates
+}
+
+fn osc52_copy_sequence(text: &str) -> String {
+    format!("\u{1b}]52;c;{}\u{7}", BASE64_STANDARD.encode(text))
+}
+
+fn copy_text_to_system_clipboard_with(
+    text: &str,
+    env: ClipboardEnvironment,
+    mut run_command: impl FnMut(&str, &[&str], &str) -> Result<(), String>,
+    mut write_output: impl FnMut(&str),
+) -> Result<(), String> {
+    write_output(&osc52_copy_sequence(text));
+
+    for candidate in clipboard_command_candidates(env) {
+        if run_command(candidate.command, candidate.args, text).is_ok() {
+            break;
         }
-        return run_clipboard_command("clip.exe", &[], text);
     }
 
-    Err(String::from(
-        "No clipboard command found (tried wl-copy, xclip, xsel, pbcopy, clip).",
-    ))
+    Ok(())
+}
+
+fn copy_text_to_system_clipboard(text: &str) -> Result<(), String> {
+    copy_text_to_system_clipboard_with(
+        text,
+        ClipboardEnvironment::detect(),
+        run_clipboard_command,
+        |sequence| {
+            use std::io::Write as _;
+
+            let mut stdout = std::io::stdout();
+            let _ = stdout.write_all(sequence.as_bytes());
+            let _ = stdout.flush();
+        },
+    )
 }
 
 fn run_clipboard_command(command: &str, args: &[&str], text: &str) -> Result<(), String> {
@@ -11308,6 +11443,125 @@ mod tests {
 
         assert_eq!(links.gist_url, "https://gist.github.com/badlogic/abc123");
         assert_eq!(links.preview_url, "https://pi.dev/session/#abc123");
+    }
+
+    #[test]
+    fn ensure_github_cli_ready_reports_logged_out_state() {
+        let error = ensure_github_cli_ready_with(|args| {
+            assert_eq!(args, ["auth", "status"]);
+            Ok(CapturedCommandOutput {
+                success: false,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        })
+        .expect_err("expected readiness error");
+
+        assert_eq!(
+            error,
+            "GitHub CLI is not logged in. Run 'gh auth login' first."
+        );
+    }
+
+    #[test]
+    fn share_interactive_session_exports_html_and_returns_share_links() {
+        let cwd = unique_temp_dir("share-session");
+        let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
+        manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("share me"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        let session_manager = Arc::new(Mutex::new(manager));
+        let mut seen_temp_file = None::<PathBuf>;
+        let mut gist_create_calls = 0usize;
+
+        let links = share_interactive_session_with(&session_manager, &cwd, |args| {
+            if args == ["auth", "status"] {
+                return Ok(CapturedCommandOutput {
+                    success: true,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+
+            assert_eq!(&args[..3], ["gist", "create", "--public=false"]);
+            gist_create_calls += 1;
+            let temp_file = PathBuf::from(args[3]);
+            let html = fs::read_to_string(&temp_file).expect("expected exported html");
+            assert!(html.contains("share me"), "html: {html}");
+            seen_temp_file = Some(temp_file);
+            Ok(CapturedCommandOutput {
+                success: true,
+                stdout: b"https://gist.github.com/tester/abc123\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        })
+        .expect("expected shared session links");
+
+        assert_eq!(gist_create_calls, 1);
+        assert_eq!(links.gist_url, "https://gist.github.com/tester/abc123");
+        assert_eq!(links.preview_url, "https://pi.dev/session/#abc123");
+        assert!(
+            !seen_temp_file.expect("expected temp export path").exists(),
+            "temporary export should be deleted"
+        );
+    }
+
+    #[test]
+    fn copy_text_to_system_clipboard_falls_back_to_osc52_without_native_tools() {
+        let mut emitted = Vec::new();
+        let env = ClipboardEnvironment {
+            is_macos: false,
+            is_windows: false,
+            is_termux: false,
+            has_wayland_display: false,
+            has_x11_display: false,
+            is_wayland_session: false,
+        };
+
+        copy_text_to_system_clipboard_with(
+            "clipboard text",
+            env,
+            |_command, _args, _text| Err(String::from("unavailable")),
+            |sequence| emitted.push(sequence.to_owned()),
+        )
+        .expect("osc52 fallback should succeed");
+
+        assert_eq!(emitted, vec![osc52_copy_sequence("clipboard text")]);
+    }
+
+    #[test]
+    fn copy_text_to_system_clipboard_prefers_termux_before_other_clipboards() {
+        let mut commands = Vec::<String>::new();
+        let env = ClipboardEnvironment {
+            is_macos: false,
+            is_windows: false,
+            is_termux: true,
+            has_wayland_display: true,
+            has_x11_display: true,
+            is_wayland_session: true,
+        };
+
+        copy_text_to_system_clipboard_with(
+            "clipboard text",
+            env,
+            |command, _args, _text| {
+                commands.push(command.to_owned());
+                if command == "termux-clipboard-set" {
+                    Ok(())
+                } else {
+                    Err(String::from("should not be reached"))
+                }
+            },
+            |_sequence| {},
+        )
+        .expect("termux clipboard should succeed");
+
+        assert_eq!(commands, vec![String::from("termux-clipboard-set")]);
     }
 
     #[tokio::test]
