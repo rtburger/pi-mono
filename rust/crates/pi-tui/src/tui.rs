@@ -1,6 +1,7 @@
 use crate::{
-    CellDimensions, Terminal, TuiError, extract_segments, get_capabilities, is_key_release,
-    matches_key, set_cell_dimensions, slice_by_column, slice_with_width, visible_width,
+    CellDimensions, Terminal, TuiError, extract_segments, get_capabilities, is_image_line,
+    is_key_release, matches_key, set_cell_dimensions, slice_by_column, slice_with_width,
+    visible_width,
 };
 use std::{
     collections::VecDeque,
@@ -15,6 +16,9 @@ static NEXT_OVERLAY_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_INPUT_LISTENER_ID: AtomicU64 = AtomicU64::new(1);
 
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
+const SYNC_OUTPUT_BEGIN: &str = "\x1b[?2026h";
+const SYNC_OUTPUT_END: &str = "\x1b[?2026l";
+const FULL_REDRAW_CLEAR: &str = "\x1b[2J\x1b[H\x1b[3J";
 
 pub const CURSOR_MARKER: &str = "\x1b_pi:c\x07";
 
@@ -345,6 +349,14 @@ pub struct Tui<T: Terminal> {
     focused_target: Option<FocusTarget>,
     started: bool,
     show_hardware_cursor: bool,
+    clear_on_shrink: bool,
+    previous_lines: Vec<String>,
+    previous_width: usize,
+    previous_height: usize,
+    hardware_cursor_row: usize,
+    max_lines_rendered: usize,
+    previous_viewport_top: usize,
+    force_full_redraw: bool,
 }
 
 impl<T: Terminal> Tui<T> {
@@ -360,6 +372,14 @@ impl<T: Terminal> Tui<T> {
             focused_target: None,
             started: false,
             show_hardware_cursor: matches!(std::env::var("PI_HARDWARE_CURSOR").as_deref(), Ok("1")),
+            clear_on_shrink: matches!(std::env::var("PI_CLEAR_ON_SHRINK").as_deref(), Ok("1")),
+            previous_lines: Vec::new(),
+            previous_width: 0,
+            previous_height: 0,
+            hardware_cursor_row: 0,
+            max_lines_rendered: 0,
+            previous_viewport_top: 0,
+            force_full_redraw: false,
         }
     }
 
@@ -685,6 +705,52 @@ impl<T: Terminal> Tui<T> {
         )
     }
 
+    fn reset_render_state(&mut self) {
+        self.previous_lines.clear();
+        self.previous_width = 0;
+        self.previous_height = 0;
+        self.hardware_cursor_row = 0;
+        self.max_lines_rendered = 0;
+        self.previous_viewport_top = 0;
+        self.force_full_redraw = false;
+    }
+
+    fn full_render(
+        &mut self,
+        lines: Vec<String>,
+        cursor_pos: Option<CursorPosition>,
+        width: usize,
+        height: usize,
+        clear: bool,
+    ) -> Result<(), TuiError> {
+        let mut buffer = String::from(SYNC_OUTPUT_BEGIN);
+        if clear {
+            buffer.push_str(FULL_REDRAW_CLEAR);
+        }
+        for (index, line) in lines.iter().enumerate() {
+            if index > 0 {
+                buffer.push_str("\r\n");
+            }
+            buffer.push_str(line);
+        }
+        buffer.push_str(SYNC_OUTPUT_END);
+        self.terminal.write(&buffer)?;
+
+        self.hardware_cursor_row = lines.len().saturating_sub(1);
+        if clear {
+            self.max_lines_rendered = lines.len();
+        } else {
+            self.max_lines_rendered = self.max_lines_rendered.max(lines.len());
+        }
+        let buffer_length = height.max(lines.len());
+        self.previous_viewport_top = buffer_length.saturating_sub(height);
+        self.position_hardware_cursor(cursor_pos, lines.len())?;
+        self.previous_lines = lines;
+        self.previous_width = width;
+        self.previous_height = height;
+        Ok(())
+    }
+
     fn render_frame_for_size(&self, width: usize, height: usize) -> RenderedFrame {
         self.root.set_viewport_size(width, height);
         let mut lines = self.root.render(width);
@@ -700,6 +766,7 @@ impl<T: Terminal> Tui<T> {
         if self.started {
             return Ok(());
         }
+        self.reset_render_state();
         self.started = true;
         let pending_input = Arc::clone(&self.pending_terminal_events);
         let pending_resize = Arc::clone(&self.pending_terminal_events);
@@ -722,9 +789,12 @@ impl<T: Terminal> Tui<T> {
         self.render_now()
     }
 
-    pub fn request_render(&mut self, _force: bool) -> Result<(), TuiError> {
+    pub fn request_render(&mut self, force: bool) -> Result<(), TuiError> {
         if !self.started {
             return Ok(());
+        }
+        if force {
+            self.force_full_redraw = true;
         }
         self.render_now()
     }
@@ -744,19 +814,204 @@ impl<T: Terminal> Tui<T> {
     }
 
     fn render_now(&mut self) -> Result<(), TuiError> {
-        let frame = self.render_frame_for_size(
-            self.terminal.columns() as usize,
-            self.terminal.rows() as usize,
+        let width = self.terminal.columns() as usize;
+        let height = (self.terminal.rows() as usize).max(1);
+        let frame = self.render_frame_for_size(width, height);
+        let new_lines = frame.lines;
+        let cursor_pos = frame.cursor_pos;
+
+        if self.force_full_redraw {
+            self.force_full_redraw = false;
+            return self.full_render(new_lines, cursor_pos, width, height, true);
+        }
+
+        let width_changed = self.previous_width != 0 && self.previous_width != width;
+        let height_changed = self.previous_height != 0 && self.previous_height != height;
+        let previous_buffer_length = if self.previous_height > 0 {
+            self.previous_viewport_top + self.previous_height
+        } else {
+            height
+        };
+        let mut prev_viewport_top = if height_changed {
+            previous_buffer_length.saturating_sub(height)
+        } else {
+            self.previous_viewport_top
+        };
+        let mut viewport_top = prev_viewport_top;
+        let mut hardware_cursor_row = self.hardware_cursor_row;
+
+        if self.previous_lines.is_empty() && !width_changed && !height_changed {
+            return self.full_render(new_lines, cursor_pos, width, height, false);
+        }
+
+        if width_changed {
+            return self.full_render(new_lines, cursor_pos, width, height, true);
+        }
+
+        if height_changed && !is_termux_session() {
+            return self.full_render(new_lines, cursor_pos, width, height, true);
+        }
+
+        if self.clear_on_shrink
+            && new_lines.len() < self.max_lines_rendered
+            && self.overlays.is_empty()
+        {
+            return self.full_render(new_lines, cursor_pos, width, height, true);
+        }
+
+        let mut first_changed: Option<usize> = None;
+        let mut last_changed: Option<usize> = None;
+        let max_lines = new_lines.len().max(self.previous_lines.len());
+        for index in 0..max_lines {
+            let old_line = self
+                .previous_lines
+                .get(index)
+                .map(String::as_str)
+                .unwrap_or("");
+            let new_line = new_lines.get(index).map(String::as_str).unwrap_or("");
+            if old_line != new_line {
+                if first_changed.is_none() {
+                    first_changed = Some(index);
+                }
+                last_changed = Some(index);
+            }
+        }
+
+        let Some(first_changed) = first_changed else {
+            self.position_hardware_cursor(cursor_pos, new_lines.len())?;
+            self.previous_height = height;
+            self.previous_viewport_top = prev_viewport_top;
+            return Ok(());
+        };
+        let last_changed =
+            last_changed.expect("last_changed must be present when first_changed is set");
+
+        if first_changed >= new_lines.len() {
+            if self.previous_lines.len() > new_lines.len() {
+                let target_row = new_lines.len().saturating_sub(1);
+                if target_row < prev_viewport_top {
+                    return self.full_render(new_lines, cursor_pos, width, height, true);
+                }
+
+                let line_diff = compute_line_diff(
+                    hardware_cursor_row,
+                    prev_viewport_top,
+                    target_row,
+                    viewport_top,
+                    height,
+                );
+                let extra_lines = self.previous_lines.len() - new_lines.len();
+                if extra_lines > height {
+                    return self.full_render(new_lines, cursor_pos, width, height, true);
+                }
+
+                let mut buffer = String::from(SYNC_OUTPUT_BEGIN);
+                append_vertical_move(&mut buffer, line_diff);
+                buffer.push('\r');
+                if extra_lines > 0 {
+                    buffer.push_str("\x1b[1B");
+                }
+                for index in 0..extra_lines {
+                    buffer.push_str("\r\x1b[2K");
+                    if index + 1 < extra_lines {
+                        buffer.push_str("\x1b[1B");
+                    }
+                }
+                if extra_lines > 0 {
+                    buffer.push_str(&format!("\x1b[{extra_lines}A"));
+                }
+                buffer.push_str(SYNC_OUTPUT_END);
+                self.terminal.write(&buffer)?;
+                self.hardware_cursor_row = target_row;
+            }
+            self.position_hardware_cursor(cursor_pos, new_lines.len())?;
+            self.previous_lines = new_lines;
+            self.previous_width = width;
+            self.previous_height = height;
+            self.previous_viewport_top = prev_viewport_top;
+            return Ok(());
+        }
+
+        if first_changed < prev_viewport_top {
+            return self.full_render(new_lines, cursor_pos, width, height, true);
+        }
+
+        let appended_lines = new_lines.len() > self.previous_lines.len();
+        let append_start =
+            appended_lines && first_changed == self.previous_lines.len() && first_changed > 0;
+        let prev_viewport_bottom = prev_viewport_top + height - 1;
+        let move_target_row = if append_start {
+            first_changed - 1
+        } else {
+            first_changed
+        };
+
+        let mut buffer = String::from(SYNC_OUTPUT_BEGIN);
+        if move_target_row > prev_viewport_bottom {
+            let current_screen_row =
+                clamp_to_viewport_row(hardware_cursor_row, prev_viewport_top, height);
+            let move_to_bottom = height - 1 - current_screen_row;
+            if move_to_bottom > 0 {
+                buffer.push_str(&format!("\x1b[{move_to_bottom}B"));
+            }
+            let scroll = move_target_row - prev_viewport_bottom;
+            buffer.push_str(&"\r\n".repeat(scroll));
+            prev_viewport_top += scroll;
+            viewport_top += scroll;
+            hardware_cursor_row = move_target_row;
+        }
+
+        let line_diff = compute_line_diff(
+            hardware_cursor_row,
+            prev_viewport_top,
+            move_target_row,
+            viewport_top,
+            height,
         );
-        let mut buffer = String::from("\x1b[2J\x1b[H");
-        for (index, line) in frame.lines.iter().enumerate() {
-            if index > 0 {
+        append_vertical_move(&mut buffer, line_diff);
+        if append_start {
+            buffer.push_str("\r\n");
+        } else {
+            buffer.push('\r');
+        }
+
+        let render_end = last_changed.min(new_lines.len() - 1);
+        for index in first_changed..=render_end {
+            if index > first_changed {
                 buffer.push_str("\r\n");
             }
-            buffer.push_str(line);
+            buffer.push_str("\x1b[2K");
+            buffer.push_str(&new_lines[index]);
         }
+
+        let mut final_cursor_row = render_end;
+        if self.previous_lines.len() > new_lines.len() {
+            if render_end < new_lines.len().saturating_sub(1) {
+                let move_down = new_lines.len() - 1 - render_end;
+                buffer.push_str(&format!("\x1b[{move_down}B"));
+                final_cursor_row = new_lines.len() - 1;
+            }
+            let extra_lines = self.previous_lines.len() - new_lines.len();
+            for _ in new_lines.len()..self.previous_lines.len() {
+                buffer.push_str("\r\n\x1b[2K");
+            }
+            if extra_lines > 0 {
+                buffer.push_str(&format!("\x1b[{extra_lines}A"));
+            }
+        }
+
+        buffer.push_str(SYNC_OUTPUT_END);
         self.terminal.write(&buffer)?;
-        self.position_hardware_cursor(frame.cursor_pos, frame.lines.len())
+
+        self.hardware_cursor_row = final_cursor_row;
+        self.max_lines_rendered = self.max_lines_rendered.max(new_lines.len());
+        self.previous_viewport_top =
+            prev_viewport_top.max(final_cursor_row.saturating_sub(height - 1));
+        self.position_hardware_cursor(cursor_pos, new_lines.len())?;
+        self.previous_lines = new_lines;
+        self.previous_width = width;
+        self.previous_height = height;
+        Ok(())
     }
 
     fn set_focus_target(&mut self, target: Option<FocusTarget>) -> bool {
@@ -1019,7 +1274,9 @@ impl<T: Terminal> Tui<T> {
 
     fn apply_line_resets(&self, mut lines: Vec<String>) -> Vec<String> {
         for line in &mut lines {
-            line.push_str(SEGMENT_RESET);
+            if !is_image_line(line) {
+                line.push_str(SEGMENT_RESET);
+            }
         }
         lines
     }
@@ -1032,6 +1289,10 @@ impl<T: Terminal> Tui<T> {
         overlay_width: usize,
         total_width: usize,
     ) -> String {
+        if is_image_line(base_line) {
+            return base_line.to_owned();
+        }
+
         let after_start = start_col + overlay_width;
         let base = extract_segments(
             base_line,
@@ -1105,17 +1366,14 @@ impl<T: Terminal> Tui<T> {
 
         let target_row = cursor_pos.row.min(total_lines - 1);
         let target_col = cursor_pos.col;
-        let current_row = total_lines - 1;
+        let current_row = self.hardware_cursor_row;
 
         let mut buffer = String::new();
-        if target_row < current_row {
-            buffer.push_str(&format!("\x1b[{}A", current_row - target_row));
-        } else if target_row > current_row {
-            buffer.push_str(&format!("\x1b[{}B", target_row - current_row));
-        }
+        append_vertical_move(&mut buffer, target_row as isize - current_row as isize);
         buffer.push_str(&format!("\x1b[{}G", target_col + 1));
         self.terminal.write(&buffer)?;
 
+        self.hardware_cursor_row = target_row;
         if self.show_hardware_cursor {
             self.terminal.show_cursor()?;
         } else {
@@ -1251,4 +1509,34 @@ fn apply_offset(value: usize, offset: isize) -> usize {
     } else {
         value.saturating_add(offset as usize)
     }
+}
+
+fn is_termux_session() -> bool {
+    std::env::var_os("TERMUX_VERSION").is_some()
+}
+
+fn append_vertical_move(buffer: &mut String, delta: isize) {
+    if delta > 0 {
+        buffer.push_str(&format!("\x1b[{}B", delta));
+    } else if delta < 0 {
+        buffer.push_str(&format!("\x1b[{}A", -delta));
+    }
+}
+
+fn clamp_to_viewport_row(row: usize, viewport_top: usize, height: usize) -> usize {
+    let max_row = height.saturating_sub(1);
+    row.saturating_sub(viewport_top).min(max_row)
+}
+
+fn compute_line_diff(
+    current_row: usize,
+    current_viewport_top: usize,
+    target_row: usize,
+    target_viewport_top: usize,
+    height: usize,
+) -> isize {
+    let current_screen_row =
+        clamp_to_viewport_row(current_row, current_viewport_top, height) as isize;
+    let target_screen_row = target_row as isize - target_viewport_top as isize;
+    target_screen_row - current_screen_row
 }

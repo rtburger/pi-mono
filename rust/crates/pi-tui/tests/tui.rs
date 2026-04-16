@@ -21,9 +21,25 @@ struct ViewportAwareComponent {
     viewport: Arc<Mutex<Option<(usize, usize)>>>,
 }
 
+struct DynamicComponent {
+    lines: Arc<Mutex<Vec<String>>>,
+}
+
 impl ViewportAwareComponent {
     fn new(viewport: Arc<Mutex<Option<(usize, usize)>>>) -> Self {
         Self { viewport }
+    }
+}
+
+impl DynamicComponent {
+    fn new(lines: impl IntoIterator<Item = impl Into<String>>) -> (Self, Arc<Mutex<Vec<String>>>) {
+        let lines = Arc::new(Mutex::new(lines.into_iter().map(Into::into).collect()));
+        (
+            Self {
+                lines: Arc::clone(&lines),
+            },
+            lines,
+        )
     }
 }
 
@@ -67,6 +83,17 @@ impl Component for ViewportAwareComponent {
     fn set_viewport_size(&self, width: usize, height: usize) {
         *self.viewport.lock().expect("viewport mutex poisoned") = Some((width, height));
     }
+}
+
+impl Component for DynamicComponent {
+    fn render(&self, _width: usize) -> Vec<String> {
+        self.lines
+            .lock()
+            .expect("dynamic lines mutex poisoned")
+            .clone()
+    }
+
+    fn invalidate(&mut self) {}
 }
 
 #[derive(Default)]
@@ -191,6 +218,14 @@ impl MockTerminal {
             .expect("mock terminal mutex poisoned")
             .writes
             .clone()
+    }
+
+    fn clear_writes(&self) {
+        self.state
+            .lock()
+            .expect("mock terminal mutex poisoned")
+            .writes
+            .clear();
     }
 
     fn started(&self) -> usize {
@@ -563,7 +598,8 @@ fn start_positions_cursor_at_marker_and_shows_it_when_enabled() {
     tui.start().expect("start should succeed");
 
     let writes = inspector.writes().join("");
-    assert!(writes.contains("\x1b[2J\x1b[Habcd"));
+    assert!(writes.contains("\x1b[?2026habcd"));
+    assert!(writes.contains("\x1b[?2026l"));
     assert!(writes.contains("\x1b[1A\x1b[3G"));
     assert!(!inspector.cursor_hidden());
 
@@ -974,7 +1010,7 @@ fn terminal_resize_callbacks_trigger_rerender_when_drained() {
     assert!(
         writes_after
             .last()
-            .is_some_and(|write| write.starts_with("\x1b[2J\x1b[H"))
+            .is_some_and(|write| { write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3J") })
     );
     tui.stop().expect("stop should succeed");
 }
@@ -995,7 +1031,12 @@ fn start_and_request_render_write_a_full_frame_to_terminal() {
     assert!(
         writes
             .iter()
-            .any(|write| write.starts_with("\x1b[2J\x1b[Hhello"))
+            .any(|write| write.starts_with("\x1b[?2026hhello"))
+    );
+    assert!(
+        writes
+            .iter()
+            .any(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3Jhello"))
     );
     assert_eq!(inspector.started(), 1);
     assert_eq!(inspector.stopped(), 1);
@@ -1003,22 +1044,61 @@ fn start_and_request_render_write_a_full_frame_to_terminal() {
 }
 
 #[test]
+fn request_render_updates_only_changed_lines_without_full_clear() {
+    let terminal = MockTerminal::new(20, 5);
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    let (component, lines) = DynamicComponent::new(["Header", "Working...", "Footer"]);
+    tui.add_child(Box::new(component));
+
+    tui.start().expect("start should succeed");
+    inspector.clear_writes();
+
+    *lines.lock().expect("dynamic lines mutex poisoned") = vec![
+        "Header".to_owned(),
+        "Working |".to_owned(),
+        "Footer".to_owned(),
+    ];
+    tui.request_render(false)
+        .expect("differential render should succeed");
+
+    let writes = inspector.writes();
+    let diff = writes.last().expect("expected a differential render write");
+    assert!(diff.starts_with("\x1b[?2026h"));
+    assert!(!diff.contains("\x1b[2J"));
+    assert!(diff.contains("\x1b[2KWorking |"));
+    assert!(!diff.contains("Header"));
+    assert!(!diff.contains("Footer"));
+
+    tui.stop().expect("stop should succeed");
+}
+
+#[test]
 fn render_handle_queues_rerender_until_terminal_events_are_drained() {
     let terminal = MockTerminal::new(20, 5);
     let inspector = terminal.clone();
     let mut tui = Tui::new(terminal);
-    tui.add_child(Box::new(StaticComponent::new(["hello", "world"])));
+    let (component, lines) = DynamicComponent::new(["hello", "world"]);
+    tui.add_child(Box::new(component));
     let render_handle = tui.render_handle();
 
     tui.start().expect("start should succeed");
     let writes_before = inspector.writes().len();
 
+    *lines.lock().expect("dynamic lines mutex poisoned") =
+        vec!["hello".to_owned(), "there".to_owned()];
     render_handle.request_render();
 
     assert_eq!(inspector.writes().len(), writes_before);
     tui.drain_terminal_events()
         .expect("queued render request should drain successfully");
-    assert!(inspector.writes().len() > writes_before);
+    let writes_after = inspector.writes();
+    assert!(writes_after.len() > writes_before);
+    assert!(
+        writes_after
+            .last()
+            .is_some_and(|write| write.contains("there"))
+    );
 
     tui.stop().expect("stop should succeed");
 }
