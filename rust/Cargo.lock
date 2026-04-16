@@ -1555,6 +1555,7 @@ dependencies = [
 name = "pi-tui"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "crossterm",
  "regex",
  "thiserror 2.0.18",

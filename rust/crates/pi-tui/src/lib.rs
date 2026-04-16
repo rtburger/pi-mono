@@ -1,10 +1,13 @@
 pub mod autocomplete;
 pub mod editor;
 pub mod fuzzy;
+pub mod image;
 pub mod input;
 pub mod keybindings;
 pub mod keys;
 mod kill_ring;
+pub mod select_list;
+pub mod settings_list;
 pub mod spacer;
 pub mod stdin_buffer;
 pub mod terminal;
@@ -21,6 +24,7 @@ pub use autocomplete::{
 };
 pub use editor::{Editor, EditorCursor, EditorOptions, TextChunk, word_wrap_line};
 pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
+pub use image::{Image, ImageOptions, ImageTheme};
 pub use input::Input;
 pub use keybindings::{
     KeyId, KeybindingConflict, KeybindingDefinition, KeybindingsConfig, KeybindingsManager,
@@ -30,12 +34,24 @@ pub use keys::{
     KeyEventType, decode_kitty_printable, is_key_release, is_key_repeat, is_kitty_protocol_active,
     matches_key, parse_key, set_kitty_protocol_active,
 };
+pub use select_list::{
+    SelectItem, SelectList, SelectListLayoutOptions, SelectListTheme,
+    SelectListTruncatePrimaryContext,
+};
+pub use settings_list::{
+    SettingItem, SettingsList, SettingsListOptions, SettingsListTheme, SettingsSubmenuDone,
+    SettingsSubmenuFactory,
+};
 pub use spacer::Spacer;
 pub use stdin_buffer::{StdinBuffer, StdinBufferEvent, StdinBufferOptions};
 pub use terminal::{ProcessTerminal, Terminal};
 pub use terminal_image::{
-    CellDimensions, ImageProtocol, TerminalCapabilities, detect_capabilities, get_capabilities,
-    get_cell_dimensions, reset_capabilities_cache, set_cell_dimensions,
+    CellDimensions, ImageDimensions, ImageProtocol, ImageRenderOptions, ImageRenderResult,
+    TerminalCapabilities, allocate_image_id, calculate_image_rows, delete_all_kitty_images,
+    delete_kitty_image, detect_capabilities, encode_iterm2, encode_kitty, get_capabilities,
+    get_cell_dimensions, get_gif_dimensions, get_image_dimensions, get_jpeg_dimensions,
+    get_png_dimensions, get_webp_dimensions, image_fallback, is_image_line, render_image,
+    reset_capabilities_cache, set_cell_dimensions,
 };
 pub use text::Text;
 pub use truncated_text::TruncatedText;
