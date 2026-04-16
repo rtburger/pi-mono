@@ -135,6 +135,12 @@ struct SessionSupport {
     session_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OAuthPickerMode {
+    Login,
+    Logout,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InteractiveTransitionRequest {
     NewSession,
@@ -142,6 +148,7 @@ enum InteractiveTransitionRequest {
     ForkPicker,
     TreePicker,
     SettingsPicker,
+    OAuthPicker(OAuthPickerMode),
     ScopedModelsPicker { initial_search: Option<String> },
     Reload,
 }
@@ -541,6 +548,258 @@ async fn select_tree_entry(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OAuthPickerEntry {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone)]
+enum OAuthPickerOutcome {
+    Selected(String),
+    Cancelled,
+}
+
+struct OAuthPickerComponent {
+    keybindings: KeybindingsManager,
+    mode: OAuthPickerMode,
+    entries: Vec<OAuthPickerEntry>,
+    selected_index: usize,
+    on_select: Option<Box<dyn FnMut(String) + Send + 'static>>,
+    on_cancel: Option<Box<dyn FnMut() + Send + 'static>>,
+    viewport_size: Cell<Option<(usize, usize)>>,
+}
+
+impl OAuthPickerComponent {
+    fn new(
+        keybindings: &KeybindingsManager,
+        mode: OAuthPickerMode,
+        mut entries: Vec<OAuthPickerEntry>,
+    ) -> Self {
+        entries.sort_by(|left, right| left.id.cmp(&right.id));
+        Self {
+            keybindings: keybindings.clone(),
+            mode,
+            entries,
+            selected_index: 0,
+            on_select: None,
+            on_cancel: None,
+            viewport_size: Cell::new(None),
+        }
+    }
+
+    fn set_on_select<F>(&mut self, on_select: F)
+    where
+        F: FnMut(String) + Send + 'static,
+    {
+        self.on_select = Some(Box::new(on_select));
+    }
+
+    fn set_on_cancel<F>(&mut self, on_cancel: F)
+    where
+        F: FnMut() + Send + 'static,
+    {
+        self.on_cancel = Some(Box::new(on_cancel));
+    }
+
+    fn matches_binding(&self, data: &str, keybinding: &str) -> bool {
+        self.keybindings
+            .get_keys(keybinding)
+            .iter()
+            .any(|key| matches_key(data, key.as_str()))
+    }
+
+    fn title(&self) -> &'static str {
+        match self.mode {
+            OAuthPickerMode::Login => "Select provider to login",
+            OAuthPickerMode::Logout => "Select provider to logout",
+        }
+    }
+
+    fn max_visible(&self) -> usize {
+        self.viewport_size
+            .get()
+            .map(|(_, height)| height.saturating_sub(4).max(1))
+            .unwrap_or(10)
+    }
+
+    fn render_entries(&self, width: usize) -> Vec<String> {
+        if self.entries.is_empty() {
+            let message = match self.mode {
+                OAuthPickerMode::Login => "No OAuth providers available",
+                OAuthPickerMode::Logout => "No OAuth providers logged in. Use /login first.",
+            };
+            return vec![truncate_to_width(message, width, "...", false)];
+        }
+
+        let max_visible = self.max_visible();
+        let start_index = self
+            .selected_index
+            .saturating_sub(max_visible / 2)
+            .min(self.entries.len().saturating_sub(max_visible));
+        let end_index = (start_index + max_visible).min(self.entries.len());
+        let mut lines = Vec::new();
+
+        for (visible_index, entry) in self.entries[start_index..end_index].iter().enumerate() {
+            let actual_index = start_index + visible_index;
+            let prefix = if actual_index == self.selected_index {
+                "→ "
+            } else {
+                "  "
+            };
+            lines.push(truncate_to_width(
+                &format!("{prefix}{} [{}]", entry.id, entry.name),
+                width,
+                "...",
+                false,
+            ));
+        }
+
+        if start_index > 0 || end_index < self.entries.len() {
+            lines.push(truncate_to_width(
+                &format!("  ({}/{})", self.selected_index + 1, self.entries.len()),
+                width,
+                "...",
+                false,
+            ));
+        }
+
+        lines
+    }
+
+    fn render_hint_line(&self, width: usize) -> String {
+        let styler = ThemedKeyHintStyler;
+        let hint = format!(
+            "{}  {}  {}",
+            key_hint(&self.keybindings, &styler, "tui.select.confirm", "select"),
+            key_hint(&self.keybindings, &styler, "tui.select.cancel", "cancel"),
+            key_hint(&self.keybindings, &styler, "tui.select.down", "navigate"),
+        );
+        truncate_to_width(&hint, width, "...", false)
+    }
+}
+
+impl Component for OAuthPickerComponent {
+    fn render(&self, width: usize) -> Vec<String> {
+        if width == 0 {
+            return vec![String::new()];
+        }
+
+        let mut lines = Vec::new();
+        lines.push("─".repeat(width));
+        lines.push(truncate_to_width(self.title(), width, "...", false));
+        lines.extend(self.render_entries(width));
+        lines.push(self.render_hint_line(width));
+        lines.push("─".repeat(width));
+        lines
+    }
+
+    fn invalidate(&mut self) {}
+
+    fn handle_input(&mut self, data: &str) {
+        if self.matches_binding(data, "tui.select.cancel") {
+            if let Some(on_cancel) = &mut self.on_cancel {
+                on_cancel();
+            }
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.up") {
+            if self.entries.is_empty() {
+                return;
+            }
+            self.selected_index = if self.selected_index == 0 {
+                self.entries.len() - 1
+            } else {
+                self.selected_index - 1
+            };
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.down") {
+            if self.entries.is_empty() {
+                return;
+            }
+            self.selected_index = if self.selected_index + 1 >= self.entries.len() {
+                0
+            } else {
+                self.selected_index + 1
+            };
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.pageUp") {
+            self.selected_index = self.selected_index.saturating_sub(self.max_visible());
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.pageDown") {
+            self.selected_index = (self.selected_index + self.max_visible())
+                .min(self.entries.len().saturating_sub(1));
+            return;
+        }
+
+        if self.matches_binding(data, "tui.select.confirm") {
+            if let Some(entry) = self.entries.get(self.selected_index)
+                && let Some(on_select) = &mut self.on_select
+            {
+                on_select(entry.id.clone());
+            }
+        }
+    }
+
+    fn set_viewport_size(&self, width: usize, height: usize) {
+        self.viewport_size.set(Some((width, height)));
+    }
+}
+
+async fn select_oauth_provider(
+    tui: &mut Tui<LiveInteractiveTerminal>,
+    keybindings: &KeybindingsManager,
+    mode: OAuthPickerMode,
+    entries: Vec<OAuthPickerEntry>,
+) -> Result<Option<String>, String> {
+    let outcome = Arc::new(Mutex::new(None::<OAuthPickerOutcome>));
+    let mut picker = OAuthPickerComponent::new(keybindings, mode, entries);
+
+    let outcome_for_select = Arc::clone(&outcome);
+    picker.set_on_select(move |provider_id| {
+        *outcome_for_select
+            .lock()
+            .expect("oauth picker outcome mutex poisoned") =
+            Some(OAuthPickerOutcome::Selected(provider_id));
+    });
+
+    let outcome_for_cancel = Arc::clone(&outcome);
+    picker.set_on_cancel(move || {
+        *outcome_for_cancel
+            .lock()
+            .expect("oauth picker outcome mutex poisoned") = Some(OAuthPickerOutcome::Cancelled);
+    });
+
+    let picker_id = tui.add_child(Box::new(picker));
+    let _ = tui.set_focus_child(picker_id);
+    tui.start().map_err(|error| error.to_string())?;
+
+    loop {
+        if let Some(outcome) = outcome
+            .lock()
+            .expect("oauth picker outcome mutex poisoned")
+            .take()
+        {
+            tui.clear();
+            return Ok(match outcome {
+                OAuthPickerOutcome::Selected(provider_id) => Some(provider_id),
+                OAuthPickerOutcome::Cancelled => None,
+            });
+        }
+
+        tui.drain_terminal_events()
+            .map_err(|error| error.to_string())?;
+        sleep(Duration::from_millis(16)).await;
+    }
+}
+
 fn apply_session_support(
     core: &CodingAgentCore,
     session_support: &SessionSupport,
@@ -842,6 +1101,11 @@ impl ExternalEditorHost for LiveExternalEditorHost {
         self.render_handle.request_render();
     }
 }
+
+#[derive(Default)]
+struct NoopExternalEditorHost;
+
+impl ExternalEditorHost for NoopExternalEditorHost {}
 
 pub async fn run_interactive_command(options: RunCommandOptions) -> i32 {
     run_interactive_command_with_terminal(options, Arc::new(|| Box::new(ProcessTerminal::new())))
@@ -1644,6 +1908,47 @@ fn restore_session_manager_from_parts(
     Ok(SessionManager::in_memory(cwd))
 }
 
+struct PreservedInteractiveContext {
+    manager: Option<SessionManager>,
+    cwd: PathBuf,
+    bootstrap_defaults: Option<BootstrapDefaults>,
+    scoped_models: Vec<ScopedModel>,
+    runtime_settings: LoadedRuntimeSettings,
+}
+
+fn preserve_interactive_context(
+    session_context: Option<InteractiveSessionContext>,
+    current_cwd: &Path,
+) -> Result<PreservedInteractiveContext, String> {
+    match session_context {
+        Some(context) => {
+            let manager = restore_session_manager_from_parts(
+                context.manager,
+                context.session_file,
+                context.session_dir,
+                &context.cwd,
+            )?;
+            Ok(PreservedInteractiveContext {
+                manager: Some(manager),
+                cwd: PathBuf::from(context.cwd),
+                bootstrap_defaults: Some(BootstrapDefaults::from_model(
+                    &context.model,
+                    context.thinking_level,
+                )),
+                scoped_models: context.scoped_models,
+                runtime_settings: context.runtime_settings,
+            })
+        }
+        None => Ok(PreservedInteractiveContext {
+            manager: None,
+            cwd: current_cwd.to_path_buf(),
+            bootstrap_defaults: None,
+            scoped_models: Vec::new(),
+            runtime_settings: LoadedRuntimeSettings::default(),
+        }),
+    }
+}
+
 async fn resolve_interactive_transition(
     transition: InteractiveTransitionRequest,
     session_context: Option<InteractiveSessionContext>,
@@ -1956,6 +2261,133 @@ async fn resolve_interactive_transition(
                 )),
                 scoped_models: session_context.scoped_models,
                 runtime_settings,
+            })
+        }
+        InteractiveTransitionRequest::OAuthPicker(mode) => {
+            let preserved = preserve_interactive_context(session_context, current_cwd)?;
+            let Some(agent_dir) = agent_dir else {
+                let message = match mode {
+                    OAuthPickerMode::Login => "OAuth login requires an agent directory.",
+                    OAuthPickerMode::Logout => "OAuth logout requires an agent directory.",
+                };
+                return Ok(InteractiveTransitionPlan {
+                    cwd: preserved.cwd,
+                    manager: preserved.manager,
+                    prefill_input: None,
+                    initial_status_message: Some(String::from(message)),
+                    bootstrap_defaults: preserved.bootstrap_defaults,
+                    scoped_models: preserved.scoped_models,
+                    runtime_settings: preserved.runtime_settings,
+                });
+            };
+
+            let auth_path = agent_dir.join("auth.json");
+            let entries = match mode {
+                OAuthPickerMode::Login => {
+                    let entries = oauth_provider_summaries()
+                        .into_iter()
+                        .map(|provider| OAuthPickerEntry {
+                            id: provider.id,
+                            name: provider.name,
+                        })
+                        .collect::<Vec<_>>();
+                    if entries.is_empty() {
+                        return Ok(InteractiveTransitionPlan {
+                            cwd: preserved.cwd,
+                            manager: preserved.manager,
+                            prefill_input: None,
+                            initial_status_message: Some(String::from(
+                                "No OAuth providers available",
+                            )),
+                            bootstrap_defaults: preserved.bootstrap_defaults,
+                            scoped_models: preserved.scoped_models,
+                            runtime_settings: preserved.runtime_settings,
+                        });
+                    }
+                    entries
+                }
+                OAuthPickerMode::Logout => {
+                    let providers = match list_persisted_oauth_providers(&auth_path) {
+                        Ok(providers) => providers,
+                        Err(error) => {
+                            return Ok(InteractiveTransitionPlan {
+                                cwd: preserved.cwd,
+                                manager: preserved.manager,
+                                prefill_input: None,
+                                initial_status_message: Some(format!("Error: {error}")),
+                                bootstrap_defaults: preserved.bootstrap_defaults,
+                                scoped_models: preserved.scoped_models,
+                                runtime_settings: preserved.runtime_settings,
+                            });
+                        }
+                    };
+                    if providers.is_empty() {
+                        return Ok(InteractiveTransitionPlan {
+                            cwd: preserved.cwd,
+                            manager: preserved.manager,
+                            prefill_input: None,
+                            initial_status_message: Some(String::from(
+                                "No OAuth providers logged in. Use /login first.",
+                            )),
+                            bootstrap_defaults: preserved.bootstrap_defaults,
+                            scoped_models: preserved.scoped_models,
+                            runtime_settings: preserved.runtime_settings,
+                        });
+                    }
+                    providers
+                        .into_iter()
+                        .map(|provider_id| OAuthPickerEntry {
+                            name: oauth_provider_name(&provider_id)
+                                .unwrap_or_else(|| provider_id.clone()),
+                            id: provider_id,
+                        })
+                        .collect::<Vec<_>>()
+                }
+            };
+
+            let keybindings = create_keybindings_manager(Some(agent_dir));
+            let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
+            let mut tui = Tui::new(terminal);
+            let selected = select_oauth_provider(&mut tui, &keybindings, mode, entries).await?;
+            let _ = tui.stop();
+
+            let initial_status_message = match selected {
+                Some(provider_id) => match mode {
+                    OAuthPickerMode::Login => {
+                        match run_terminal_oauth_login(
+                            auth_path.clone(),
+                            provider_id,
+                            Arc::new(NoopExternalEditorHost),
+                        )
+                        .await
+                        {
+                            Ok(provider_name) => Some(format!("Logged in to {provider_name}")),
+                            Err(error) => Some(format!("Error: {error}")),
+                        }
+                    }
+                    OAuthPickerMode::Logout => {
+                        let provider_name = oauth_provider_name(&provider_id)
+                            .unwrap_or_else(|| provider_id.clone());
+                        match remove_persisted_oauth_provider(&auth_path, &provider_id) {
+                            Ok(true) => Some(format!("Logged out of {provider_name}")),
+                            Ok(false) => {
+                                Some(format!("No OAuth credentials stored for {provider_id}"))
+                            }
+                            Err(error) => Some(format!("Error: {error}")),
+                        }
+                    }
+                },
+                None => None,
+            };
+
+            Ok(InteractiveTransitionPlan {
+                cwd: preserved.cwd,
+                manager: preserved.manager,
+                prefill_input: None,
+                initial_status_message,
+                bootstrap_defaults: preserved.bootstrap_defaults,
+                scoped_models: preserved.scoped_models,
+                runtime_settings: preserved.runtime_settings,
             })
         }
         InteractiveTransitionRequest::ScopedModelsPicker { initial_search } => {
@@ -6801,37 +7233,6 @@ fn render_hotkeys_text(keybindings: &KeybindingsManager) -> String {
     output.trim_end().to_owned()
 }
 
-fn render_oauth_login_help_text() -> String {
-    let mut output = String::new();
-    push_line(&mut output, "OAuth Providers");
-    push_line(&mut output, "");
-    for provider in oauth_provider_summaries() {
-        push_line(
-            &mut output,
-            &format!("- {}: {}", provider.id, provider.name),
-        );
-    }
-    push_line(&mut output, "");
-    push_line(&mut output, "Use /login <provider> to authenticate.");
-    output.trim_end().to_owned()
-}
-
-fn render_oauth_logout_help_text(providers: &[String]) -> String {
-    let mut providers = providers.to_vec();
-    providers.sort();
-
-    let mut output = String::new();
-    push_line(&mut output, "Logged-in OAuth Providers");
-    push_line(&mut output, "");
-    for provider in providers {
-        let description = oauth_provider_name(&provider).unwrap_or_else(|| provider.clone());
-        push_line(&mut output, &format!("- {provider}: {description}"));
-    }
-    push_line(&mut output, "");
-    push_line(&mut output, "Use /logout <provider> to remove credentials.");
-    output.trim_end().to_owned()
-}
-
 fn format_key_ids(keys: &[pi_tui::KeyId]) -> String {
     if keys.is_empty() {
         return String::from("(unbound)");
@@ -7931,8 +8332,29 @@ fn handle_interactive_slash_command(
 
         let provider_id = text.strip_prefix("/login").unwrap_or_default().trim();
         if provider_id.is_empty() {
-            append_transcript_custom_message(shell, "login", render_oauth_login_help_text());
-            return true;
+            if slash_command_context
+                .auth_operation_in_progress
+                .load(Ordering::Relaxed)
+            {
+                status_handle.set_message("An OAuth login is already in progress.");
+                return true;
+            }
+            if slash_command_context.agent_dir.is_none() {
+                status_handle.set_message("OAuth login requires an agent directory.");
+                return true;
+            }
+            if oauth_provider_summaries().is_empty() {
+                status_handle.set_message("No OAuth providers available");
+                return true;
+            }
+            return request_interactive_transition(
+                InteractiveTransitionRequest::OAuthPicker(OAuthPickerMode::Login),
+                core,
+                session_manager,
+                status_handle,
+                transition_request,
+                exit_requested,
+            );
         }
 
         if oauth_provider_name(provider_id).is_none() {
@@ -7997,19 +8419,24 @@ fn handle_interactive_slash_command(
         if provider_id.is_empty() {
             match list_persisted_oauth_providers(&auth_path) {
                 Ok(providers) if providers.is_empty() => {
-                    status_handle
-                        .set_message("No OAuth providers logged in. Use /login <provider>.");
+                    status_handle.set_message("No OAuth providers logged in. Use /login first.");
+                    return true;
                 }
-                Ok(providers) => {
-                    append_transcript_custom_message(
-                        shell,
-                        "logout",
-                        render_oauth_logout_help_text(&providers),
+                Ok(_) => {
+                    return request_interactive_transition(
+                        InteractiveTransitionRequest::OAuthPicker(OAuthPickerMode::Logout),
+                        core,
+                        session_manager,
+                        status_handle,
+                        transition_request,
+                        exit_requested,
                     );
                 }
-                Err(error) => status_handle.set_message(format!("Error: {error}")),
+                Err(error) => {
+                    status_handle.set_message(format!("Error: {error}"));
+                    return true;
+                }
             }
-            return true;
         }
 
         let provider_name =
@@ -8430,14 +8857,16 @@ fn push_line(buffer: &mut String, line: &str) {
 mod tests {
     use super::*;
     use pi_ai::{
-        FauxModelDefinition, FauxResponse, RegisterFauxProviderOptions, register_faux_provider,
+        FauxModelDefinition, FauxResponse, OAuthCredentials, OAuthCredentialsFuture,
+        OAuthLoginCallbacks, OAuthProvider, RegisterFauxProviderOptions, register_faux_provider,
+        register_oauth_provider, unregister_oauth_provider,
     };
     use pi_coding_agent_core::MemoryAuthStorage;
     use std::{
         fs, io,
         path::{Path, PathBuf},
         sync::{
-            Arc, Mutex,
+            Arc, Mutex, OnceLock,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         thread,
@@ -8541,6 +8970,49 @@ mod tests {
             agent_dir,
             ui_host: Arc::new(TestExternalEditorHost),
             auth_operation_in_progress: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn oauth_registry_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[derive(Debug)]
+    struct TestOAuthProvider {
+        id: &'static str,
+        name: &'static str,
+        access_token: &'static str,
+    }
+
+    impl OAuthProvider for TestOAuthProvider {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn login<'a>(&'a self, _callbacks: OAuthLoginCallbacks) -> OAuthCredentialsFuture<'a> {
+            Box::pin(async move {
+                Ok(OAuthCredentials::new(
+                    "refresh-token",
+                    self.access_token,
+                    i64::MAX,
+                ))
+            })
+        }
+
+        fn refresh_token<'a>(
+            &'a self,
+            credentials: OAuthCredentials,
+        ) -> OAuthCredentialsFuture<'a> {
+            Box::pin(async move { Ok(credentials) })
+        }
+
+        fn get_api_key(&self, credentials: &OAuthCredentials) -> Result<String, String> {
+            Ok(credentials.access.clone())
         }
     }
 
@@ -9552,20 +10024,21 @@ mod tests {
     }
 
     #[test]
-    fn login_slash_command_lists_available_oauth_providers() {
+    fn login_slash_command_requests_oauth_picker_transition() {
         let faux = register_faux_provider(RegisterFauxProviderOptions {
-            provider: "slash-login-help-faux".into(),
+            provider: "slash-login-picker-faux".into(),
             models: vec![FauxModelDefinition {
-                id: "slash-login-help-faux-1".into(),
-                name: Some("Slash Login Help Faux".into()),
+                id: "slash-login-picker-faux-1".into(),
+                name: Some("Slash Login Picker Faux".into()),
                 reasoning: false,
             }],
             ..RegisterFauxProviderOptions::default()
         });
         let model = faux
-            .get_model(Some("slash-login-help-faux-1"))
+            .get_model(Some("slash-login-picker-faux-1"))
             .expect("expected faux model");
-        let cwd = unique_temp_dir("slash-login-help-cwd");
+        let cwd = unique_temp_dir("slash-login-picker-cwd");
+        let agent_dir = unique_temp_dir("slash-login-picker-agent");
         let created = create_coding_agent_core(CodingAgentCoreOptions {
             auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
                 model.provider.as_str(),
@@ -9595,7 +10068,8 @@ mod tests {
         let footer_state_handle = shell.footer_state_handle();
         let exit_requested = Arc::new(AtomicBool::new(false));
         let transition_request = Arc::new(Mutex::new(None));
-        let slash_command_context = test_slash_command_context(&keybindings, cwd);
+        let slash_command_context =
+            test_slash_command_context_with_agent_dir(&keybindings, cwd, Some(agent_dir));
 
         assert!(handle_interactive_slash_command(
             &mut shell,
@@ -9610,14 +10084,104 @@ mod tests {
             &exit_requested,
             &transition_request,
         ));
+        assert!(exit_requested.load(Ordering::Relaxed));
+        assert_eq!(
+            transition_request
+                .lock()
+                .expect("interactive transition request mutex poisoned")
+                .clone(),
+            Some(InteractiveTransitionRequest::OAuthPicker(
+                OAuthPickerMode::Login,
+            ))
+        );
 
-        let rendered = shell.render(100).join("\n");
-        assert!(rendered.contains("OAuth Providers"), "output: {rendered}");
-        assert!(rendered.contains("anthropic"), "output: {rendered}");
-        assert!(rendered.contains("openai-codex"), "output: {rendered}");
-        assert!(
-            rendered.contains("Use /login <provider>"),
-            "output: {rendered}"
+        faux.unregister();
+    }
+
+    #[test]
+    fn logout_slash_command_requests_oauth_picker_transition() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "slash-logout-picker-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "slash-logout-picker-faux-1".into(),
+                name: Some("Slash Logout Picker Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("slash-logout-picker-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("slash-logout-picker-cwd");
+        let agent_dir = unique_temp_dir("slash-logout-picker-agent");
+        fs::write(
+            agent_dir.join("auth.json"),
+            serde_json::json!({
+                "anthropic": {
+                    "type": "oauth",
+                    "refresh": "refresh-token",
+                    "access": "access-token",
+                    "expires": 123
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(cwd.clone()),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
+        let status_handle = shell.status_handle();
+        let footer_state_handle = shell.footer_state_handle();
+        let exit_requested = Arc::new(AtomicBool::new(false));
+        let transition_request = Arc::new(Mutex::new(None));
+        let slash_command_context =
+            test_slash_command_context_with_agent_dir(&keybindings, cwd, Some(agent_dir));
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/logout",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            None,
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+        assert!(exit_requested.load(Ordering::Relaxed));
+        assert_eq!(
+            transition_request
+                .lock()
+                .expect("interactive transition request mutex poisoned")
+                .clone(),
+            Some(InteractiveTransitionRequest::OAuthPicker(
+                OAuthPickerMode::Logout,
+            ))
         );
 
         faux.unregister();
@@ -9707,6 +10271,136 @@ mod tests {
             rendered.contains("Logged out of Anthropic"),
             "output: {rendered}"
         );
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn oauth_login_picker_transition_persists_credentials() {
+        let _guard = oauth_registry_lock().lock().unwrap();
+        register_oauth_provider(Arc::new(TestOAuthProvider {
+            id: "zz-transition-oauth",
+            name: "Transition OAuth Provider",
+            access_token: "transition-access-token",
+        }));
+
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "oauth-login-transition-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "oauth-login-transition-faux-1".into(),
+                name: Some("OAuth Login Transition Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("oauth-login-transition-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("oauth-login-transition-cwd");
+        let agent_dir = unique_temp_dir("oauth-login-transition-agent");
+        let terminal = LifecycleScriptedTerminal::new(vec![
+            (Duration::from_millis(5), String::from("\x1b[B")),
+            (Duration::from_millis(5), String::from("\x1b[B")),
+            (Duration::from_millis(5), String::from("\r")),
+        ]);
+        let runtime = InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone())));
+
+        let plan = resolve_interactive_transition(
+            InteractiveTransitionRequest::OAuthPicker(OAuthPickerMode::Login),
+            Some(InteractiveSessionContext {
+                manager: Some(SessionManager::in_memory(cwd.to_str().unwrap())),
+                session_file: None,
+                session_dir: None,
+                cwd: cwd.to_string_lossy().into_owned(),
+                model,
+                thinking_level: ThinkingLevel::Off,
+                scoped_models: Vec::new(),
+                available_models: Vec::new(),
+                runtime_settings: LoadedRuntimeSettings::default(),
+            }),
+            &cwd,
+            Some(agent_dir.as_path()),
+            &runtime,
+        )
+        .await
+        .expect("expected oauth login transition plan");
+
+        assert_eq!(
+            plan.initial_status_message.as_deref(),
+            Some("Logged in to Transition OAuth Provider")
+        );
+        let auth: Value =
+            serde_json::from_str(&fs::read_to_string(agent_dir.join("auth.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            auth.pointer("/zz-transition-oauth/access")
+                .and_then(Value::as_str),
+            Some("transition-access-token")
+        );
+
+        faux.unregister();
+        unregister_oauth_provider("zz-transition-oauth");
+    }
+
+    #[tokio::test]
+    async fn oauth_logout_picker_transition_removes_saved_provider() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "oauth-logout-transition-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "oauth-logout-transition-faux-1".into(),
+                name: Some("OAuth Logout Transition Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("oauth-logout-transition-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("oauth-logout-transition-cwd");
+        let agent_dir = unique_temp_dir("oauth-logout-transition-agent");
+        fs::write(
+            agent_dir.join("auth.json"),
+            serde_json::json!({
+                "anthropic": {
+                    "type": "oauth",
+                    "refresh": "refresh-token",
+                    "access": "access-token",
+                    "expires": 123
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let terminal =
+            LifecycleScriptedTerminal::new(vec![(Duration::from_millis(5), String::from("\r"))]);
+        let runtime = InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone())));
+
+        let plan = resolve_interactive_transition(
+            InteractiveTransitionRequest::OAuthPicker(OAuthPickerMode::Logout),
+            Some(InteractiveSessionContext {
+                manager: Some(SessionManager::in_memory(cwd.to_str().unwrap())),
+                session_file: None,
+                session_dir: None,
+                cwd: cwd.to_string_lossy().into_owned(),
+                model,
+                thinking_level: ThinkingLevel::Off,
+                scoped_models: Vec::new(),
+                available_models: Vec::new(),
+                runtime_settings: LoadedRuntimeSettings::default(),
+            }),
+            &cwd,
+            Some(agent_dir.as_path()),
+            &runtime,
+        )
+        .await
+        .expect("expected oauth logout transition plan");
+
+        assert_eq!(
+            plan.initial_status_message.as_deref(),
+            Some("Logged out of Anthropic (Claude Pro/Max)")
+        );
+        let providers = list_persisted_oauth_providers(&agent_dir.join("auth.json")).unwrap();
+        assert!(providers.is_empty(), "providers: {providers:?}");
 
         faux.unregister();
     }
