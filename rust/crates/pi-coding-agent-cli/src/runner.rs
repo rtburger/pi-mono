@@ -29,12 +29,13 @@ use pi_ai::{
     supports_xhigh,
 };
 use pi_coding_agent_core::{
-    AuthSource, BootstrapDiagnosticLevel, CodingAgentCore, CodingAgentCoreError,
-    CodingAgentCoreOptions, CompactionResult, CompactionSettings, ContextUsageEstimate,
-    CustomMessage, CustomMessageContent, ExistingSessionSelection, FooterDataProvider,
-    ModelRegistry, NewSessionOptions, ScopedModel, SessionBootstrapOptions, SessionEntry,
-    SessionHeader, SessionInfo, SessionManager, build_default_pi_system_prompt,
-    calculate_context_tokens, compact, create_coding_agent_core, estimate_context_tokens,
+    AuthSource, BashExecutionMessage, BootstrapDiagnosticLevel, CodingAgentCore,
+    CodingAgentCoreError, CodingAgentCoreOptions, CompactionResult, CompactionSettings,
+    ContextUsageEstimate, CustomMessage, CustomMessageContent, ExistingSessionSelection,
+    FooterDataProvider, ModelRegistry, NewSessionOptions, ScopedModel, SessionBootstrapOptions,
+    SessionEntry, SessionHeader, SessionInfo, SessionManager, bash_execution_to_text,
+    build_default_pi_system_prompt, calculate_context_tokens, compact,
+    create_bash_execution_message, create_coding_agent_core, estimate_context_tokens,
     find_exact_model_reference_match, get_default_session_dir, parse_thinking_level,
     prepare_compaction, resolve_cli_model, resolve_model_scope, restore_model_from_session,
     should_compact,
@@ -44,14 +45,14 @@ use pi_coding_agent_tui::PlainKeyHintStyler;
 use pi_coding_agent_tui::{
     CustomMessageComponent, DEFAULT_APP_KEYBINDINGS, ExternalEditorCommandRunner,
     ExternalEditorHost, FooterStateHandle, InteractiveCoreBinding, KeybindingsManager,
-    StartupShellComponent, StatusHandle, ThemedKeyHintStyler, init_theme, key_hint,
+    StartupShellComponent, StatusHandle, ThemedKeyHintStyler, init_theme, key_hint, key_text,
     set_registered_themes,
 };
 use pi_config::{LoadedRuntimeSettings, ThinkingBudgetsSettings, load_runtime_settings};
 use pi_events::{AssistantContent, Message, Model, UserContent};
 use pi_tui::{
-    AutocompleteItem, CombinedAutocompleteProvider, Component, Input, ProcessTerminal,
-    RenderHandle, SlashCommand, Terminal, Tui, TuiError, fuzzy_filter, matches_key,
+    AutocompleteItem, CombinedAutocompleteProvider, Component, Container, Input, ProcessTerminal,
+    RenderHandle, SlashCommand, Spacer, Terminal, Text, Tui, TuiError, fuzzy_filter, matches_key,
     truncate_to_width,
 };
 use std::{
@@ -68,7 +69,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::time::sleep;
+use tokio::{process::Command as TokioCommand, sync::watch, time::sleep};
 
 use rpc_extensions::{
     RpcExtensionCommandInfo, RpcExtensionHost, RpcExtensionHostStartOptions, RpcToolCallResult,
@@ -1680,7 +1681,7 @@ async fn run_interactive_iteration(
     let binding =
         InteractiveCoreBinding::bind(created.core.clone(), &mut shell, render_handle.clone());
     let status_handle = shell.status_handle_with_render_handle(render_handle.clone());
-    let footer_state_handle = shell.footer_state_handle_with_render_handle(render_handle);
+    let footer_state_handle = shell.footer_state_handle_with_render_handle(render_handle.clone());
     update_interactive_footer_state(
         &footer_state_handle,
         &created.core,
@@ -1708,6 +1709,7 @@ async fn run_interactive_iteration(
         Arc::clone(&exit_requested),
         Arc::clone(&transition_request),
         resources.clone(),
+        render_handle.clone(),
     );
     let shell_id = tui.add_child(Box::new(shell));
     let _ = tui.set_focus_child(shell_id);
@@ -7886,6 +7888,417 @@ struct InteractiveModelCycleResult {
     thinking_level: ThinkingLevel,
 }
 
+#[derive(Debug, Clone)]
+struct InteractiveBashResult {
+    output: String,
+    exit_code: Option<i32>,
+    cancelled: bool,
+    truncated: bool,
+    full_output_path: Option<String>,
+}
+
+#[derive(Default)]
+struct InteractiveBashController {
+    abort_tx: Option<watch::Sender<bool>>,
+}
+
+#[derive(Debug, Clone)]
+enum InteractiveBashTranscriptStatus {
+    Running,
+    Complete(InteractiveBashResult),
+    Error(String),
+}
+
+#[derive(Debug, Clone)]
+struct InteractiveBashTranscriptState {
+    command: String,
+    cancel_key_text: String,
+    exclude_from_context: bool,
+    status: InteractiveBashTranscriptStatus,
+}
+
+struct InteractiveBashTranscriptComponent {
+    state: Arc<Mutex<InteractiveBashTranscriptState>>,
+}
+
+#[derive(Clone)]
+struct InteractiveBashTranscriptHandle {
+    state: Arc<Mutex<InteractiveBashTranscriptState>>,
+    render_handle: RenderHandle,
+}
+
+impl InteractiveBashTranscriptComponent {
+    fn new(
+        command: impl Into<String>,
+        cancel_key_text: impl Into<String>,
+        exclude_from_context: bool,
+        render_handle: RenderHandle,
+    ) -> (Self, InteractiveBashTranscriptHandle) {
+        let state = Arc::new(Mutex::new(InteractiveBashTranscriptState {
+            command: command.into(),
+            cancel_key_text: cancel_key_text.into(),
+            exclude_from_context,
+            status: InteractiveBashTranscriptStatus::Running,
+        }));
+        (
+            Self {
+                state: state.clone(),
+            },
+            InteractiveBashTranscriptHandle {
+                state,
+                render_handle,
+            },
+        )
+    }
+}
+
+impl InteractiveBashTranscriptHandle {
+    fn set_complete(&self, result: InteractiveBashResult) {
+        self.state
+            .lock()
+            .expect("interactive bash transcript mutex poisoned")
+            .status = InteractiveBashTranscriptStatus::Complete(result);
+        self.render_handle.request_render();
+    }
+
+    fn set_error(&self, error: impl Into<String>) {
+        self.state
+            .lock()
+            .expect("interactive bash transcript mutex poisoned")
+            .status = InteractiveBashTranscriptStatus::Error(error.into());
+        self.render_handle.request_render();
+    }
+}
+
+impl Component for InteractiveBashTranscriptComponent {
+    fn render(&self, width: usize) -> Vec<String> {
+        let state = self
+            .state
+            .lock()
+            .expect("interactive bash transcript mutex poisoned")
+            .clone();
+        let label = if state.exclude_from_context {
+            "[bash no context]"
+        } else {
+            "[bash]"
+        };
+        let body = match state.status {
+            InteractiveBashTranscriptStatus::Running => {
+                format!(
+                    "$ {}\n\nRunning... ({} to cancel)",
+                    state.command, state.cancel_key_text
+                )
+            }
+            InteractiveBashTranscriptStatus::Complete(result) => {
+                bash_execution_to_text(&BashExecutionMessage {
+                    command: state.command,
+                    output: result.output,
+                    exit_code: result.exit_code.map(i64::from),
+                    cancelled: result.cancelled,
+                    truncated: result.truncated,
+                    full_output_path: result.full_output_path,
+                    exclude_from_context: state.exclude_from_context,
+                })
+            }
+            InteractiveBashTranscriptStatus::Error(error) => {
+                format!("$ {}\n\nError: {error}", state.command)
+            }
+        };
+
+        let mut container = Container::new();
+        container.add_child(Box::new(Spacer::new(1)));
+        container.add_child(Box::new(Text::new(label, 1, 0)));
+        container.add_child(Box::new(Spacer::new(1)));
+        container.add_child(Box::new(Text::new(body, 1, 0)));
+        container.add_child(Box::new(Spacer::new(1)));
+        container.render(width)
+    }
+
+    fn invalidate(&mut self) {}
+}
+
+fn matches_shell_binding(keybindings: &KeybindingsManager, data: &str, keybinding: &str) -> bool {
+    keybindings
+        .get_keys(keybinding)
+        .iter()
+        .any(|key| matches_key(data, key.as_str()))
+}
+
+async fn execute_interactive_bash_command(
+    cwd: &Path,
+    command: &str,
+    mut abort_rx: watch::Receiver<bool>,
+) -> Result<InteractiveBashResult, String> {
+    if !cwd.exists() {
+        return Err(format!(
+            "Working directory does not exist: {}",
+            cwd.display()
+        ));
+    }
+
+    if *abort_rx.borrow() {
+        return Ok(InteractiveBashResult {
+            output: String::new(),
+            exit_code: None,
+            cancelled: true,
+            truncated: false,
+            full_output_path: None,
+        });
+    }
+
+    let shell = env::var("SHELL").unwrap_or_else(|_| String::from("sh"));
+    let wrapped_command = format!("{{\n{command}\n}} 2>&1");
+
+    let mut command_builder = TokioCommand::new(shell);
+    command_builder
+        .arg("-lc")
+        .arg(wrapped_command)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let output_future = command_builder
+        .spawn()
+        .map_err(|error| error.to_string())?
+        .wait_with_output();
+    tokio::pin!(output_future);
+
+    let abort_future = async {
+        while abort_rx.changed().await.is_ok() {
+            if *abort_rx.borrow() {
+                return;
+            }
+        }
+    };
+    tokio::pin!(abort_future);
+
+    let output = tokio::select! {
+        output = &mut output_future => output.map_err(|error| error.to_string())?,
+        _ = &mut abort_future => {
+            return Ok(InteractiveBashResult {
+                output: String::new(),
+                exit_code: None,
+                cancelled: true,
+                truncated: false,
+                full_output_path: None,
+            });
+        }
+    };
+
+    let mut full_output = String::from_utf8_lossy(&output.stdout).into_owned();
+    full_output.push_str(&String::from_utf8_lossy(&output.stderr));
+    let full_output = strip_interactive_bash_output(&full_output).replace('\r', "");
+    let truncation = pi_coding_agent_tools::truncate_tail(
+        &full_output,
+        pi_coding_agent_tools::TruncationOptions::default(),
+    );
+    let full_output_path = if truncation.truncated {
+        Some(write_interactive_bash_output(&full_output)?)
+    } else {
+        None
+    };
+
+    Ok(InteractiveBashResult {
+        output: if truncation.truncated {
+            truncation.content
+        } else {
+            full_output
+        },
+        exit_code: output.status.code(),
+        cancelled: false,
+        truncated: truncation.truncated,
+        full_output_path,
+    })
+}
+
+fn strip_interactive_bash_output(output: &str) -> String {
+    let mut result = String::new();
+    let bytes = output.as_bytes();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] == 0x1b {
+            match bytes.get(index + 1).copied() {
+                Some(b'[') => {
+                    index += 2;
+                    while index < bytes.len() {
+                        let byte = bytes[index];
+                        index += 1;
+                        if (0x40..=0x7e).contains(&byte) {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Some(b']') | Some(b'_') => {
+                    index += 2;
+                    while index < bytes.len() {
+                        if bytes[index] == 0x07 {
+                            index += 1;
+                            break;
+                        }
+                        if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'\\') {
+                            index += 2;
+                            break;
+                        }
+                        index += 1;
+                    }
+                    continue;
+                }
+                _ => {
+                    index += 1;
+                    continue;
+                }
+            }
+        }
+
+        let character = output[index..]
+            .chars()
+            .next()
+            .expect("interactive bash output should contain a character");
+        index += character.len_utf8();
+
+        if character == '\r' || (character.is_control() && character != '\n' && character != '\t') {
+            continue;
+        }
+
+        result.push(character);
+    }
+
+    result
+}
+
+fn write_interactive_bash_output(output: &str) -> Result<String, String> {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("pi-bash-{}-{unique}.log", std::process::id()));
+    fs::write(&path, output).map_err(|error| error.to_string())?;
+    Ok(path.display().to_string())
+}
+
+async fn record_interactive_bash_result(
+    core: &CodingAgentCore,
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
+    command: &str,
+    result: &InteractiveBashResult,
+    exclude_from_context: bool,
+) -> Result<(), String> {
+    if core.state().is_streaming {
+        core.wait_for_idle().await;
+    }
+
+    let message = create_bash_execution_message(
+        command.to_owned(),
+        result.output.clone(),
+        result.exit_code.map(i64::from),
+        result.cancelled,
+        result.truncated,
+        result.full_output_path.clone(),
+        exclude_from_context,
+        now_ms(),
+    );
+    let message_for_state = message.clone();
+    core.agent().update_state(move |state| {
+        state.messages.push(message_for_state.clone());
+    });
+
+    if let Some(session_manager) = session_manager {
+        session_manager
+            .lock()
+            .expect("session manager mutex poisoned")
+            .append_message(message)
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn submit_interactive_bash_command(
+    shell: &mut StartupShellComponent,
+    command: &str,
+    exclude_from_context: bool,
+    core: &CodingAgentCore,
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
+    cwd: &Path,
+    keybindings: &KeybindingsManager,
+    status_handle: &StatusHandle,
+    render_handle: &RenderHandle,
+    bash_controller: &Arc<Mutex<InteractiveBashController>>,
+) {
+    if bash_controller
+        .lock()
+        .expect("interactive bash controller mutex poisoned")
+        .abort_tx
+        .is_some()
+    {
+        let raw_command = if exclude_from_context {
+            format!("!!{command}")
+        } else {
+            format!("!{command}")
+        };
+        shell.set_input_value(raw_command.clone());
+        shell.set_input_cursor(raw_command.len());
+        status_handle.set_message(format!(
+            "A bash command is already running. Press {} to cancel it first.",
+            key_text(keybindings, "app.interrupt")
+        ));
+        return;
+    }
+
+    let cancel_key_text = key_text(keybindings, "app.interrupt");
+    let (component, component_handle) = InteractiveBashTranscriptComponent::new(
+        command,
+        cancel_key_text,
+        exclude_from_context,
+        render_handle.clone(),
+    );
+    shell.add_transcript_item(Box::new(component));
+
+    let (abort_tx, abort_rx) = watch::channel(false);
+    bash_controller
+        .lock()
+        .expect("interactive bash controller mutex poisoned")
+        .abort_tx = Some(abort_tx);
+
+    let core = core.clone();
+    let session_manager = session_manager.cloned();
+    let cwd = cwd.to_path_buf();
+    let command = command.to_owned();
+    let status_handle = status_handle.clone();
+    let bash_controller = bash_controller.clone();
+    tokio::spawn(async move {
+        let result = execute_interactive_bash_command(&cwd, &command, abort_rx).await;
+        bash_controller
+            .lock()
+            .expect("interactive bash controller mutex poisoned")
+            .abort_tx = None;
+
+        match result {
+            Ok(result) => {
+                component_handle.set_complete(result.clone());
+                if let Err(error) = record_interactive_bash_result(
+                    &core,
+                    session_manager.as_ref(),
+                    &command,
+                    &result,
+                    exclude_from_context,
+                )
+                .await
+                {
+                    status_handle.set_message(format!("Error: {error}"));
+                }
+            }
+            Err(error) => {
+                component_handle.set_error(error.clone());
+                status_handle.set_message(format!("Error: {error}"));
+            }
+        }
+    });
+}
+
 fn install_interactive_submit_handler(
     shell: &mut StartupShellComponent,
     core: CodingAgentCore,
@@ -7898,6 +8311,7 @@ fn install_interactive_submit_handler(
     exit_requested: Arc<AtomicBool>,
     transition_request: Arc<Mutex<Option<InteractiveTransitionRequest>>>,
     resources: LoadedCliResources,
+    render_handle: RenderHandle,
 ) {
     let cycle_forward_core = core.clone();
     let cycle_forward_model_registry = Arc::clone(&model_registry);
@@ -8023,6 +8437,27 @@ fn install_interactive_submit_handler(
         );
     });
 
+    let bash_controller = Arc::new(Mutex::new(InteractiveBashController::default()));
+    let interrupt_keybindings = slash_command_context.keybindings.clone();
+    let interrupt_bash_controller = bash_controller.clone();
+    shell.set_on_extension_shortcut(move |data| {
+        if !matches_shell_binding(&interrupt_keybindings, &data, "app.interrupt") {
+            return false;
+        }
+
+        let abort_tx = interrupt_bash_controller
+            .lock()
+            .expect("interactive bash controller mutex poisoned")
+            .abort_tx
+            .clone();
+        if let Some(abort_tx) = abort_tx {
+            let _ = abort_tx.send(true);
+            return true;
+        }
+
+        false
+    });
+
     shell.set_on_submit_with_shell(move |shell, value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -8042,6 +8477,42 @@ fn install_interactive_submit_handler(
             &exit_requested,
             &transition_request,
         ) {
+            return;
+        }
+
+        if let Some(command) = trimmed.strip_prefix("!!").map(str::trim)
+            && !command.is_empty()
+        {
+            submit_interactive_bash_command(
+                shell,
+                command,
+                true,
+                &core,
+                session_manager.as_ref(),
+                &slash_command_context.cwd,
+                &slash_command_context.keybindings,
+                &status_handle,
+                &render_handle,
+                &bash_controller,
+            );
+            return;
+        }
+
+        if let Some(command) = trimmed.strip_prefix('!').map(str::trim)
+            && !command.is_empty()
+        {
+            submit_interactive_bash_command(
+                shell,
+                command,
+                false,
+                &core,
+                session_manager.as_ref(),
+                &slash_command_context.cwd,
+                &slash_command_context.keybindings,
+                &status_handle,
+                &render_handle,
+                &bash_controller,
+            );
             return;
         }
 

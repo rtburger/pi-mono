@@ -1074,6 +1074,359 @@ async fn run_interactive_command_renders_live_transcript_and_exits() {
 }
 
 #[tokio::test]
+async fn run_interactive_command_executes_user_bash_and_includes_result_in_next_prompt_context() {
+    let provider = unique_name("interactive-provider");
+    let model_id = unique_name("interactive-model");
+    let (api, recorded) = register_recording_provider("interactive-after-bash");
+    let built_in_model = model(&api, &provider, &model_id);
+    let terminal = ScriptedTerminal::new(vec![
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("!")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("e")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("c")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("h")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("o")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from(" ")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("h")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("e")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("l")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("l")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("o")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("-")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("f")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("r")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("o")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("m")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("-")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("b")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("a")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("s")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("h")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("\r")),
+        ),
+        (
+            Duration::from_millis(150),
+            TerminalAction::Input(String::from("h")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("i")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("\r")),
+        ),
+        (
+            Duration::from_millis(120),
+            TerminalAction::Input(String::from("\x04")),
+        ),
+    ]);
+    let inspector = terminal.clone();
+
+    let exit_code = run_interactive_command_with_terminal(
+        RunCommandOptions {
+            args: vec![
+                String::from("--provider"),
+                provider.clone(),
+                String::from("--model"),
+                model_id.clone(),
+            ],
+            stdin_is_tty: true,
+            stdin_content: None,
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![built_in_model],
+            models_json_path: None,
+            agent_dir: None,
+            cwd: unique_temp_dir("runner-interactive-user-bash"),
+            default_system_prompt: String::new(),
+            version: String::from("0.1.0"),
+            stream_options: StreamOptions::default(),
+        },
+        Arc::new(move || Box::new(terminal.clone())),
+    )
+    .await;
+
+    assert_eq!(exit_code, 0);
+    let output = strip_terminal_control_sequences(&inspector.output());
+    assert!(output.contains("[bash]"), "output: {output}");
+    assert!(output.contains("hello-from-bash"), "output: {output}");
+    assert!(
+        output.contains("interactive-after-bash"),
+        "output: {output}"
+    );
+
+    let request = recorded.lock().unwrap().clone();
+    let context = request.context.expect("expected recorded context");
+    assert_eq!(context.messages.len(), 2, "context: {context:?}");
+    match &context.messages[0] {
+        pi_events::Message::User { content, .. } => match content.as_slice() {
+            [UserContent::Text { text }] => {
+                assert!(text.contains("Ran `echo hello-from-bash`"), "text: {text}");
+                assert!(text.contains("hello-from-bash"), "text: {text}");
+            }
+            other => panic!("expected bash user text, got {other:?}"),
+        },
+        other => panic!("expected bash user message, got {other:?}"),
+    }
+    match &context.messages[1] {
+        pi_events::Message::User { content, .. } => {
+            assert_eq!(
+                content,
+                &vec![UserContent::Text {
+                    text: String::from("hi"),
+                }]
+            );
+        }
+        other => panic!("expected follow-up user message, got {other:?}"),
+    }
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
+async fn run_interactive_command_executes_no_context_user_bash_without_including_result_in_next_prompt_context()
+ {
+    let provider = unique_name("interactive-provider");
+    let model_id = unique_name("interactive-model");
+    let (api, recorded) = register_recording_provider("interactive-after-no-context-bash");
+    let built_in_model = model(&api, &provider, &model_id);
+    let terminal = ScriptedTerminal::new(vec![
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("!")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("!")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("e")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("c")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("h")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("o")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from(" ")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("s")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("e")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("c")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("r")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("e")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("t")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("-")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("f")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("r")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("o")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("m")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("-")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("b")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("a")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("s")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("h")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("\r")),
+        ),
+        (
+            Duration::from_millis(150),
+            TerminalAction::Input(String::from("h")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("i")),
+        ),
+        (
+            Duration::from_millis(5),
+            TerminalAction::Input(String::from("\r")),
+        ),
+        (
+            Duration::from_millis(120),
+            TerminalAction::Input(String::from("\x04")),
+        ),
+    ]);
+    let inspector = terminal.clone();
+
+    let exit_code = run_interactive_command_with_terminal(
+        RunCommandOptions {
+            args: vec![
+                String::from("--provider"),
+                provider.clone(),
+                String::from("--model"),
+                model_id.clone(),
+            ],
+            stdin_is_tty: true,
+            stdin_content: None,
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![built_in_model],
+            models_json_path: None,
+            agent_dir: None,
+            cwd: unique_temp_dir("runner-interactive-no-context-user-bash"),
+            default_system_prompt: String::new(),
+            version: String::from("0.1.0"),
+            stream_options: StreamOptions::default(),
+        },
+        Arc::new(move || Box::new(terminal.clone())),
+    )
+    .await;
+
+    assert_eq!(exit_code, 0);
+    let output = strip_terminal_control_sequences(&inspector.output());
+    assert!(output.contains("[bash no context]"), "output: {output}");
+    assert!(output.contains("secret-from-bash"), "output: {output}");
+    assert!(
+        output.contains("interactive-after-no-context-bash"),
+        "output: {output}"
+    );
+
+    let request = recorded.lock().unwrap().clone();
+    let context = request.context.expect("expected recorded context");
+    assert_eq!(context.messages.len(), 1, "context: {context:?}");
+    match &context.messages[0] {
+        pi_events::Message::User { content, .. } => {
+            assert_eq!(
+                content,
+                &vec![UserContent::Text {
+                    text: String::from("hi"),
+                }]
+            );
+        }
+        other => panic!("expected follow-up user message, got {other:?}"),
+    }
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
 async fn run_interactive_command_loads_editor_padding_setting_for_prompt() {
     let provider = unique_name("interactive-provider");
     let model_id = unique_name("interactive-model");

@@ -1,7 +1,7 @@
 use crate::startup_shell::{ShellUpdateHandle, tool_result_from_user_content, user_message_text};
 use crate::{FooterState, StartupShellComponent, StatusHandle};
 use pi_agent::{AgentEvent, AgentUnsubscribe, ThinkingLevel};
-use pi_coding_agent_core::CodingAgentCore;
+use pi_coding_agent_core::{BashExecutionMessage, CodingAgentCore, bash_execution_to_text};
 use pi_events::{AssistantMessage, Message, UserContent};
 use pi_tui::RenderHandle;
 use std::{
@@ -176,6 +176,23 @@ fn install_shell_callbacks(
     });
 }
 
+fn apply_existing_agent_message(
+    message: &pi_agent::AgentMessage,
+    update_handle: &ShellUpdateHandle,
+) {
+    match message {
+        pi_agent::AgentMessage::Standard(message) => apply_existing_message(message, update_handle),
+        pi_agent::AgentMessage::Custom(message) if message.role == "bashExecution" => {
+            if let Ok(payload) =
+                serde_json::from_value::<BashExecutionMessage>(message.payload.clone())
+            {
+                update_handle.append_user_message(bash_execution_to_text(&payload));
+            }
+        }
+        pi_agent::AgentMessage::Custom(_) => {}
+    }
+}
+
 fn sync_existing_state(
     core: &CodingAgentCore,
     update_handle: &ShellUpdateHandle,
@@ -183,10 +200,7 @@ fn sync_existing_state(
 ) {
     let state = core.state();
     for message in &state.messages {
-        let Some(message) = message.as_standard_message() else {
-            continue;
-        };
-        apply_existing_message(message, update_handle);
+        apply_existing_agent_message(message, update_handle);
     }
 
     if state.is_streaming {
@@ -274,22 +288,28 @@ fn apply_agent_event(
                 update_handle.update_assistant_message(assistant_message);
             }
         }
-        AgentEvent::MessageEnd { message } => {
-            let Some(message) = message.as_standard_message() else {
-                return;
-            };
-            match message {
+        AgentEvent::MessageEnd { message } => match message {
+            pi_agent::AgentMessage::Standard(message) => match message {
                 Message::User { content, .. } => {
-                    update_handle.append_user_message(user_message_text(content));
+                    update_handle.append_user_message(user_message_text(&content));
                 }
                 Message::Assistant { .. } => {
-                    if let Some(assistant_message) = assistant_message(message) {
+                    if let Some(assistant_message) = assistant_message(&message) {
                         update_handle.finish_assistant_message(assistant_message);
                     }
                 }
                 Message::ToolResult { .. } => {}
+            },
+            pi_agent::AgentMessage::Custom(message) if message.role == "bashExecution" => {
+                if let Ok(payload) =
+                    serde_json::from_value::<BashExecutionMessage>(message.payload.clone())
+                {
+                    update_handle.append_user_message(bash_execution_to_text(&payload));
+                }
             }
-        }
+            pi_agent::AgentMessage::Custom(_) => {}
+        },
+
         AgentEvent::ToolExecutionStart {
             tool_call_id,
             tool_name,
