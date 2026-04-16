@@ -3,6 +3,7 @@ use crate::{
     keybindings::KeybindingsManager,
     keys::{decode_kitty_printable, matches_key},
     kill_ring::KillRing,
+    select_list::{SelectItem, SelectList, SelectListLayoutOptions, SelectListTheme},
     tui::{CURSOR_MARKER, Component},
     undo_stack::UndoStack,
     utils::{is_punctuation_char, is_whitespace_char, truncate_to_width, visible_width},
@@ -48,6 +49,49 @@ pub struct EditorOptions {
 
 type SubmitCallback = dyn FnMut(String) + Send + 'static;
 type ChangeCallback = dyn FnMut(String) + Send + 'static;
+type EditorTextStyleFn = dyn Fn(&str) -> String + Send + Sync + 'static;
+
+#[derive(Clone)]
+pub struct EditorTheme {
+    border_color: Arc<EditorTextStyleFn>,
+    select_list: SelectListTheme,
+}
+
+impl EditorTheme {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_border_color<F>(mut self, border_color: F) -> Self
+    where
+        F: Fn(&str) -> String + Send + Sync + 'static,
+    {
+        self.border_color = Arc::new(border_color);
+        self
+    }
+
+    pub fn with_select_list(mut self, select_list: SelectListTheme) -> Self {
+        self.select_list = select_list;
+        self
+    }
+
+    fn apply_border_color(&self, text: &str) -> String {
+        (self.border_color)(text)
+    }
+
+    fn select_list_theme(&self) -> SelectListTheme {
+        self.select_list.clone()
+    }
+}
+
+impl Default for EditorTheme {
+    fn default() -> Self {
+        Self {
+            border_color: Arc::new(str::to_owned),
+            select_list: SelectListTheme::default(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EditorAction {
@@ -111,6 +155,7 @@ pub struct Editor {
     cursor_col: usize,
     focused: bool,
     keybindings: KeybindingsManager,
+    theme: EditorTheme,
     on_submit: Option<Box<SubmitCallback>>,
     on_change: Option<Box<ChangeCallback>>,
     padding_x: usize,
@@ -135,25 +180,59 @@ pub struct Editor {
 
 impl Editor {
     pub fn new() -> Self {
-        Self::with_keybindings_and_options(
+        Self::with_keybindings_and_theme_and_options(
             KeybindingsManager::with_tui_defaults(BTreeMap::new()),
+            EditorTheme::default(),
+            EditorOptions::default(),
+        )
+    }
+
+    pub fn with_theme(theme: EditorTheme) -> Self {
+        Self::with_keybindings_and_theme_and_options(
+            KeybindingsManager::with_tui_defaults(BTreeMap::new()),
+            theme,
             EditorOptions::default(),
         )
     }
 
     pub fn with_options(options: EditorOptions) -> Self {
-        Self::with_keybindings_and_options(
+        Self::with_keybindings_and_theme_and_options(
             KeybindingsManager::with_tui_defaults(BTreeMap::new()),
+            EditorTheme::default(),
+            options,
+        )
+    }
+
+    pub fn with_theme_and_options(theme: EditorTheme, options: EditorOptions) -> Self {
+        Self::with_keybindings_and_theme_and_options(
+            KeybindingsManager::with_tui_defaults(BTreeMap::new()),
+            theme,
             options,
         )
     }
 
     pub fn with_keybindings(keybindings: KeybindingsManager) -> Self {
-        Self::with_keybindings_and_options(keybindings, EditorOptions::default())
+        Self::with_keybindings_and_theme_and_options(
+            keybindings,
+            EditorTheme::default(),
+            EditorOptions::default(),
+        )
+    }
+
+    pub fn with_keybindings_and_theme(keybindings: KeybindingsManager, theme: EditorTheme) -> Self {
+        Self::with_keybindings_and_theme_and_options(keybindings, theme, EditorOptions::default())
     }
 
     pub fn with_keybindings_and_options(
         keybindings: KeybindingsManager,
+        options: EditorOptions,
+    ) -> Self {
+        Self::with_keybindings_and_theme_and_options(keybindings, EditorTheme::default(), options)
+    }
+
+    pub fn with_keybindings_and_theme_and_options(
+        keybindings: KeybindingsManager,
+        theme: EditorTheme,
         options: EditorOptions,
     ) -> Self {
         Self {
@@ -162,6 +241,7 @@ impl Editor {
             cursor_col: 0,
             focused: false,
             keybindings,
+            theme,
             on_submit: None,
             on_change: None,
             padding_x: options.padding_x,
@@ -262,6 +342,14 @@ impl Editor {
 
     pub fn clear_on_change(&mut self) {
         self.on_change = None;
+    }
+
+    pub fn theme(&self) -> &EditorTheme {
+        &self.theme
+    }
+
+    pub fn set_theme(&mut self, theme: EditorTheme) {
+        self.theme = theme;
     }
 
     pub fn add_to_history(&mut self, text: impl AsRef<str>) {
@@ -1716,27 +1804,30 @@ impl Editor {
             return Vec::new();
         };
 
-        let max_visible = self.autocomplete_max_visible.max(1);
-        let start = state.selected.saturating_sub(max_visible.saturating_sub(1));
-
-        state
+        let items = state
             .items
             .iter()
-            .enumerate()
-            .skip(start)
-            .take(max_visible)
-            .map(|(index, item)| {
-                let prefix = if index == state.selected { "> " } else { "  " };
-                let mut text = format!("{prefix}{}", item.label);
-                if let Some(description) = &item.description
-                    && !description.is_empty()
-                {
-                    text.push_str(" — ");
-                    text.push_str(description);
-                }
-                truncate_to_width(&text, width, "...", false)
+            .map(|item| SelectItem {
+                value: item.value.clone(),
+                label: item.label.clone(),
+                description: item.description.clone(),
             })
-            .collect()
+            .collect::<Vec<_>>();
+        let layout = if state.prefix.starts_with('/') {
+            SelectListLayoutOptions::default()
+                .with_min_primary_column_width(12)
+                .with_max_primary_column_width(32)
+        } else {
+            SelectListLayoutOptions::default()
+        };
+        let mut list = SelectList::with_layout(
+            items,
+            self.autocomplete_max_visible,
+            self.theme.select_list_theme(),
+            layout,
+        );
+        list.set_selected_index(state.selected);
+        list.render(width)
     }
 
     fn emit_change(&mut self) {
@@ -1791,10 +1882,23 @@ impl Component for Editor {
             .skip(scroll_offset)
             .take(max_visible_lines)
             .collect::<Vec<_>>();
+        let visible_line_count = visible_lines.len();
         let emit_cursor_marker = self.focused && !self.is_showing_autocomplete();
+        let horizontal = self.theme.apply_border_color("─");
 
         let mut result = Vec::new();
-        result.push("─".repeat(width));
+        if scroll_offset > 0 {
+            let indicator = format!("─── ↑ {scroll_offset} more ");
+            let remaining = width.saturating_sub(visible_width(&indicator));
+            let border = if remaining > 0 {
+                format!("{indicator}{}", "─".repeat(remaining))
+            } else {
+                truncate_to_width(&indicator, width, "", false)
+            };
+            result.push(self.theme.apply_border_color(&border));
+        } else {
+            result.push(horizontal.repeat(width));
+        }
 
         for layout_line in visible_lines {
             let mut display_text = layout_line.text.clone();
@@ -1831,7 +1935,19 @@ impl Component for Editor {
             result.push(line);
         }
 
-        result.push("─".repeat(width));
+        let lines_below = layout_lines
+            .len()
+            .saturating_sub(scroll_offset + visible_line_count);
+        if lines_below > 0 {
+            let indicator = format!("─── ↓ {lines_below} more ");
+            let remaining = width.saturating_sub(visible_width(&indicator));
+            result.push(
+                self.theme
+                    .apply_border_color(&format!("{indicator}{}", "─".repeat(remaining))),
+            );
+        } else {
+            result.push(horizontal.repeat(width));
+        }
         for mut line in self.render_autocomplete_lines(content_width) {
             if padding_x > 0 {
                 line = format!("{}{}", " ".repeat(padding_x), line);

@@ -26,7 +26,7 @@ pub use autocomplete::{
     CompletionResult, SlashCommand, apply_completion,
 };
 pub use box_component::Box;
-pub use editor::{Editor, EditorCursor, EditorOptions, TextChunk, word_wrap_line};
+pub use editor::{Editor, EditorCursor, EditorOptions, EditorTheme, TextChunk, word_wrap_line};
 pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
 pub use image::{Image, ImageOptions, ImageTheme};
 pub use input::Input;

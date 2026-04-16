@@ -26,12 +26,13 @@ pub struct SettingItem {
     pub submenu: Option<Box<SettingsSubmenuFactory>>,
 }
 
+#[derive(Clone)]
 pub struct SettingsListTheme {
-    label: Box<SettingsLabelStyleFn>,
-    value: Box<SettingsLabelStyleFn>,
-    description: Box<SettingsTextStyleFn>,
+    label: Arc<SettingsLabelStyleFn>,
+    value: Arc<SettingsLabelStyleFn>,
+    description: Arc<SettingsTextStyleFn>,
     cursor: String,
-    hint: Box<SettingsTextStyleFn>,
+    hint: Arc<SettingsTextStyleFn>,
 }
 
 impl SettingsListTheme {
@@ -43,7 +44,7 @@ impl SettingsListTheme {
     where
         F: Fn(&str, bool) -> String + Send + Sync + 'static,
     {
-        self.label = Box::new(label);
+        self.label = Arc::new(label);
         self
     }
 
@@ -51,7 +52,7 @@ impl SettingsListTheme {
     where
         F: Fn(&str, bool) -> String + Send + Sync + 'static,
     {
-        self.value = Box::new(value);
+        self.value = Arc::new(value);
         self
     }
 
@@ -59,7 +60,7 @@ impl SettingsListTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.description = Box::new(description);
+        self.description = Arc::new(description);
         self
     }
 
@@ -72,7 +73,7 @@ impl SettingsListTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.hint = Box::new(hint);
+        self.hint = Arc::new(hint);
         self
     }
 }
@@ -80,11 +81,11 @@ impl SettingsListTheme {
 impl Default for SettingsListTheme {
     fn default() -> Self {
         Self {
-            label: Box::new(|text, _| text.to_owned()),
-            value: Box::new(|text, _| text.to_owned()),
-            description: Box::new(str::to_owned),
+            label: Arc::new(|text, _| text.to_owned()),
+            value: Arc::new(|text, _| text.to_owned()),
+            description: Arc::new(str::to_owned),
             cursor: String::from("→ "),
-            hint: Box::new(str::to_owned),
+            hint: Arc::new(str::to_owned),
         }
     }
 }

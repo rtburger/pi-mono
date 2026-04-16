@@ -1,6 +1,6 @@
 use crate::{Component, visible_width, wrap_text_with_ansi};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
-use std::{boxed::Box as StdBox, cell::RefCell};
+use std::{cell::RefCell, sync::Arc};
 
 type TextStyleFn = dyn Fn(&str) -> String + Send + Sync + 'static;
 type HighlightCodeFn = dyn Fn(&str, Option<&str>) -> Vec<String> + Send + Sync + 'static;
@@ -69,9 +69,10 @@ enum Block {
     Html(String),
 }
 
+#[derive(Clone)]
 pub struct DefaultTextStyle {
-    color: Option<StdBox<TextStyleFn>>,
-    bg_color: Option<StdBox<TextStyleFn>>,
+    color: Option<Arc<TextStyleFn>>,
+    bg_color: Option<Arc<TextStyleFn>>,
     bold: bool,
     italic: bool,
     strikethrough: bool,
@@ -87,7 +88,7 @@ impl DefaultTextStyle {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.color = Some(StdBox::new(color));
+        self.color = Some(Arc::new(color));
         self
     }
 
@@ -95,7 +96,7 @@ impl DefaultTextStyle {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.bg_color = Some(StdBox::new(bg_color));
+        self.bg_color = Some(Arc::new(bg_color));
         self
     }
 
@@ -137,22 +138,23 @@ impl Default for DefaultTextStyle {
     }
 }
 
+#[derive(Clone)]
 pub struct MarkdownTheme {
-    heading: StdBox<TextStyleFn>,
-    link: StdBox<TextStyleFn>,
-    link_url: StdBox<TextStyleFn>,
-    code: StdBox<TextStyleFn>,
-    code_block: StdBox<TextStyleFn>,
-    code_block_border: StdBox<TextStyleFn>,
-    quote: StdBox<TextStyleFn>,
-    quote_border: StdBox<TextStyleFn>,
-    hr: StdBox<TextStyleFn>,
-    list_bullet: StdBox<TextStyleFn>,
-    bold: StdBox<TextStyleFn>,
-    italic: StdBox<TextStyleFn>,
-    strikethrough: StdBox<TextStyleFn>,
-    underline: StdBox<TextStyleFn>,
-    highlight_code: Option<StdBox<HighlightCodeFn>>,
+    heading: Arc<TextStyleFn>,
+    link: Arc<TextStyleFn>,
+    link_url: Arc<TextStyleFn>,
+    code: Arc<TextStyleFn>,
+    code_block: Arc<TextStyleFn>,
+    code_block_border: Arc<TextStyleFn>,
+    quote: Arc<TextStyleFn>,
+    quote_border: Arc<TextStyleFn>,
+    hr: Arc<TextStyleFn>,
+    list_bullet: Arc<TextStyleFn>,
+    bold: Arc<TextStyleFn>,
+    italic: Arc<TextStyleFn>,
+    strikethrough: Arc<TextStyleFn>,
+    underline: Arc<TextStyleFn>,
+    highlight_code: Option<Arc<HighlightCodeFn>>,
     code_block_indent: String,
 }
 
@@ -165,7 +167,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.heading = StdBox::new(heading);
+        self.heading = Arc::new(heading);
         self
     }
 
@@ -173,7 +175,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.link = StdBox::new(link);
+        self.link = Arc::new(link);
         self
     }
 
@@ -181,7 +183,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.link_url = StdBox::new(link_url);
+        self.link_url = Arc::new(link_url);
         self
     }
 
@@ -189,7 +191,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.code = StdBox::new(code);
+        self.code = Arc::new(code);
         self
     }
 
@@ -197,7 +199,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.code_block = StdBox::new(code_block);
+        self.code_block = Arc::new(code_block);
         self
     }
 
@@ -205,7 +207,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.code_block_border = StdBox::new(code_block_border);
+        self.code_block_border = Arc::new(code_block_border);
         self
     }
 
@@ -213,7 +215,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.quote = StdBox::new(quote);
+        self.quote = Arc::new(quote);
         self
     }
 
@@ -221,7 +223,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.quote_border = StdBox::new(quote_border);
+        self.quote_border = Arc::new(quote_border);
         self
     }
 
@@ -229,7 +231,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.hr = StdBox::new(hr);
+        self.hr = Arc::new(hr);
         self
     }
 
@@ -237,7 +239,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.list_bullet = StdBox::new(list_bullet);
+        self.list_bullet = Arc::new(list_bullet);
         self
     }
 
@@ -245,7 +247,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.bold = StdBox::new(bold);
+        self.bold = Arc::new(bold);
         self
     }
 
@@ -253,7 +255,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.italic = StdBox::new(italic);
+        self.italic = Arc::new(italic);
         self
     }
 
@@ -261,7 +263,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.strikethrough = StdBox::new(strikethrough);
+        self.strikethrough = Arc::new(strikethrough);
         self
     }
 
@@ -269,7 +271,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.underline = StdBox::new(underline);
+        self.underline = Arc::new(underline);
         self
     }
 
@@ -277,7 +279,7 @@ impl MarkdownTheme {
     where
         F: Fn(&str, Option<&str>) -> Vec<String> + Send + Sync + 'static,
     {
-        self.highlight_code = Some(StdBox::new(highlight_code));
+        self.highlight_code = Some(Arc::new(highlight_code));
         self
     }
 
@@ -356,20 +358,20 @@ impl MarkdownTheme {
 impl Default for MarkdownTheme {
     fn default() -> Self {
         Self {
-            heading: StdBox::new(str::to_owned),
-            link: StdBox::new(str::to_owned),
-            link_url: StdBox::new(str::to_owned),
-            code: StdBox::new(str::to_owned),
-            code_block: StdBox::new(str::to_owned),
-            code_block_border: StdBox::new(str::to_owned),
-            quote: StdBox::new(str::to_owned),
-            quote_border: StdBox::new(str::to_owned),
-            hr: StdBox::new(str::to_owned),
-            list_bullet: StdBox::new(str::to_owned),
-            bold: StdBox::new(str::to_owned),
-            italic: StdBox::new(str::to_owned),
-            strikethrough: StdBox::new(str::to_owned),
-            underline: StdBox::new(str::to_owned),
+            heading: Arc::new(str::to_owned),
+            link: Arc::new(str::to_owned),
+            link_url: Arc::new(str::to_owned),
+            code: Arc::new(str::to_owned),
+            code_block: Arc::new(str::to_owned),
+            code_block_border: Arc::new(str::to_owned),
+            quote: Arc::new(str::to_owned),
+            quote_border: Arc::new(str::to_owned),
+            hr: Arc::new(str::to_owned),
+            list_bullet: Arc::new(str::to_owned),
+            bold: Arc::new(str::to_owned),
+            italic: Arc::new(str::to_owned),
+            strikethrough: Arc::new(str::to_owned),
+            underline: Arc::new(str::to_owned),
             highlight_code: None,
             code_block_indent: "  ".to_owned(),
         }

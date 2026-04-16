@@ -1,5 +1,5 @@
 use crate::{Component, KeybindingsManager, matches_key, truncate_to_width, visible_width};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH: usize = 32;
 const PRIMARY_COLUMN_GAP: usize = 2;
@@ -12,12 +12,13 @@ pub struct SelectItem {
     pub description: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct SelectListTheme {
-    selected_prefix: Box<SelectListTextStyleFn>,
-    selected_text: Box<SelectListTextStyleFn>,
-    description: Box<SelectListTextStyleFn>,
-    scroll_info: Box<SelectListTextStyleFn>,
-    no_match: Box<SelectListTextStyleFn>,
+    selected_prefix: Arc<SelectListTextStyleFn>,
+    selected_text: Arc<SelectListTextStyleFn>,
+    description: Arc<SelectListTextStyleFn>,
+    scroll_info: Arc<SelectListTextStyleFn>,
+    no_match: Arc<SelectListTextStyleFn>,
 }
 
 type SelectListTextStyleFn = dyn Fn(&str) -> String + Send + Sync + 'static;
@@ -35,7 +36,7 @@ impl SelectListTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.selected_prefix = Box::new(selected_prefix);
+        self.selected_prefix = Arc::new(selected_prefix);
         self
     }
 
@@ -43,7 +44,7 @@ impl SelectListTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.selected_text = Box::new(selected_text);
+        self.selected_text = Arc::new(selected_text);
         self
     }
 
@@ -51,7 +52,7 @@ impl SelectListTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.description = Box::new(description);
+        self.description = Arc::new(description);
         self
     }
 
@@ -59,7 +60,7 @@ impl SelectListTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.scroll_info = Box::new(scroll_info);
+        self.scroll_info = Arc::new(scroll_info);
         self
     }
 
@@ -67,7 +68,7 @@ impl SelectListTheme {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.no_match = Box::new(no_match);
+        self.no_match = Arc::new(no_match);
         self
     }
 }
@@ -75,20 +76,20 @@ impl SelectListTheme {
 impl Default for SelectListTheme {
     fn default() -> Self {
         Self {
-            selected_prefix: Box::new(str::to_owned),
-            selected_text: Box::new(str::to_owned),
-            description: Box::new(str::to_owned),
-            scroll_info: Box::new(str::to_owned),
-            no_match: Box::new(str::to_owned),
+            selected_prefix: Arc::new(str::to_owned),
+            selected_text: Arc::new(str::to_owned),
+            description: Arc::new(str::to_owned),
+            scroll_info: Arc::new(str::to_owned),
+            no_match: Arc::new(str::to_owned),
         }
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct SelectListLayoutOptions {
     pub min_primary_column_width: Option<usize>,
     pub max_primary_column_width: Option<usize>,
-    pub truncate_primary: Option<Box<SelectListTruncatePrimaryFn>>,
+    pub truncate_primary: Option<Arc<SelectListTruncatePrimaryFn>>,
 }
 
 impl SelectListLayoutOptions {
@@ -106,7 +107,7 @@ impl SelectListLayoutOptions {
     where
         F: for<'a> Fn(&SelectListTruncatePrimaryContext<'a>) -> String + Send + Sync + 'static,
     {
-        self.truncate_primary = Some(Box::new(truncate_primary));
+        self.truncate_primary = Some(Arc::new(truncate_primary));
         self
     }
 }
