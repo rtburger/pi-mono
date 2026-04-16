@@ -1,7 +1,6 @@
 use globset::Glob;
 use pi_config::{
-    FilteredPackageSource, PackageSource, ResourceSettings, SettingsWarning,
-    load_resource_settings,
+    FilteredPackageSource, PackageSource, ResourceSettings, SettingsWarning, load_resource_settings,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -384,8 +383,7 @@ impl DefaultPackageManager {
 
     pub fn install_and_persist(&self, source: &str, local: bool) -> Result<(), String> {
         self.install(source, local)?;
-        self.add_source_to_settings(source, local)
-            .map(|_| ())
+        self.add_source_to_settings(source, local).map(|_| ())
     }
 
     pub fn remove(&self, source: &str, local: bool) -> Result<(), String> {
@@ -410,19 +408,18 @@ impl DefaultPackageManager {
 
     pub fn update(&self, source: Option<&str>) -> Result<(), String> {
         let settings = load_resource_settings(&self.cwd, &self.agent_dir);
-        let identity = source.map(|value| self.get_package_identity(value, None)).transpose()?;
+        let identity = source
+            .map(|value| self.get_package_identity(value, None))
+            .transpose()?;
         let mut matched = false;
 
         for package in &settings.global.packages {
             let package_source = package.source();
-            if identity
-                .as_deref()
-                .is_some_and(|identity| {
-                    self.get_package_identity(package_source, Some(ResourceScope::User))
-                        .map(|candidate| candidate != identity)
-                        .unwrap_or(true)
-                })
-            {
+            if identity.as_deref().is_some_and(|identity| {
+                self.get_package_identity(package_source, Some(ResourceScope::User))
+                    .map(|candidate| candidate != identity)
+                    .unwrap_or(true)
+            }) {
                 continue;
             }
             matched = true;
@@ -431,14 +428,11 @@ impl DefaultPackageManager {
 
         for package in &settings.project.packages {
             let package_source = package.source();
-            if identity
-                .as_deref()
-                .is_some_and(|identity| {
-                    self.get_package_identity(package_source, Some(ResourceScope::Project))
-                        .map(|candidate| candidate != identity)
-                        .unwrap_or(true)
-                })
-            {
+            if identity.as_deref().is_some_and(|identity| {
+                self.get_package_identity(package_source, Some(ResourceScope::Project))
+                    .map(|candidate| candidate != identity)
+                    .unwrap_or(true)
+            }) {
                 continue;
             }
             matched = true;
@@ -449,10 +443,8 @@ impl DefaultPackageManager {
             let mut configured = Vec::new();
             configured.extend(settings.global.packages.iter().cloned());
             configured.extend(settings.project.packages.iter().cloned());
-            return Err(self.build_no_matching_package_message(
-                source.expect("checked is_some"),
-                &configured,
-            ));
+            return Err(self
+                .build_no_matching_package_message(source.expect("checked is_some"), &configured));
         }
 
         Ok(())
@@ -486,10 +478,10 @@ impl DefaultPackageManager {
         let path = self.settings_path(scope);
         let mut settings = self.read_settings_object(&path)?;
         let mut packages = self.packages_from_settings_object(&settings)?;
-        if packages
-            .iter()
-            .any(|existing| self.package_sources_match(existing, source, scope).unwrap_or(false))
-        {
+        if packages.iter().any(|existing| {
+            self.package_sources_match(existing, source, scope)
+                .unwrap_or(false)
+        }) {
             return Ok(false);
         }
 
@@ -602,7 +594,12 @@ impl DefaultPackageManager {
                         self.install_npm(&npm, entry.scope)?;
                     }
                     metadata.base_dir = Some(path_to_string(&install_path));
-                    self.collect_package_resources(&install_path, filter.as_ref(), accumulator, &metadata);
+                    self.collect_package_resources(
+                        &install_path,
+                        filter.as_ref(),
+                        accumulator,
+                        &metadata,
+                    );
                 }
                 ParsedSource::Git(git) => {
                     let install_path = self.get_git_install_path(&git, entry.scope);
@@ -618,7 +615,12 @@ impl DefaultPackageManager {
                         let _ = self.update_git(&git, ResourceScope::Temporary);
                     }
                     metadata.base_dir = Some(path_to_string(&install_path));
-                    self.collect_package_resources(&install_path, filter.as_ref(), accumulator, &metadata);
+                    self.collect_package_resources(
+                        &install_path,
+                        filter.as_ref(),
+                        accumulator,
+                        &metadata,
+                    );
                 }
             }
         }
@@ -643,7 +645,13 @@ impl DefaultPackageManager {
                 };
                 let target = accumulator.target_map_mut(*resource_type);
                 if let Some(patterns) = patterns {
-                    self.apply_package_filter(package_root, patterns, *resource_type, target, metadata);
+                    self.apply_package_filter(
+                        package_root,
+                        patterns,
+                        *resource_type,
+                        target,
+                        metadata,
+                    );
                 } else {
                     self.collect_default_resources(package_root, *resource_type, target, metadata);
                 }
@@ -693,7 +701,13 @@ impl DefaultPackageManager {
     ) {
         if let Some(manifest) = self.read_pi_manifest(package_root) {
             if let Some(entries) = manifest_entries(&manifest, resource_type) {
-                self.add_manifest_entries(Some(entries), package_root, resource_type, target, metadata);
+                self.add_manifest_entries(
+                    Some(entries),
+                    package_root,
+                    resource_type,
+                    target,
+                    metadata,
+                );
                 return;
             }
         }
@@ -725,17 +739,31 @@ impl DefaultPackageManager {
 
         let enabled_by_user = apply_patterns(&all_files, user_patterns, package_root);
         for file in all_files {
-            self.add_resource(target, file.clone(), metadata.clone(), enabled_by_user.contains(&file));
+            self.add_resource(
+                target,
+                file.clone(),
+                metadata.clone(),
+                enabled_by_user.contains(&file),
+            );
         }
     }
 
-    fn collect_manifest_files(&self, package_root: &Path, resource_type: ResourceType) -> Vec<String> {
+    fn collect_manifest_files(
+        &self,
+        package_root: &Path,
+        resource_type: ResourceType,
+    ) -> Vec<String> {
         if let Some(manifest) = self.read_pi_manifest(package_root)
             && let Some(entries) = manifest_entries(&manifest, resource_type)
             && !entries.is_empty()
         {
-            let all_files = self.collect_files_from_manifest_entries(entries, package_root, resource_type);
-            let manifest_patterns = entries.iter().filter(|entry| is_pattern(entry)).cloned().collect::<Vec<_>>();
+            let all_files =
+                self.collect_files_from_manifest_entries(entries, package_root, resource_type);
+            let manifest_patterns = entries
+                .iter()
+                .filter(|entry| is_pattern(entry))
+                .cloned()
+                .collect::<Vec<_>>();
             if manifest_patterns.is_empty() {
                 return all_files;
             }
@@ -819,7 +847,12 @@ impl DefaultPackageManager {
         let all_files = self.collect_files_from_paths(&resolved_plain, resource_type);
         let enabled = apply_patterns(&all_files, &patterns, base_dir);
         for file in all_files {
-            self.add_resource(target, file.clone(), metadata.clone(), enabled.contains(&file));
+            self.add_resource(
+                target,
+                file.clone(),
+                metadata.clone(),
+                enabled.contains(&file),
+            );
         }
     }
 
@@ -848,9 +881,9 @@ impl DefaultPackageManager {
         let project_agents_skill_dirs = collect_ancestor_agents_skill_dirs(&self.cwd)
             .into_iter()
             .filter(|dir| {
-                user_agents_skills_dir
-                    .as_ref()
-                    .is_none_or(|user_dir| normalize_pathbuf(dir.clone()) != normalize_pathbuf(user_dir.clone()))
+                user_agents_skills_dir.as_ref().is_none_or(|user_dir| {
+                    normalize_pathbuf(dir.clone()) != normalize_pathbuf(user_dir.clone())
+                })
             })
             .collect::<Vec<_>>();
 
@@ -903,7 +936,9 @@ impl DefaultPackageManager {
                 skills.extend(self.collect_skill_entries(dir, SkillDiscoveryMode::Agents));
             }
         } else if let Some(user_agents_skill_dir) = user_agents_skill_dir {
-            skills.extend(self.collect_skill_entries(user_agents_skill_dir, SkillDiscoveryMode::Agents));
+            skills.extend(
+                self.collect_skill_entries(user_agents_skill_dir, SkillDiscoveryMode::Agents),
+            );
         }
         self.add_auto_resources(
             accumulator.target_map_mut(ResourceType::Skills),
@@ -943,7 +978,11 @@ impl DefaultPackageManager {
         }
     }
 
-    fn collect_files_from_paths(&self, paths: &[PathBuf], resource_type: ResourceType) -> Vec<String> {
+    fn collect_files_from_paths(
+        &self,
+        paths: &[PathBuf],
+        resource_type: ResourceType,
+    ) -> Vec<String> {
         let mut files = Vec::new();
         for path in paths {
             if !path.exists() {
@@ -1035,7 +1074,10 @@ impl DefaultPackageManager {
         );
 
         let root_skill = root.join("SKILL.md");
-        if skill_files.iter().any(|path| normalize_pathbuf(path.clone()) == normalize_pathbuf(root_skill.clone())) {
+        if skill_files
+            .iter()
+            .any(|path| normalize_pathbuf(path.clone()) == normalize_pathbuf(root_skill.clone()))
+        {
             return vec![path_to_string(&root_skill)];
         }
 
@@ -1103,7 +1145,14 @@ impl DefaultPackageManager {
                 if ignore_state.is_ignored(&path, root, true) {
                     continue;
                 }
-                self.collect_skill_entries_impl(&path, root, mode, ignore_state, skill_files, root_markdown);
+                self.collect_skill_entries_impl(
+                    &path,
+                    root,
+                    mode,
+                    ignore_state,
+                    skill_files,
+                    root_markdown,
+                );
                 continue;
             }
             if ignore_state.is_ignored(&path, root, false) {
@@ -1249,10 +1298,16 @@ impl DefaultPackageManager {
         metadata: PathMetadata,
         enabled: bool,
     ) {
-        target.entry(path).or_insert(ResourceState { metadata, enabled });
+        target
+            .entry(path)
+            .or_insert(ResourceState { metadata, enabled });
     }
 
-    fn entries_for_type<'a>(&self, settings: &'a ResourceSettings, resource_type: ResourceType) -> &'a [String] {
+    fn entries_for_type<'a>(
+        &self,
+        settings: &'a ResourceSettings,
+        resource_type: ResourceType,
+    ) -> &'a [String] {
         match resource_type {
             ResourceType::Extensions => &settings.extensions,
             ResourceType::Skills => &settings.skills,
@@ -1291,7 +1346,14 @@ impl DefaultPackageManager {
 
     fn install_npm(&self, source: &NpmSource, scope: ResourceScope) -> Result<(), String> {
         if scope == ResourceScope::User {
-            return self.run_npm_command(&[String::from("install"), String::from("-g"), source.spec.clone()], None);
+            return self.run_npm_command(
+                &[
+                    String::from("install"),
+                    String::from("-g"),
+                    source.spec.clone(),
+                ],
+                None,
+            );
         }
         let install_root = self.npm_install_root_for_source(scope, source);
         self.ensure_npm_project(&install_root)?;
@@ -1308,7 +1370,14 @@ impl DefaultPackageManager {
 
     fn uninstall_npm(&self, source: &NpmSource, scope: ResourceScope) -> Result<(), String> {
         if scope == ResourceScope::User {
-            return self.run_npm_command(&[String::from("uninstall"), String::from("-g"), source.name.clone()], None);
+            return self.run_npm_command(
+                &[
+                    String::from("uninstall"),
+                    String::from("-g"),
+                    source.name.clone(),
+                ],
+                None,
+            );
         }
         let install_root = self.npm_install_root_for_source(scope, source);
         if !install_root.exists() {
@@ -1338,7 +1407,11 @@ impl DefaultPackageManager {
         }
         self.run_command(
             "git",
-            &[String::from("clone"), source.repo.clone(), path_to_string(&target_dir)],
+            &[
+                String::from("clone"),
+                source.repo.clone(),
+                path_to_string(&target_dir),
+            ],
             None,
         )?;
         if let Some(reference) = source.reference.as_ref() {
@@ -1382,7 +1455,11 @@ impl DefaultPackageManager {
         Ok(())
     }
 
-    fn prune_empty_git_parents(&self, target_dir: &Path, install_root: &Path) -> Result<(), String> {
+    fn prune_empty_git_parents(
+        &self,
+        target_dir: &Path,
+        install_root: &Path,
+    ) -> Result<(), String> {
         let resolved_root = normalize_pathbuf(install_root.to_path_buf());
         let mut current = target_dir.parent().map(PathBuf::from);
         while let Some(dir) = current {
@@ -1442,7 +1519,11 @@ impl DefaultPackageManager {
         }
     }
 
-    fn get_npm_install_path(&self, source: &NpmSource, scope: ResourceScope) -> Result<PathBuf, String> {
+    fn get_npm_install_path(
+        &self,
+        source: &NpmSource,
+        scope: ResourceScope,
+    ) -> Result<PathBuf, String> {
         match scope {
             ResourceScope::Temporary | ResourceScope::Project => Ok(self
                 .npm_install_root_for_source(scope, source)
@@ -1461,8 +1542,17 @@ impl DefaultPackageManager {
             ResourceScope::Temporary => {
                 self.temporary_dir("git", Some(&format!("{}:{}", source.host, source.path)))
             }
-            ResourceScope::Project => self.cwd.join(CONFIG_DIR_NAME).join("git").join(&source.host).join(&source.path),
-            ResourceScope::User => self.agent_dir.join("git").join(&source.host).join(&source.path),
+            ResourceScope::Project => self
+                .cwd
+                .join(CONFIG_DIR_NAME)
+                .join("git")
+                .join(&source.host)
+                .join(&source.path),
+            ResourceScope::User => self
+                .agent_dir
+                .join("git")
+                .join(&source.host)
+                .join(&source.path),
         }
     }
 
@@ -1477,7 +1567,10 @@ impl DefaultPackageManager {
     fn temporary_dir(&self, prefix: &str, suffix: Option<&str>) -> PathBuf {
         let key = format!("{prefix}:{}", suffix.unwrap_or_default());
         let hash = stable_hash(&key);
-        let mut path = env::temp_dir().join("pi-extensions").join(prefix).join(hash);
+        let mut path = env::temp_dir()
+            .join("pi-extensions")
+            .join(prefix)
+            .join(hash);
         if let Some(suffix) = suffix {
             let sanitized = suffix
                 .chars()
@@ -1496,7 +1589,11 @@ impl DefaultPackageManager {
         path
     }
 
-    fn installed_npm_matches_pinned_version(&self, source: &NpmSource, install_path: &Path) -> bool {
+    fn installed_npm_matches_pinned_version(
+        &self,
+        source: &NpmSource,
+        install_path: &Path,
+    ) -> bool {
         let Some(installed_version) = self.installed_npm_version(install_path) else {
             return false;
         };
@@ -1554,7 +1651,9 @@ impl DefaultPackageManager {
     fn dedupe_packages(&self, packages: Vec<PackageEntry>) -> Vec<PackageEntry> {
         let mut seen = BTreeMap::<String, PackageEntry>::new();
         for package in packages {
-            let Ok(identity) = self.get_package_identity(package.package.source(), Some(package.scope)) else {
+            let Ok(identity) =
+                self.get_package_identity(package.package.source(), Some(package.scope))
+            else {
                 continue;
             };
             if let Some(existing) = seen.get(&identity)
@@ -1563,7 +1662,8 @@ impl DefaultPackageManager {
             {
                 continue;
             }
-            seen.entry(identity.clone()).or_insert_with(|| package.clone());
+            seen.entry(identity.clone())
+                .or_insert_with(|| package.clone());
             if package.scope == ResourceScope::Project {
                 seen.insert(identity, package);
             }
@@ -1653,7 +1753,9 @@ impl DefaultPackageManager {
                         .as_ref()
                         .map(|reference| format!("{shorthand}@{reference}"));
                     if trimmed == shorthand
-                        || shorthand_with_ref.as_deref().is_some_and(|candidate| candidate == trimmed)
+                        || shorthand_with_ref
+                            .as_deref()
+                            .is_some_and(|candidate| candidate == trimmed)
                     {
                         suggestions.insert(source_value.to_owned());
                     }
@@ -1693,7 +1795,12 @@ impl DefaultPackageManager {
         self.run_command_capture(&command, &full_args, None)
     }
 
-    fn run_command(&self, command: &str, args: &[String], cwd: Option<&Path>) -> Result<(), String> {
+    fn run_command(
+        &self,
+        command: &str,
+        args: &[String],
+        cwd: Option<&Path>,
+    ) -> Result<(), String> {
         let output = Command::new(command)
             .args(args)
             .current_dir(cwd.unwrap_or(&self.cwd))
@@ -1702,7 +1809,12 @@ impl DefaultPackageManager {
         if output.status.success() {
             return Ok(());
         }
-        Err(format_command_error(command, args, &output.stdout, &output.stderr))
+        Err(format_command_error(
+            command,
+            args,
+            &output.stdout,
+            &output.stderr,
+        ))
     }
 
     fn run_command_capture(
@@ -1723,7 +1835,12 @@ impl DefaultPackageManager {
             }
             return Ok(String::from_utf8_lossy(&output.stderr).trim().to_owned());
         }
-        Err(format_command_error(command, args, &output.stdout, &output.stderr))
+        Err(format_command_error(
+            command,
+            args,
+            &output.stdout,
+            &output.stderr,
+        ))
     }
 
     fn base_dir_for_scope(&self, scope: ResourceScope) -> PathBuf {
@@ -1782,11 +1899,15 @@ impl DefaultPackageManager {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        let content = serde_json::to_string_pretty(&Value::Object(object)).map_err(|error| error.to_string())?;
+        let content = serde_json::to_string_pretty(&Value::Object(object))
+            .map_err(|error| error.to_string())?;
         fs::write(path, format!("{content}\n")).map_err(|error| error.to_string())
     }
 
-    fn packages_from_settings_object(&self, object: &Map<String, Value>) -> Result<Vec<PackageSource>, String> {
+    fn packages_from_settings_object(
+        &self,
+        object: &Map<String, Value>,
+    ) -> Result<Vec<PackageSource>, String> {
         let Some(value) = object.get("packages") else {
             return Ok(Vec::new());
         };
@@ -1867,7 +1988,10 @@ impl IgnoreState {
 }
 
 impl ResourceAccumulator {
-    fn target_map_mut(&mut self, resource_type: ResourceType) -> &mut BTreeMap<String, ResourceState> {
+    fn target_map_mut(
+        &mut self,
+        resource_type: ResourceType,
+    ) -> &mut BTreeMap<String, ResourceState> {
         match resource_type {
             ResourceType::Extensions => &mut self.extensions,
             ResourceType::Skills => &mut self.skills,
@@ -1906,7 +2030,11 @@ fn resource_precedence_rank(metadata: &PathMetadata) -> u8 {
     if metadata.origin == ResourceOrigin::Package {
         return 4;
     }
-    let base = if metadata.scope == ResourceScope::Project { 0 } else { 2 };
+    let base = if metadata.scope == ResourceScope::Project {
+        0
+    } else {
+        2
+    };
     base + if metadata.source == "local" { 0 } else { 1 }
 }
 
@@ -1983,7 +2111,11 @@ fn parse_npm_spec(spec: &str) -> (String, Option<String>) {
 fn parse_git_source(source: &str) -> Option<GitSource> {
     let trimmed = source.trim();
     let has_git_prefix = trimmed.starts_with("git:");
-    let url = if has_git_prefix { trimmed[4..].trim() } else { trimmed };
+    let url = if has_git_prefix {
+        trimmed[4..].trim()
+    } else {
+        trimmed
+    };
     if !has_git_prefix && !has_protocol_prefix(url) {
         return None;
     }
@@ -1995,7 +2127,9 @@ fn parse_git_source(source: &str) -> Option<GitSource> {
         let (scheme, authority, path) = parse_protocol_repo(&repo_without_ref)?;
         let host = extract_host_from_authority(&authority)?;
         (
-            format!("{scheme}://{authority}/{}", path.trim_start_matches('/')).trim_end_matches('/').to_owned(),
+            format!("{scheme}://{authority}/{}", path.trim_start_matches('/'))
+                .trim_end_matches('/')
+                .to_owned(),
             host,
             path.trim_start_matches('/').to_owned(),
         )
@@ -2007,7 +2141,10 @@ fn parse_git_source(source: &str) -> Option<GitSource> {
         (format!("https://{host}/{path}"), host, path)
     };
 
-    let normalized_path = path.trim_start_matches('/').trim_end_matches(".git").to_owned();
+    let normalized_path = path
+        .trim_start_matches('/')
+        .trim_end_matches(".git")
+        .to_owned();
     if host.is_empty() || normalized_path.split('/').count() < 2 {
         return None;
     }
@@ -2042,7 +2179,9 @@ fn split_git_reference(url: &str) -> (String, Option<String>) {
             let reference = path_with_ref[index + 1..].trim();
             if !path.is_empty() && !reference.is_empty() {
                 return (
-                    format!("{scheme}://{authority}/{path}").trim_end_matches('/').to_owned(),
+                    format!("{scheme}://{authority}/{path}")
+                        .trim_end_matches('/')
+                        .to_owned(),
                     Some(reference.to_owned()),
                 );
             }
@@ -2160,7 +2299,8 @@ fn apply_patterns(all_paths: &[String], patterns: &[String], base_dir: &Path) ->
 
     if !force_includes.is_empty() {
         for path in all_paths {
-            if !result.contains(path) && matches_any_exact_pattern(path, &force_includes, base_dir) {
+            if !result.contains(path) && matches_any_exact_pattern(path, &force_includes, base_dir)
+            {
                 result.push(path.clone());
             }
         }
@@ -2364,7 +2504,9 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 fn relative_path(base: &Path, target: &Path) -> String {
-    if let Ok(relative) = normalize_pathbuf(target.to_path_buf()).strip_prefix(normalize_pathbuf(base.to_path_buf())) {
+    if let Ok(relative) =
+        normalize_pathbuf(target.to_path_buf()).strip_prefix(normalize_pathbuf(base.to_path_buf()))
+    {
         let string = path_to_string(relative);
         return string.trim_start_matches('/').to_owned();
     }
@@ -2463,7 +2605,7 @@ fn collect_ancestor_agents_skill_dirs(start_dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DefaultPackageManager, PackageSource, ResourceScope, ResolveExtensionSourcesOptions,
+        DefaultPackageManager, PackageSource, ResolveExtensionSourcesOptions, ResourceScope,
         parse_git_source,
     };
     use std::{
@@ -2521,7 +2663,10 @@ mod tests {
             .expect("expected source to be added");
 
         let settings = fs::read_to_string(cwd.join(".pi").join("settings.json")).unwrap();
-        assert!(settings.contains("../packages/demo"), "settings: {settings}");
+        assert!(
+            settings.contains("../packages/demo"),
+            "settings: {settings}"
+        );
     }
 
     #[test]
@@ -2536,7 +2681,10 @@ mod tests {
         fs::create_dir_all(package_dir.join("skills").join("demo-skill")).unwrap();
         fs::write(package_dir.join("prompts").join("review.md"), "Review").unwrap();
         fs::write(
-            package_dir.join("skills").join("demo-skill").join("SKILL.md"),
+            package_dir
+                .join("skills")
+                .join("demo-skill")
+                .join("SKILL.md"),
             "---\ndescription: Demo\n---\nSkill\n",
         )
         .unwrap();
@@ -2547,7 +2695,10 @@ mod tests {
         .unwrap();
 
         let manager = DefaultPackageManager::new(cwd, agent_dir);
-        let resolved = manager.resolve().expect("expected resolution to succeed").resolved;
+        let resolved = manager
+            .resolve()
+            .expect("expected resolution to succeed")
+            .resolved;
         assert!(
             resolved
                 .prompts
@@ -2581,7 +2732,10 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            package_dir.join("extensions").join("demo").join("helper.ts"),
+            package_dir
+                .join("extensions")
+                .join("demo")
+                .join("helper.ts"),
             "export const helper = true;\n",
         )
         .unwrap();
@@ -2637,7 +2791,10 @@ mod tests {
         .unwrap();
 
         let manager = DefaultPackageManager::new(cwd, agent_dir);
-        let resolved = manager.resolve().expect("expected resolution to succeed").resolved;
+        let resolved = manager
+            .resolve()
+            .expect("expected resolution to succeed")
+            .resolved;
         let matches = resolved
             .prompts
             .iter()

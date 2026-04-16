@@ -562,6 +562,11 @@ mod tests {
         )
         .unwrap();
 
-        assert!(should_start_extension_host(&cwd, Some(&agent_dir), &[], false));
+        assert!(should_start_extension_host(
+            &cwd,
+            Some(&agent_dir),
+            &[],
+            false
+        ));
     }
 }

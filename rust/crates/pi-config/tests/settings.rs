@@ -1,6 +1,4 @@
-use pi_config::{
-    PackageSource, SettingsScope, load_resource_settings, load_runtime_settings,
-};
+use pi_config::{PackageSource, SettingsScope, load_resource_settings, load_runtime_settings};
 use std::{
     fs,
     path::PathBuf,
@@ -222,7 +220,10 @@ fn load_resource_settings_reads_scoped_package_configuration() {
         ])
     );
     assert_eq!(loaded.global.packages.len(), 2);
-    assert_eq!(loaded.global.packages[0], PackageSource::Plain(String::from("npm:global-pkg")));
+    assert_eq!(
+        loaded.global.packages[0],
+        PackageSource::Plain(String::from("npm:global-pkg"))
+    );
     assert!(loaded.global.packages[1].is_filtered());
     assert_eq!(loaded.project.packages.len(), 1);
     assert_eq!(

@@ -21,8 +21,8 @@ pub use file_processor::{ProcessFileOptions, ProcessedFiles, process_file_argume
 pub use initial_message::{InitialMessageResult, build_initial_message};
 pub use package_commands::{PackageCommandOutput, handle_package_or_config_command};
 pub use package_manager::{
-    DefaultPackageManager, PathMetadata, ResolvedPaths, ResolvedResource, ResourceOrigin,
-    ResourceScope, ResolveExtensionSourcesOptions,
+    DefaultPackageManager, PathMetadata, ResolveExtensionSourcesOptions, ResolvedPaths,
+    ResolvedResource, ResourceOrigin, ResourceScope,
 };
 pub use pi_coding_agent_core::{AuthFileSource, ChainedAuthSource};
 pub use print_mode::{PrintModeOptions, PrintModeRunResult, run_print_mode};

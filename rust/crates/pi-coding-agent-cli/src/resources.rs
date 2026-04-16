@@ -68,7 +68,8 @@ pub fn load_cli_resources(
     let mut temporary_extension_paths = ResolvedPaths::default();
 
     if let Some(agent_dir) = agent_dir {
-        let package_manager = DefaultPackageManager::new(cwd.to_path_buf(), agent_dir.to_path_buf());
+        let package_manager =
+            DefaultPackageManager::new(cwd.to_path_buf(), agent_dir.to_path_buf());
         match package_manager.resolve() {
             Ok(output) => {
                 warnings.extend(output.warnings.iter().map(format_settings_warning));
@@ -109,9 +110,12 @@ pub fn load_cli_resources(
         Vec::new()
     };
 
-    let temporary_prompt_paths = enabled_resource_paths(&temporary_extension_paths.prompts, &mut metadata_by_path);
-    let temporary_skill_paths = enabled_resource_paths(&temporary_extension_paths.skills, &mut metadata_by_path);
-    let temporary_theme_paths = enabled_resource_paths(&temporary_extension_paths.themes, &mut metadata_by_path);
+    let temporary_prompt_paths =
+        enabled_resource_paths(&temporary_extension_paths.prompts, &mut metadata_by_path);
+    let temporary_skill_paths =
+        enabled_resource_paths(&temporary_extension_paths.skills, &mut metadata_by_path);
+    let temporary_theme_paths =
+        enabled_resource_paths(&temporary_extension_paths.themes, &mut metadata_by_path);
 
     let prompt_paths = merge_unique_paths(
         &temporary_prompt_paths,
@@ -132,12 +136,13 @@ pub fn load_cli_resources(
         cwd,
     );
 
-    let prompt_templates = load_prompt_templates(pi_coding_agent_core::LoadPromptTemplatesOptions {
-        cwd: cwd.to_path_buf(),
-        agent_dir: agent_dir.map(Path::to_path_buf),
-        prompt_paths,
-        include_defaults: agent_dir.is_none() && !parsed.no_prompt_templates,
-    });
+    let prompt_templates =
+        load_prompt_templates(pi_coding_agent_core::LoadPromptTemplatesOptions {
+            cwd: cwd.to_path_buf(),
+            agent_dir: agent_dir.map(Path::to_path_buf),
+            prompt_paths,
+            include_defaults: agent_dir.is_none() && !parsed.no_prompt_templates,
+        });
     warnings.extend(
         prompt_templates
             .diagnostics
@@ -216,7 +221,10 @@ fn merge_unique_paths(
     merged
 }
 
-fn apply_skill_source_info(skills: &mut [Skill], metadata_by_path: &BTreeMap<String, PathMetadata>) {
+fn apply_skill_source_info(
+    skills: &mut [Skill],
+    metadata_by_path: &BTreeMap<String, PathMetadata>,
+) {
     for skill in skills {
         if let Some(metadata) = metadata_by_path.get(&normalize_path(&skill.file_path)) {
             skill.source_info = source_info_from_metadata(&skill.file_path, metadata);

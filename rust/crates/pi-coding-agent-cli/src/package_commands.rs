@@ -1,6 +1,4 @@
-use crate::package_manager::{
-    DefaultPackageManager, ResourceScope, ResolvedResource,
-};
+use crate::package_manager::{DefaultPackageManager, ResolvedResource, ResourceScope};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,7 +62,11 @@ pub fn handle_package_or_config_command(
         });
     }
 
-    if matches!(options.command, PackageCommand::Install | PackageCommand::Remove) && options.source.is_none() {
+    if matches!(
+        options.command,
+        PackageCommand::Install | PackageCommand::Remove
+    ) && options.source.is_none()
+    {
         stderr.push_str(&format!(
             "Missing {} source.\n",
             command_name(options.command)
@@ -83,9 +85,9 @@ pub fn handle_package_or_config_command(
     let result = match options.command {
         PackageCommand::Install => {
             let source = options.source.as_deref().expect("validated source");
-            manager.install_and_persist(source, options.local).map(|_| {
-                format!("Installed {source}\n")
-            })
+            manager
+                .install_and_persist(source, options.local)
+                .map(|_| format!("Installed {source}\n"))
         }
         PackageCommand::Remove => {
             let source = options.source.as_deref().expect("validated source");
@@ -103,7 +105,9 @@ pub fn handle_package_or_config_command(
             Err(error) => Err(error),
         },
         PackageCommand::List => Ok(render_package_list(&manager)),
-        PackageCommand::Config => manager.resolve().map(|resolved| render_config_summary(&resolved.resolved)),
+        PackageCommand::Config => manager
+            .resolve()
+            .map(|resolved| render_config_summary(&resolved.resolved)),
     };
 
     match result {
@@ -205,7 +209,12 @@ fn render_package_list(manager: &DefaultPackageManager) -> String {
     if !user_packages.is_empty() {
         output.push_str("User packages:\n");
         for package in user_packages {
-            push_package_line(&mut output, package.source.as_str(), package.filtered, package.installed_path.as_deref());
+            push_package_line(
+                &mut output,
+                package.source.as_str(),
+                package.filtered,
+                package.installed_path.as_deref(),
+            );
         }
     }
     if !project_packages.is_empty() {
@@ -214,14 +223,24 @@ fn render_package_list(manager: &DefaultPackageManager) -> String {
         }
         output.push_str("Project packages:\n");
         for package in project_packages {
-            push_package_line(&mut output, package.source.as_str(), package.filtered, package.installed_path.as_deref());
+            push_package_line(
+                &mut output,
+                package.source.as_str(),
+                package.filtered,
+                package.installed_path.as_deref(),
+            );
         }
     }
 
     output
 }
 
-fn push_package_line(output: &mut String, source: &str, filtered: bool, installed_path: Option<&str>) {
+fn push_package_line(
+    output: &mut String,
+    source: &str,
+    filtered: bool,
+    installed_path: Option<&str>,
+) {
     if filtered {
         output.push_str(&format!("  {source} (filtered)\n"));
     } else {
@@ -286,9 +305,9 @@ fn package_command_help(command: PackageCommand) -> String {
         PackageCommand::Update => String::from(
             "Usage:\n  pi update [source]\n\nUpdate installed packages. If <source> is provided, only that package is updated.\n",
         ),
-        PackageCommand::List => {
-            String::from("Usage:\n  pi list\n\nList installed packages from user and project settings.\n")
-        }
+        PackageCommand::List => String::from(
+            "Usage:\n  pi list\n\nList installed packages from user and project settings.\n",
+        ),
         PackageCommand::Config => String::from(
             "Usage:\n  pi config\n\nShow resolved extensions, skills, prompt templates, and themes.\n",
         ),
@@ -342,7 +361,11 @@ mod tests {
         fs::create_dir_all(package_dir.join("extensions")).unwrap();
         fs::create_dir_all(&cwd).unwrap();
         fs::create_dir_all(&agent_dir).unwrap();
-        fs::write(package_dir.join("extensions").join("index.ts"), "export default function () {}\n").unwrap();
+        fs::write(
+            package_dir.join("extensions").join("index.ts"),
+            "export default function () {}\n",
+        )
+        .unwrap();
 
         let install = handle_package_or_config_command(
             &[String::from("install"), String::from("./packages/demo")],
@@ -356,17 +379,32 @@ mod tests {
         let listed = handle_package_or_config_command(&[String::from("list")], &cwd, &agent_dir)
             .expect("expected list command to be handled");
         assert_eq!(listed.exit_code, 0, "stderr: {}", listed.stderr);
-        assert!(listed.stdout.contains("User packages:"), "stdout: {}", listed.stdout);
-        assert!(listed.stdout.contains("../project/packages/demo"), "stdout: {}", listed.stdout);
+        assert!(
+            listed.stdout.contains("User packages:"),
+            "stdout: {}",
+            listed.stdout
+        );
+        assert!(
+            listed.stdout.contains("../project/packages/demo"),
+            "stdout: {}",
+            listed.stdout
+        );
 
         let removed = handle_package_or_config_command(
-            &[String::from("remove"), package_dir.to_string_lossy().into_owned()],
+            &[
+                String::from("remove"),
+                package_dir.to_string_lossy().into_owned(),
+            ],
             &cwd,
             &agent_dir,
         )
         .expect("expected remove command to be handled");
         assert_eq!(removed.exit_code, 0, "stderr: {}", removed.stderr);
-        assert!(removed.stdout.contains("Removed"), "stdout: {}", removed.stdout);
+        assert!(
+            removed.stdout.contains("Removed"),
+            "stdout: {}",
+            removed.stdout
+        );
     }
 
     #[test]
@@ -388,7 +426,15 @@ mod tests {
         let output = handle_package_or_config_command(&[String::from("config")], &cwd, &agent_dir)
             .expect("expected config command to be handled");
         assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
-        assert!(output.stdout.contains("Prompt templates:"), "stdout: {}", output.stdout);
-        assert!(output.stdout.contains("review.md"), "stdout: {}", output.stdout);
+        assert!(
+            output.stdout.contains("Prompt templates:"),
+            "stdout: {}",
+            output.stdout
+        );
+        assert!(
+            output.stdout.contains("review.md"),
+            "stdout: {}",
+            output.stdout
+        );
     }
 }
