@@ -1,3 +1,4 @@
+use crate::{Skill, format_skills_for_prompt, load_skills};
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
@@ -31,6 +32,7 @@ pub struct BuildSystemPromptOptions {
     pub append_system_prompt: Option<String>,
     pub cwd: Option<PathBuf>,
     pub context_files: Vec<ContextFile>,
+    pub skills: Vec<Skill>,
     pub date: Option<String>,
     pub readme_path: Option<PathBuf>,
     pub docs_path: Option<PathBuf>,
@@ -48,6 +50,14 @@ pub fn build_default_pi_system_prompt(
     let append_system_prompt = resolve_prompt_input(append_system_prompt)
         .or_else(|| join_prompt_sections(&resources.append_system_prompt));
 
+    let skills = load_skills(crate::LoadSkillsOptions {
+        cwd: cwd.to_path_buf(),
+        agent_dir: Some(agent_dir.to_path_buf()),
+        skill_paths: Vec::new(),
+        include_defaults: true,
+    })
+    .skills;
+
     build_system_prompt(BuildSystemPromptOptions {
         custom_prompt,
         selected_tools: DEFAULT_SELECTED_TOOLS
@@ -58,47 +68,61 @@ pub fn build_default_pi_system_prompt(
         append_system_prompt,
         cwd: Some(cwd.to_path_buf()),
         context_files: resources.context_files,
+        skills,
         ..BuildSystemPromptOptions::default()
     })
 }
 
 pub fn build_system_prompt(options: BuildSystemPromptOptions) -> String {
-    let resolved_cwd = options.cwd.unwrap_or_else(current_dir_fallback);
+    let BuildSystemPromptOptions {
+        custom_prompt,
+        selected_tools,
+        tool_snippets,
+        prompt_guidelines,
+        append_system_prompt,
+        cwd,
+        context_files,
+        skills,
+        date,
+        readme_path,
+        docs_path,
+        examples_path,
+    } = options;
+
+    let resolved_cwd = cwd.unwrap_or_else(current_dir_fallback);
     let prompt_cwd = display_path_posix(&resolved_cwd);
-    let date = options.date.unwrap_or_else(current_utc_date_string);
-    let append_section = options
-        .append_system_prompt
+    let date = date.unwrap_or_else(current_utc_date_string);
+    let append_section = append_system_prompt
         .filter(|value| !value.is_empty())
         .map(|value| format!("\n\n{value}"))
         .unwrap_or_default();
-
-    if let Some(mut prompt) = options.custom_prompt.filter(|value| !value.is_empty()) {
-        if !append_section.is_empty() {
-            prompt.push_str(&append_section);
-        }
-        append_context_files(&mut prompt, &options.context_files);
-        append_prompt_footer(&mut prompt, &date, &prompt_cwd);
-        return prompt;
-    }
-
-    let (readme_path, docs_path, examples_path) = default_pi_docs_paths(
-        options.readme_path,
-        options.docs_path,
-        options.examples_path,
-    );
-    let selected_tools = if options.selected_tools.is_empty() {
+    let selected_tools = if selected_tools.is_empty() {
         DEFAULT_SELECTED_TOOLS
             .into_iter()
             .map(str::to_owned)
             .collect::<Vec<_>>()
     } else {
-        options.selected_tools
+        selected_tools
     };
+
+    if let Some(mut prompt) = custom_prompt.filter(|value| !value.is_empty()) {
+        if !append_section.is_empty() {
+            prompt.push_str(&append_section);
+        }
+        append_context_files(&mut prompt, &context_files);
+        if selected_tools.iter().any(|tool| tool == "read") && !skills.is_empty() {
+            prompt.push_str(&format_skills_for_prompt(&skills));
+        }
+        append_prompt_footer(&mut prompt, &date, &prompt_cwd);
+        return prompt;
+    }
+
+    let (readme_path, docs_path, examples_path) =
+        default_pi_docs_paths(readme_path, docs_path, examples_path);
     let visible_tools = selected_tools
         .iter()
         .filter_map(|name| {
-            options
-                .tool_snippets
+            tool_snippets
                 .get(name)
                 .map(|snippet| format!("- {name}: {snippet}"))
         })
@@ -131,7 +155,7 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions) -> String {
         );
     }
 
-    for guideline in options.prompt_guidelines {
+    for guideline in prompt_guidelines {
         let trimmed = guideline.trim();
         if !trimmed.is_empty() {
             add_guideline(trimmed);
@@ -157,7 +181,10 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions) -> String {
     if !append_section.is_empty() {
         prompt.push_str(&append_section);
     }
-    append_context_files(&mut prompt, &options.context_files);
+    append_context_files(&mut prompt, &context_files);
+    if selected_tools.iter().any(|tool| tool == "read") && !skills.is_empty() {
+        prompt.push_str(&format_skills_for_prompt(&skills));
+    }
     append_prompt_footer(&mut prompt, &date, &prompt_cwd);
 
     prompt

@@ -4,6 +4,7 @@ pub mod file_processor;
 pub mod initial_message;
 mod list_models;
 pub mod print_mode;
+mod resources;
 pub mod runner;
 mod session_picker;
 mod tree_picker;

@@ -10,7 +10,12 @@ use crate::{
     },
     build_initial_message,
     list_models::render_list_models,
-    parse_args, process_file_arguments, resolve_app_mode, run_print_mode,
+    parse_args, process_file_arguments, resolve_app_mode,
+    resources::{
+        LoadedCliResources, build_runtime_system_prompt, build_selected_tools, load_cli_resources,
+        preprocess_prompt_text,
+    },
+    run_print_mode,
     session_picker::SessionPickerComponent,
     to_print_output_mode,
     tree_picker::{TreePickerComponent, TreePickerItem},
@@ -27,8 +32,8 @@ use pi_coding_agent_core::{
     SessionHeader, SessionInfo, SessionManager, build_default_pi_system_prompt,
     calculate_context_tokens, compact, create_coding_agent_core, estimate_context_tokens,
     find_exact_model_reference_match, get_default_session_dir, parse_thinking_level,
-    prepare_compaction, resolve_cli_model, resolve_model_scope, resolve_prompt_input,
-    restore_model_from_session, should_compact,
+    prepare_compaction, resolve_cli_model, resolve_model_scope, restore_model_from_session,
+    should_compact,
 };
 use pi_coding_agent_tui::{
     CustomMessageComponent, DEFAULT_APP_KEYBINDINGS, ExternalEditorCommandRunner,
@@ -1004,6 +1009,15 @@ async fn run_interactive_iteration(
     });
     let shared_runtime_settings = Arc::new(Mutex::new(runtime_settings.clone()));
     eprint!("{}", render_settings_warnings(&runtime_settings.warnings));
+    let resources = load_cli_resources(&parsed, &cwd, agent_dir.as_deref());
+    for warning in &resources.warnings {
+        eprintln!("{warning}");
+    }
+    let (selected_tool_names, selected_tools) = build_selected_tools(
+        &parsed,
+        &cwd,
+        runtime_settings.settings.images.auto_resize_images,
+    );
 
     let scoped_models = if let Some(scoped_models_override) = scoped_models_override {
         scoped_models_override
@@ -1113,12 +1127,20 @@ async fn run_interactive_iteration(
     };
 
     let mut messages = parsed.messages.clone();
-    let initial_message = build_initial_message(
+    let mut initial_message = build_initial_message(
         &mut messages,
         (!processed_files.text.is_empty()).then_some(processed_files.text),
         processed_files.images,
         stdin_content,
     );
+    initial_message.initial_message = initial_message
+        .initial_message
+        .as_deref()
+        .map(|message| preprocess_prompt_text(message, &resources));
+    messages = messages
+        .iter()
+        .map(|message| preprocess_prompt_text(message, &resources))
+        .collect();
 
     let overlay_auth = OverlayAuthSource::new(auth_source);
     if let Err(error) = apply_runtime_api_key_override(
@@ -1147,11 +1169,14 @@ async fn run_interactive_iteration(
         built_in_models,
         models_json_path: models_json_path.clone(),
         cwd: Some(cwd.clone()),
-        tools: None,
-        system_prompt: resolve_system_prompt(
+        tools: Some(selected_tools),
+        system_prompt: build_runtime_system_prompt(
             &default_system_prompt,
-            parsed.system_prompt.as_deref(),
-            parsed.append_system_prompt.as_deref(),
+            &parsed,
+            &cwd,
+            agent_dir.as_deref(),
+            &selected_tool_names,
+            &resources,
         ),
         bootstrap: SessionBootstrapOptions {
             cli_provider: parsed.provider.clone(),
@@ -1255,6 +1280,7 @@ async fn run_interactive_iteration(
         build_interactive_slash_commands(
             created.core.model_registry(),
             interactive_scoped_models.clone(),
+            &resources,
         ),
         cwd.clone(),
     )));
@@ -1322,6 +1348,7 @@ async fn run_interactive_iteration(
         footer_state_handle,
         Arc::clone(&exit_requested),
         Arc::clone(&transition_request),
+        resources.clone(),
     );
     let shell_id = tui.add_child(Box::new(shell));
     let _ = tui.set_focus_child(shell_id);
@@ -1924,7 +1951,7 @@ async fn resolve_interactive_transition(
                 manager: Some(manager),
                 prefill_input: None,
                 initial_status_message: Some(String::from(
-                    "Reloaded keybindings, prompts, and settings",
+                    "Reloaded keybindings, skills, prompts, and settings",
                 )),
                 bootstrap_defaults: Some(BootstrapDefaults::from_model(
                     &session_context.model,
@@ -3306,6 +3333,17 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         .unwrap_or_default();
     stderr.push_str(&render_settings_warnings(&runtime_settings.warnings));
 
+    let resources = load_cli_resources(&parsed, &cwd, agent_dir.as_deref());
+    for warning in &resources.warnings {
+        push_line(&mut stderr, warning);
+    }
+
+    let (selected_tool_names, selected_tools) = build_selected_tools(
+        &parsed,
+        &cwd,
+        runtime_settings.settings.images.auto_resize_images,
+    );
+
     let scoped_models = if let Some(patterns) = parsed.models.as_ref() {
         let registry = ModelRegistry::new(
             auth_source.clone(),
@@ -3351,12 +3389,20 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
     };
 
     let mut messages = parsed.messages.clone();
-    let initial_message = build_initial_message(
+    let mut initial_message = build_initial_message(
         &mut messages,
         (!processed_files.text.is_empty()).then_some(processed_files.text),
         processed_files.images,
         stdin_content,
     );
+    initial_message.initial_message = initial_message
+        .initial_message
+        .as_deref()
+        .map(|message| preprocess_prompt_text(message, &resources));
+    messages = messages
+        .iter()
+        .map(|message| preprocess_prompt_text(message, &resources))
+        .collect();
 
     let overlay_auth = OverlayAuthSource::new(auth_source);
     if let Err(error) = apply_runtime_api_key_override(
@@ -3384,11 +3430,14 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         built_in_models,
         models_json_path: models_json_path.clone(),
         cwd: Some(cwd.clone()),
-        tools: None,
-        system_prompt: resolve_system_prompt(
+        tools: Some(selected_tools),
+        system_prompt: build_runtime_system_prompt(
             &default_system_prompt,
-            parsed.system_prompt.as_deref(),
-            parsed.append_system_prompt.as_deref(),
+            &parsed,
+            &cwd,
+            agent_dir.as_deref(),
+            &selected_tool_names,
+            &resources,
         ),
         bootstrap: SessionBootstrapOptions {
             cli_provider: parsed.provider.clone(),
@@ -3509,6 +3558,7 @@ struct RpcState {
     cwd: PathBuf,
     scoped_models: Vec<ScopedModel>,
     runtime_settings: LoadedRuntimeSettings,
+    resources: LoadedCliResources,
     auto_compaction_enabled: bool,
     auto_retry_enabled: bool,
     is_compacting: Arc<AtomicBool>,
@@ -3523,6 +3573,7 @@ struct RpcSnapshot {
     cwd: PathBuf,
     scoped_models: Vec<ScopedModel>,
     runtime_settings: LoadedRuntimeSettings,
+    resources: LoadedCliResources,
     auto_compaction_enabled: bool,
     is_compacting: Arc<AtomicBool>,
 }
@@ -3565,6 +3616,7 @@ impl RpcShared {
             cwd: state.cwd.clone(),
             scoped_models: state.scoped_models.clone(),
             runtime_settings: state.runtime_settings.clone(),
+            resources: state.resources.clone(),
             auto_compaction_enabled: state.auto_compaction_enabled,
             is_compacting: state.is_compacting.clone(),
         }
@@ -3844,6 +3896,17 @@ fn build_rpc_state(
     manager_override: Option<SessionManager>,
     bootstrap_defaults: Option<BootstrapDefaults>,
 ) -> Result<(RpcState, String), String> {
+    let resources = load_cli_resources(&options.parsed, cwd, options.agent_dir.as_deref());
+    let mut resource_output = String::new();
+    for warning in &resources.warnings {
+        push_line(&mut resource_output, warning);
+    }
+    let (selected_tool_names, selected_tools) = build_selected_tools(
+        &options.parsed,
+        cwd,
+        runtime_settings.settings.images.auto_resize_images,
+    );
+
     let session_support = match manager_override {
         Some(manager_override) => Some(build_session_support(manager_override)),
         None => create_session_support(
@@ -3880,11 +3943,14 @@ fn build_rpc_state(
         built_in_models: options.built_in_models.clone(),
         models_json_path: options.models_json_path.clone(),
         cwd: Some(cwd.to_path_buf()),
-        tools: None,
-        system_prompt: resolve_system_prompt(
+        tools: Some(selected_tools),
+        system_prompt: build_runtime_system_prompt(
             &default_system_prompt,
-            options.parsed.system_prompt.as_deref(),
-            options.parsed.append_system_prompt.as_deref(),
+            &options.parsed,
+            cwd,
+            options.agent_dir.as_deref(),
+            &selected_tool_names,
+            &resources,
         ),
         bootstrap: SessionBootstrapOptions {
             cli_provider: options.parsed.provider.clone(),
@@ -3952,13 +4018,14 @@ fn build_rpc_state(
             cwd: cwd.to_path_buf(),
             scoped_models,
             runtime_settings: runtime_settings.clone(),
+            resources,
             auto_compaction_enabled: runtime_settings.settings.compaction.enabled,
             auto_retry_enabled: true,
             is_compacting: Arc::new(AtomicBool::new(false)),
             event_unsubscribe: None,
             bash_abort_tx: None,
         },
-        bootstrap_output,
+        format!("{resource_output}{bootstrap_output}"),
     ))
 }
 
@@ -4023,20 +4090,21 @@ async fn handle_rpc_input_line(
             };
             let streaming_behavior = optional_string_field(command, "streamingBehavior");
             let snapshot = shared.snapshot();
+            let prepared_message = preprocess_prompt_text(&message, &snapshot.resources);
             if snapshot.core.state().is_streaming {
                 if streaming_behavior.as_deref() == Some("steer") {
-                    queue_rpc_message(&snapshot.core, "steer", message, images);
+                    queue_rpc_message(&snapshot.core, "steer", prepared_message, images);
                     shared.emit_response(id.as_deref(), "prompt", None);
                     return;
                 }
                 if streaming_behavior.as_deref() == Some("followUp") {
-                    queue_rpc_message(&snapshot.core, "follow_up", message, images);
+                    queue_rpc_message(&snapshot.core, "follow_up", prepared_message, images);
                     shared.emit_response(id.as_deref(), "prompt", None);
                     return;
                 }
             }
 
-            let task = spawn_rpc_prompt_task(shared.clone(), id.clone(), message, images);
+            let task = spawn_rpc_prompt_task(shared.clone(), id.clone(), prepared_message, images);
             if let Some(background_tasks) = background_tasks {
                 background_tasks.push(task);
             }
@@ -4057,7 +4125,20 @@ async fn handle_rpc_input_line(
                     return;
                 }
             };
-            queue_rpc_message(&shared.current_core(), "steer", message, images);
+            let resources = {
+                shared
+                    .state
+                    .lock()
+                    .expect("rpc state mutex poisoned")
+                    .resources
+                    .clone()
+            };
+            queue_rpc_message(
+                &shared.current_core(),
+                "steer",
+                preprocess_prompt_text(&message, &resources),
+                images,
+            );
             shared.emit_response(id.as_deref(), "steer", None);
         }
         "follow_up" => {
@@ -4075,7 +4156,20 @@ async fn handle_rpc_input_line(
                     return;
                 }
             };
-            queue_rpc_message(&shared.current_core(), "follow_up", message, images);
+            let resources = {
+                shared
+                    .state
+                    .lock()
+                    .expect("rpc state mutex poisoned")
+                    .resources
+                    .clone()
+            };
+            queue_rpc_message(
+                &shared.current_core(),
+                "follow_up",
+                preprocess_prompt_text(&message, &resources),
+                images,
+            );
             shared.emit_response(id.as_deref(), "follow_up", None);
         }
         "abort" => {
@@ -4646,10 +4740,32 @@ async fn handle_rpc_input_line(
             );
         }
         "get_commands" => {
+            let snapshot = shared.snapshot();
+            let mut commands = snapshot
+                .resources
+                .prompt_templates
+                .iter()
+                .map(|template| {
+                    json!({
+                        "name": template.name,
+                        "description": template.description,
+                        "source": "prompt",
+                        "sourceInfo": template.source_info,
+                    })
+                })
+                .collect::<Vec<_>>();
+            commands.extend(snapshot.resources.skills.iter().map(|skill| {
+                json!({
+                    "name": format!("skill:{}", skill.name),
+                    "description": skill.description,
+                    "source": "skill",
+                    "sourceInfo": skill.source_info,
+                })
+            }));
             shared.emit_response(
                 id.as_deref(),
                 "get_commands",
-                Some(json!({ "commands": Vec::<Value>::new() })),
+                Some(json!({ "commands": commands })),
             );
         }
         other => shared.emit_error(id.as_deref(), other, format!("Unknown command: {other}")),
@@ -5188,6 +5304,7 @@ fn build_initial_user_message(initial_message: crate::InitialMessageResult) -> O
     }
 }
 
+#[cfg(test)]
 fn resolve_system_prompt(
     default_system_prompt: &str,
     override_system_prompt: Option<&str>,
@@ -5199,10 +5316,12 @@ fn resolve_system_prompt(
         return finalized_prompt.to_owned();
     }
 
-    let mut system_prompt = resolve_prompt_input(override_system_prompt)
+    let mut system_prompt = pi_coding_agent_core::resolve_prompt_input(override_system_prompt)
         .unwrap_or_else(|| default_system_prompt.to_string());
 
-    if let Some(append_system_prompt) = resolve_prompt_input(append_system_prompt) {
+    if let Some(append_system_prompt) =
+        pi_coding_agent_core::resolve_prompt_input(append_system_prompt)
+    {
         if !system_prompt.is_empty() && !append_system_prompt.is_empty() {
             system_prompt.push_str("\n\n");
         }
@@ -5495,6 +5614,7 @@ fn install_interactive_auto_compaction(
 fn build_interactive_slash_commands(
     model_registry: Arc<ModelRegistry>,
     scoped_models: Vec<ScopedModel>,
+    resources: &LoadedCliResources,
 ) -> Vec<SlashCommand> {
     #[derive(Clone)]
     struct ModelCommandItem {
@@ -5509,7 +5629,7 @@ fn build_interactive_slash_commands(
     let oauth_providers_for_login = oauth_providers.clone();
     let oauth_providers_for_logout = oauth_providers.clone();
 
-    vec![
+    let mut commands = vec![
         simple_slash_command("settings", "Open settings menu"),
         SlashCommand {
             name: String::from("model"),
@@ -5581,13 +5701,35 @@ fn build_interactive_slash_commands(
         simple_slash_command("new", "Start a new session"),
         simple_slash_command("compact", "Compact the current session context"),
         simple_slash_command("resume", "Resume a different session"),
-        simple_slash_command("reload", "Reload keybindings, prompts, and settings"),
+        simple_slash_command(
+            "reload",
+            "Reload keybindings, skills, prompts, and settings",
+        ),
         SlashCommand {
             name: String::from("quit"),
             description: Some(String::from("Quit pi")),
             argument_completions: None,
         },
-    ]
+    ];
+
+    commands.extend(
+        resources
+            .prompt_templates
+            .iter()
+            .map(|template| SlashCommand {
+                name: template.name.clone(),
+                description: (!template.description.is_empty())
+                    .then_some(template.description.clone()),
+                argument_completions: None,
+            }),
+    );
+    commands.extend(resources.skills.iter().map(|skill| SlashCommand {
+        name: format!("skill:{}", skill.name),
+        description: Some(skill.description.clone()),
+        argument_completions: None,
+    }));
+
+    commands
 }
 
 fn simple_slash_command(name: &str, description: &str) -> SlashCommand {
@@ -6779,6 +6921,7 @@ fn install_interactive_submit_handler(
     footer_state_handle: FooterStateHandle,
     exit_requested: Arc<AtomicBool>,
     transition_request: Arc<Mutex<Option<InteractiveTransitionRequest>>>,
+    resources: LoadedCliResources,
 ) {
     let cycle_forward_core = core.clone();
     let cycle_forward_model_registry = Arc::clone(&model_registry);
@@ -6929,8 +7072,9 @@ fn install_interactive_submit_handler(
         status_handle.set_message("Working...");
         let core = core.clone();
         let status_handle = status_handle.clone();
+        let prepared = preprocess_prompt_text(&value, &resources);
         tokio::spawn(async move {
-            if let Err(error) = core.prompt_text(value).await {
+            if let Err(error) = core.prompt_text(prepared).await {
                 status_handle.set_message(format!("Error: {error}"));
             }
         });
@@ -7681,19 +7825,9 @@ fn render_no_models_message(models_json_path: Option<&Path>) -> String {
 }
 
 fn unsupported_flag_message(parsed: &Args) -> Option<String> {
-    if parsed.no_tools
-        || parsed.tools.is_some()
-        || parsed.extensions.is_some()
-        || parsed.no_extensions
-        || parsed.skills.is_some()
-        || parsed.no_skills
-        || parsed.prompt_templates.is_some()
-        || parsed.no_prompt_templates
-        || parsed.themes.is_some()
-        || parsed.no_themes
-    {
+    if parsed.extensions.is_some() || parsed.no_extensions {
         return Some(String::from(
-            "Resource and tool selection flags are not supported in the Rust CLI yet",
+            "Extension loading is not supported in the Rust CLI yet",
         ));
     }
     None
@@ -8297,10 +8431,11 @@ mod tests {
             Vec::new(),
             None,
         ));
-        let commands = build_interactive_slash_commands(registry, Vec::new())
-            .into_iter()
-            .map(|command| command.name)
-            .collect::<Vec<_>>();
+        let commands =
+            build_interactive_slash_commands(registry, Vec::new(), &LoadedCliResources::default())
+                .into_iter()
+                .map(|command| command.name)
+                .collect::<Vec<_>>();
 
         for command in [
             "settings",

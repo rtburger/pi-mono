@@ -1,6 +1,9 @@
 mod bash;
 mod edit;
+mod find;
+mod grep;
 mod image;
+mod ls;
 mod path_utils;
 mod read;
 mod truncate;
@@ -8,10 +11,13 @@ mod write;
 
 pub use bash::{bash_tool_definition, create_bash_tool};
 pub use edit::{create_edit_tool, edit_tool_definition};
+pub use find::{create_find_tool, find_tool_definition};
+pub use grep::{create_grep_tool, grep_tool_definition};
 pub use image::{
     DEFAULT_MAX_INLINE_IMAGE_BYTES, ImageResizeOptions, ResizedImage, format_dimension_note,
     resize_image_bytes,
 };
+pub use ls::{create_ls_tool, ls_tool_definition};
 pub use path_utils::{resolve_read_path, resolve_to_cwd};
 pub use read::{
     create_read_tool, create_read_tool_with_auto_resize_flag, detect_supported_image_mime_type,

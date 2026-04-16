@@ -15,6 +15,7 @@ pi-events = { path = "../pi-events" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 thiserror.workspace = true
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio.workspace = true

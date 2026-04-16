@@ -3,12 +3,16 @@ pub mod bootstrap;
 pub mod compaction;
 pub mod config_value;
 pub mod footer_data;
+mod frontmatter;
 pub mod messages;
 pub mod model_registry;
 pub mod model_resolver;
+pub mod prompt_templates;
+pub mod resource_types;
 pub mod runtime;
 pub mod session_manager;
 pub mod skill_block;
+pub mod skills;
 pub mod system_prompt;
 
 pub use auth::{
@@ -41,6 +45,11 @@ pub use model_resolver::{
     find_exact_model_reference_match, find_initial_model, parse_model_pattern,
     parse_thinking_level, resolve_cli_model, resolve_model_scope, restore_model_from_session,
 };
+pub use prompt_templates::{
+    LoadPromptTemplatesOptions, LoadPromptTemplatesResult, PromptTemplate, expand_prompt_template,
+    load_prompt_templates, parse_command_args, substitute_args,
+};
+pub use resource_types::{ResourceDiagnostic, SourceInfo};
 pub use runtime::{
     CodingAgentCore, CodingAgentCoreOptions, CreateCodingAgentCoreResult, create_coding_agent_core,
 };
@@ -51,6 +60,10 @@ pub use session_manager::{
     get_latest_compaction_entry, get_sessions_dir, load_entries_from_file, parse_session_entries,
 };
 pub use skill_block::{ParsedSkillBlock, parse_skill_block};
+pub use skills::{
+    LoadSkillsOptions, LoadSkillsResult, Skill, expand_skill_command, format_skills_for_prompt,
+    load_skills,
+};
 pub use system_prompt::{
     BuildSystemPromptOptions, ContextFile, LoadedSystemPromptResources,
     build_default_pi_system_prompt, build_system_prompt, discover_append_system_prompt_file,
