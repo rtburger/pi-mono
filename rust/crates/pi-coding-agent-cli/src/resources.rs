@@ -1,4 +1,9 @@
-use crate::{Args, ToolName};
+use crate::{
+    Args, ToolName,
+    package_manager::{
+        DefaultPackageManager, PathMetadata, ResolveExtensionSourcesOptions, ResolvedPaths,
+    },
+};
 use pi_agent::AgentTool;
 use pi_coding_agent_core::{
     BuildSystemPromptOptions, PromptTemplate, Skill, SourceInfo, build_system_prompt,
@@ -12,7 +17,7 @@ use pi_coding_agent_tools::{
 use pi_coding_agent_tui::{LoadThemesOptions, Theme, load_themes};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
 };
 
@@ -38,47 +43,249 @@ pub fn load_cli_resources(
     agent_dir: Option<&Path>,
 ) -> LoadedCliResources {
     let mut warnings = Vec::new();
+    let mut metadata_by_path = BTreeMap::<String, PathMetadata>::new();
 
     if let Some(extension_paths) = parsed.extensions.as_ref() {
-        warnings.extend(validate_resource_paths(cwd, extension_paths, "Extension"));
+        warnings.extend(validate_local_extension_sources(cwd, extension_paths));
+    }
+    warnings.extend(validate_resource_paths(
+        cwd,
+        parsed.skills.as_deref().unwrap_or(&[]),
+        "Skill",
+    ));
+    warnings.extend(validate_resource_paths(
+        cwd,
+        parsed.prompt_templates.as_deref().unwrap_or(&[]),
+        "Prompt template",
+    ));
+    warnings.extend(validate_resource_paths(
+        cwd,
+        parsed.themes.as_deref().unwrap_or(&[]),
+        "Theme",
+    ));
+
+    let mut configured_paths = ResolvedPaths::default();
+    let mut temporary_extension_paths = ResolvedPaths::default();
+
+    if let Some(agent_dir) = agent_dir {
+        let package_manager = DefaultPackageManager::new(cwd.to_path_buf(), agent_dir.to_path_buf());
+        match package_manager.resolve() {
+            Ok(output) => {
+                warnings.extend(output.warnings.iter().map(format_settings_warning));
+                configured_paths = output.resolved;
+            }
+            Err(error) => warnings.push(format!("Warning: {error}")),
+        }
+
+        if let Some(extension_sources) = parsed.extensions.as_ref() {
+            match package_manager.resolve_extension_sources(
+                extension_sources,
+                ResolveExtensionSourcesOptions {
+                    temporary: true,
+                    local: false,
+                },
+            ) {
+                Ok(output) => {
+                    temporary_extension_paths = output.resolved;
+                }
+                Err(error) => warnings.push(format!("Warning: {error}")),
+            }
+        }
     }
 
-    let prompt_templates =
-        load_prompt_templates(pi_coding_agent_core::LoadPromptTemplatesOptions {
-            cwd: cwd.to_path_buf(),
-            agent_dir: agent_dir.map(Path::to_path_buf),
-            prompt_paths: parsed.prompt_templates.clone().unwrap_or_default(),
-            include_defaults: !parsed.no_prompt_templates,
-        });
+    let configured_prompt_paths = if agent_dir.is_some() && !parsed.no_prompt_templates {
+        enabled_resource_paths(&configured_paths.prompts, &mut metadata_by_path)
+    } else {
+        Vec::new()
+    };
+    let configured_skill_paths = if agent_dir.is_some() && !parsed.no_skills {
+        enabled_resource_paths(&configured_paths.skills, &mut metadata_by_path)
+    } else {
+        Vec::new()
+    };
+    let configured_theme_paths = if agent_dir.is_some() && !parsed.no_themes {
+        enabled_resource_paths(&configured_paths.themes, &mut metadata_by_path)
+    } else {
+        Vec::new()
+    };
+
+    let temporary_prompt_paths = enabled_resource_paths(&temporary_extension_paths.prompts, &mut metadata_by_path);
+    let temporary_skill_paths = enabled_resource_paths(&temporary_extension_paths.skills, &mut metadata_by_path);
+    let temporary_theme_paths = enabled_resource_paths(&temporary_extension_paths.themes, &mut metadata_by_path);
+
+    let prompt_paths = merge_unique_paths(
+        &temporary_prompt_paths,
+        &configured_prompt_paths,
+        parsed.prompt_templates.as_deref().unwrap_or(&[]),
+        cwd,
+    );
+    let skill_paths = merge_unique_paths(
+        &temporary_skill_paths,
+        &configured_skill_paths,
+        parsed.skills.as_deref().unwrap_or(&[]),
+        cwd,
+    );
+    let theme_paths = merge_unique_paths(
+        &temporary_theme_paths,
+        &configured_theme_paths,
+        parsed.themes.as_deref().unwrap_or(&[]),
+        cwd,
+    );
+
+    let prompt_templates = load_prompt_templates(pi_coding_agent_core::LoadPromptTemplatesOptions {
+        cwd: cwd.to_path_buf(),
+        agent_dir: agent_dir.map(Path::to_path_buf),
+        prompt_paths,
+        include_defaults: agent_dir.is_none() && !parsed.no_prompt_templates,
+    });
     warnings.extend(
         prompt_templates
             .diagnostics
             .iter()
             .map(format_resource_diagnostic),
     );
+    let mut prompt_templates = prompt_templates.prompts;
+    apply_prompt_source_info(&mut prompt_templates, &metadata_by_path);
 
     let skills = load_skills(pi_coding_agent_core::LoadSkillsOptions {
         cwd: cwd.to_path_buf(),
         agent_dir: agent_dir.map(Path::to_path_buf),
-        skill_paths: parsed.skills.clone().unwrap_or_default(),
-        include_defaults: !parsed.no_skills,
+        skill_paths,
+        include_defaults: agent_dir.is_none() && !parsed.no_skills,
     });
     warnings.extend(skills.diagnostics.iter().map(format_resource_diagnostic));
+    let mut skills = skills.skills;
+    apply_skill_source_info(&mut skills, &metadata_by_path);
 
     let themes = load_themes(LoadThemesOptions {
         cwd: cwd.to_path_buf(),
         agent_dir: agent_dir.map(Path::to_path_buf),
-        theme_paths: parsed.themes.clone().unwrap_or_default(),
-        include_defaults: !parsed.no_themes,
+        theme_paths,
+        include_defaults: agent_dir.is_none() && !parsed.no_themes,
     });
     warnings.extend(themes.diagnostics.iter().map(format_resource_diagnostic));
+    let themes = themes.themes;
 
     LoadedCliResources {
-        prompt_templates: prompt_templates.prompts,
-        skills: skills.skills,
-        themes: themes.themes,
+        prompt_templates,
+        skills,
+        themes,
         warnings,
     }
+}
+
+fn enabled_resource_paths(
+    resources: &[crate::package_manager::ResolvedResource],
+    metadata_by_path: &mut BTreeMap<String, PathMetadata>,
+) -> Vec<String> {
+    let mut enabled = Vec::new();
+    for resource in resources {
+        if !resource.enabled {
+            continue;
+        }
+        metadata_by_path.insert(normalize_path(&resource.path), resource.metadata.clone());
+        enabled.push(resource.path.clone());
+    }
+    enabled
+}
+
+fn merge_unique_paths(
+    primary: &[String],
+    secondary: &[String],
+    additional: &[String],
+    cwd: &Path,
+) -> Vec<String> {
+    let mut merged = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for path in primary.iter().chain(secondary.iter()) {
+        let normalized = normalize_path(path);
+        if seen.insert(normalized) {
+            merged.push(path.clone());
+        }
+    }
+
+    for path in additional {
+        let resolved = resolve_from_cwd(cwd, path);
+        let normalized = normalize_path(&resolved.display().to_string());
+        if seen.insert(normalized) {
+            merged.push(path.clone());
+        }
+    }
+
+    merged
+}
+
+fn apply_skill_source_info(skills: &mut [Skill], metadata_by_path: &BTreeMap<String, PathMetadata>) {
+    for skill in skills {
+        if let Some(metadata) = metadata_by_path.get(&normalize_path(&skill.file_path)) {
+            skill.source_info = source_info_from_metadata(&skill.file_path, metadata);
+        }
+    }
+}
+
+fn apply_prompt_source_info(
+    prompts: &mut [PromptTemplate],
+    metadata_by_path: &BTreeMap<String, PathMetadata>,
+) {
+    for prompt in prompts {
+        if let Some(metadata) = metadata_by_path.get(&normalize_path(&prompt.file_path)) {
+            prompt.source_info = source_info_from_metadata(&prompt.file_path, metadata);
+        }
+    }
+}
+
+fn source_info_from_metadata(path: &str, metadata: &PathMetadata) -> SourceInfo {
+    SourceInfo {
+        path: path.to_owned(),
+        source: metadata.source.clone(),
+        scope: metadata.scope.as_str().to_owned(),
+        origin: metadata.origin.as_str().to_owned(),
+        base_dir: metadata.base_dir.clone(),
+    }
+}
+
+fn normalize_path(path: &str) -> String {
+    let mut normalized = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+        }
+    }
+    normalized.display().to_string().replace('\\', "/")
+}
+
+fn format_settings_warning(warning: &pi_config::SettingsWarning) -> String {
+    format!(
+        "Warning ({} settings): {}",
+        warning.scope.label(),
+        warning.message
+    )
+}
+
+fn validate_local_extension_sources(cwd: &Path, paths: &[String]) -> Vec<String> {
+    let local_paths = paths
+        .iter()
+        .filter(|path| is_local_source(path))
+        .cloned()
+        .collect::<Vec<_>>();
+    validate_resource_paths(cwd, &local_paths, "Extension")
+}
+
+fn is_local_source(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.starts_with("npm:")
+        && !trimmed.starts_with("git:")
+        && !trimmed.starts_with("http://")
+        && !trimmed.starts_with("https://")
+        && !trimmed.starts_with("ssh://")
+        && !trimmed.starts_with("git://")
 }
 
 pub fn extend_cli_resources_from_extensions(

@@ -1,4 +1,5 @@
 use super::TextEmitter;
+use crate::package_manager::{DefaultPackageManager, ResolveExtensionSourcesOptions};
 use pi_coding_agent_core::SourceInfo;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -89,6 +90,53 @@ impl RpcExtensionHost {
     pub async fn start(
         options: RpcExtensionHostStartOptions,
     ) -> Result<RpcExtensionHostStartResult, String> {
+        let package_manager = options
+            .agent_dir
+            .as_ref()
+            .map(|agent_dir| DefaultPackageManager::new(options.cwd.clone(), agent_dir.clone()));
+
+        let resolved_configured_extensions = package_manager
+            .as_ref()
+            .map(|package_manager| package_manager.resolve())
+            .transpose()?
+            .map(|output| {
+                output
+                    .resolved
+                    .extensions
+                    .into_iter()
+                    .filter(|resource| resource.enabled)
+                    .map(|resource| resource.path)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let resolved_temporary_extensions = package_manager
+            .as_ref()
+            .filter(|_| !options.extension_paths.is_empty())
+            .map(|package_manager| {
+                package_manager.resolve_extension_sources(
+                    &options.extension_paths,
+                    ResolveExtensionSourcesOptions {
+                        temporary: true,
+                        local: false,
+                    },
+                )
+            })
+            .transpose()?
+            .map(|output| {
+                output
+                    .resolved
+                    .extensions
+                    .into_iter()
+                    .filter(|resource| resource.enabled)
+                    .map(|resource| resource.path)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let resolved_extension_paths = merge_extension_paths(
+            &resolved_temporary_extensions,
+            &resolved_configured_extensions,
+        );
+
         let repo_root = repo_root();
         let sidecar_path = sidecar_path();
 
@@ -140,7 +188,7 @@ impl RpcExtensionHost {
                 json!({
                     "cwd": options.cwd,
                     "agentDir": options.agent_dir,
-                    "extensions": options.extension_paths,
+                    "extensions": resolved_extension_paths,
                     "noExtensions": options.no_extensions,
                     "flagValues": options.flag_values,
                     "state": options.state,
@@ -334,10 +382,31 @@ pub fn should_start_extension_host(
         return true;
     }
 
-    cwd.join(".pi").join("extensions").exists()
+    if cwd.join(".pi").join("extensions").exists()
         || agent_dir
             .map(|agent_dir| agent_dir.join("extensions").exists())
             .unwrap_or(false)
+    {
+        return true;
+    }
+
+    agent_dir.is_some_and(|agent_dir| {
+        DefaultPackageManager::new(cwd.to_path_buf(), agent_dir.to_path_buf())
+            .has_explicit_extension_configuration()
+    })
+}
+
+fn merge_extension_paths(primary: &[String], secondary: &[String]) -> Vec<String> {
+    let mut merged = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for path in primary.iter().chain(secondary.iter()) {
+        if seen.insert(path.clone()) {
+            merged.push(path.clone());
+        }
+    }
+
+    merged
 }
 
 fn repo_root() -> PathBuf {
@@ -456,5 +525,43 @@ fn reject_all_pending(inner: &RpcExtensionHostInner, message: &str) {
     drop(pending);
     for (_, sender) in senders {
         let _ = sender.send(Err(message.to_owned()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_start_extension_host;
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "pi-coding-agent-cli-rpc-extensions-{prefix}-{unique}"
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn starts_extension_host_when_settings_declare_packages() {
+        let temp_dir = unique_temp_dir("settings");
+        let cwd = temp_dir.join("project");
+        let agent_dir = temp_dir.join("agent");
+        fs::create_dir_all(cwd.join(".pi")).unwrap();
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::write(
+            cwd.join(".pi").join("settings.json"),
+            "{\n  \"packages\": [\"/tmp/demo-pkg\"]\n}\n",
+        )
+        .unwrap();
+
+        assert!(should_start_extension_host(&cwd, Some(&agent_dir), &[], false));
     }
 }

@@ -1,4 +1,6 @@
-use pi_config::{SettingsScope, load_runtime_settings};
+use pi_config::{
+    PackageSource, SettingsScope, load_resource_settings, load_runtime_settings,
+};
 use std::{
     fs,
     path::PathBuf,
@@ -167,6 +169,78 @@ fn project_settings_override_enabled_models() {
     assert_eq!(
         loaded.settings.enabled_models,
         Some(vec![String::from("project-a")])
+    );
+    assert!(loaded.warnings.is_empty());
+}
+
+#[test]
+fn load_resource_settings_reads_scoped_package_configuration() {
+    let cwd = unique_temp_dir("resource-settings-cwd");
+    let agent_dir = unique_temp_dir("resource-settings-agent");
+    fs::write(
+        agent_dir.join("settings.json"),
+        r#"{
+  "npmCommand": ["mise", "exec", "node@20", "--", "npm"],
+  "packages": [
+    "npm:global-pkg",
+    {
+      "source": "./global-local-pkg",
+      "extensions": ["extensions"],
+      "skills": []
+    }
+  ],
+  "extensions": ["extensions/global.ts"],
+  "skills": ["skills"],
+  "prompts": ["prompts"],
+  "themes": ["themes"]
+}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(cwd.join(".pi")).unwrap();
+    fs::write(
+        cwd.join(".pi").join("settings.json"),
+        r#"{
+  "packages": ["./project-pkg"],
+  "extensions": ["extensions/project.ts"],
+  "skills": ["skills/project"],
+  "prompts": ["prompts/project.md"],
+  "themes": ["themes/project.json"]
+}"#,
+    )
+    .unwrap();
+
+    let loaded = load_resource_settings(&cwd, &agent_dir);
+
+    assert_eq!(
+        loaded.global.npm_command,
+        Some(vec![
+            String::from("mise"),
+            String::from("exec"),
+            String::from("node@20"),
+            String::from("--"),
+            String::from("npm"),
+        ])
+    );
+    assert_eq!(loaded.global.packages.len(), 2);
+    assert_eq!(loaded.global.packages[0], PackageSource::Plain(String::from("npm:global-pkg")));
+    assert!(loaded.global.packages[1].is_filtered());
+    assert_eq!(loaded.project.packages.len(), 1);
+    assert_eq!(
+        loaded.project.packages[0],
+        PackageSource::Plain(String::from("./project-pkg"))
+    );
+    assert_eq!(
+        loaded.global.extensions,
+        vec![String::from("extensions/global.ts")]
+    );
+    assert_eq!(loaded.project.skills, vec![String::from("skills/project")]);
+    assert_eq!(
+        loaded.project.prompts,
+        vec![String::from("prompts/project.md")]
+    );
+    assert_eq!(
+        loaded.project.themes,
+        vec![String::from("themes/project.json")]
     );
     assert!(loaded.warnings.is_empty());
 }

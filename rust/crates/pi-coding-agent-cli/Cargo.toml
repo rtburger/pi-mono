@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 base64 = "0.22"
+globset = "0.4"
 pi-agent = { path = "../pi-agent" }
 pi-ai = { path = "../pi-ai" }
 pi-coding-agent-core = { path = "../pi-coding-agent-core" }

@@ -1,8 +1,8 @@
 use pi_ai::{StreamOptions, built_in_models};
 use pi_coding_agent_cli::{
     AppMode, AuthFileSource, ChainedAuthSource, EnvAuthSource, RunCommandOptions,
-    finalize_system_prompt, parse_args, resolve_app_mode, run_command, run_interactive_command,
-    run_rpc_command,
+    finalize_system_prompt, handle_package_or_config_command, parse_args, resolve_app_mode,
+    run_command, run_interactive_command, run_rpc_command,
 };
 use pi_coding_agent_core::{build_default_pi_system_prompt, refresh_auth_file_oauth};
 use pi_coding_agent_tui::migrate_keybindings_file;
@@ -27,9 +27,22 @@ async fn main() -> ExitCode {
     refresh_auth_file_oauth(&auth_path).await;
 
     let args = env::args().skip(1).collect::<Vec<_>>();
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Some(result) = handle_package_or_config_command(&args, &cwd, &agent_dir) {
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
+        }
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        return if result.exit_code == 0 {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(result.exit_code as u8)
+        };
+    }
     let parsed = parse_args(&args);
     let app_mode = resolve_app_mode(&parsed, stdin_is_tty);
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let auth_source = Arc::new(ChainedAuthSource::new(vec![
         Arc::new(AuthFileSource::new(auth_path)),
         Arc::new(EnvAuthSource::new()),

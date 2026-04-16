@@ -3,6 +3,8 @@ pub mod auth;
 pub mod file_processor;
 pub mod initial_message;
 mod list_models;
+pub mod package_commands;
+pub mod package_manager;
 pub mod print_mode;
 mod resources;
 pub mod runner;
@@ -17,6 +19,11 @@ pub use args::{
 pub use auth::{EnvAuthSource, OverlayAuthSource};
 pub use file_processor::{ProcessFileOptions, ProcessedFiles, process_file_arguments};
 pub use initial_message::{InitialMessageResult, build_initial_message};
+pub use package_commands::{PackageCommandOutput, handle_package_or_config_command};
+pub use package_manager::{
+    DefaultPackageManager, PathMetadata, ResolvedPaths, ResolvedResource, ResourceOrigin,
+    ResourceScope, ResolveExtensionSourcesOptions,
+};
 pub use pi_coding_agent_core::{AuthFileSource, ChainedAuthSource};
 pub use print_mode::{PrintModeOptions, PrintModeRunResult, run_print_mode};
 pub use runner::{

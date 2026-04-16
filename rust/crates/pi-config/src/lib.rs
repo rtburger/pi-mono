@@ -79,6 +79,51 @@ pub struct RuntimeSettings {
     pub enabled_models: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilteredPackageSource {
+    pub source: String,
+    pub extensions: Option<Vec<String>>,
+    pub skills: Option<Vec<String>>,
+    pub prompts: Option<Vec<String>>,
+    pub themes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageSource {
+    Plain(String),
+    Filtered(FilteredPackageSource),
+}
+
+impl PackageSource {
+    pub fn source(&self) -> &str {
+        match self {
+            Self::Plain(source) => source,
+            Self::Filtered(source) => &source.source,
+        }
+    }
+
+    pub fn is_filtered(&self) -> bool {
+        matches!(self, Self::Filtered(_))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResourceSettings {
+    pub npm_command: Option<Vec<String>>,
+    pub packages: Vec<PackageSource>,
+    pub extensions: Vec<String>,
+    pub skills: Vec<String>,
+    pub prompts: Vec<String>,
+    pub themes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LoadedResourceSettings {
+    pub global: ResourceSettings,
+    pub project: ResourceSettings,
+    pub warnings: Vec<SettingsWarning>,
+}
+
 impl Default for RuntimeSettings {
     fn default() -> Self {
         Self {
@@ -112,6 +157,25 @@ struct RawSettings {
     editor_padding_x: Option<f64>,
     autocomplete_max_visible: Option<f64>,
     enabled_models: Option<Vec<String>>,
+    npm_command: Option<Vec<String>>,
+    packages: Option<Vec<RawPackageSource>>,
+    extensions: Option<Vec<String>>,
+    skills: Option<Vec<String>>,
+    prompts: Option<Vec<String>>,
+    themes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawPackageSource {
+    Plain(String),
+    Filtered {
+        source: String,
+        extensions: Option<Vec<String>>,
+        skills: Option<Vec<String>>,
+        prompts: Option<Vec<String>>,
+        themes: Option<Vec<String>>,
+    },
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -148,6 +212,25 @@ pub fn load_runtime_settings(cwd: &Path, agent_dir: &Path) -> LoadedRuntimeSetti
     );
     apply_settings_file(
         &mut loaded,
+        SettingsScope::Project,
+        cwd.join(CONFIG_DIR_NAME).join(SETTINGS_FILE_NAME),
+    );
+
+    loaded
+}
+
+pub fn load_resource_settings(cwd: &Path, agent_dir: &Path) -> LoadedResourceSettings {
+    let mut loaded = LoadedResourceSettings::default();
+
+    apply_resource_settings_file(
+        &mut loaded.global,
+        &mut loaded.warnings,
+        SettingsScope::Global,
+        agent_dir.join(SETTINGS_FILE_NAME),
+    );
+    apply_resource_settings_file(
+        &mut loaded.project,
+        &mut loaded.warnings,
         SettingsScope::Project,
         cwd.join(CONFIG_DIR_NAME).join(SETTINGS_FILE_NAME),
     );
@@ -213,6 +296,52 @@ fn apply_settings_file(loaded: &mut LoadedRuntimeSettings, scope: SettingsScope,
     if let Some(enabled_models) = parsed.enabled_models {
         loaded.settings.enabled_models = Some(enabled_models);
     }
+}
+
+fn apply_resource_settings_file(
+    target: &mut ResourceSettings,
+    warnings: &mut Vec<SettingsWarning>,
+    scope: SettingsScope,
+    path: PathBuf,
+) {
+    let Some(parsed) = read_settings_file(&scope, &path, warnings) else {
+        return;
+    };
+
+    target.npm_command = parsed
+        .npm_command
+        .map(|argv| {
+            argv.into_iter()
+                .map(|entry| entry.trim().to_owned())
+                .filter(|entry| !entry.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|argv| !argv.is_empty());
+    target.packages = parsed
+        .packages
+        .unwrap_or_default()
+        .into_iter()
+        .map(|package| match package {
+            RawPackageSource::Plain(source) => PackageSource::Plain(source),
+            RawPackageSource::Filtered {
+                source,
+                extensions,
+                skills,
+                prompts,
+                themes,
+            } => PackageSource::Filtered(FilteredPackageSource {
+                source,
+                extensions,
+                skills,
+                prompts,
+                themes,
+            }),
+        })
+        .collect();
+    target.extensions = parsed.extensions.unwrap_or_default();
+    target.skills = parsed.skills.unwrap_or_default();
+    target.prompts = parsed.prompts.unwrap_or_default();
+    target.themes = parsed.themes.unwrap_or_default();
 }
 
 fn read_settings_file(

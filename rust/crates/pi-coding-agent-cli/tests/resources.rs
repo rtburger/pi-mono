@@ -339,6 +339,114 @@ async fn run_command_warns_for_missing_extension_paths() {
 }
 
 #[tokio::test]
+async fn run_command_print_mode_loads_prompt_templates_from_project_package_settings() {
+    let provider = unique_name("package-prompt-provider");
+    let model_id = unique_name("package-prompt-model");
+    let (api, recorded) = register_recording_provider("done");
+    let built_in_model = model(&api, &provider, &model_id);
+    let cwd = unique_temp_dir("resources-package-prompt");
+    let agent_dir = cwd.join("agent");
+    let package_dir = cwd.join("demo-package");
+    fs::create_dir_all(agent_dir.clone()).unwrap();
+    fs::create_dir_all(cwd.join(".pi")).unwrap();
+    fs::create_dir_all(package_dir.join("prompts")).unwrap();
+    fs::write(
+        package_dir.join("prompts").join("review.md"),
+        "Package review $1\n",
+    )
+    .unwrap();
+    fs::write(
+        cwd.join(".pi").join("settings.json"),
+        format!("{{\n  \"packages\": [\"{}\"]\n}}\n", package_dir.display()),
+    )
+    .unwrap();
+
+    let result = run_command(RunCommandOptions {
+        args: vec![
+            String::from("-p"),
+            String::from("--provider"),
+            provider.clone(),
+            String::from("--model"),
+            model_id.clone(),
+            String::from("/review src/lib.rs"),
+        ],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            provider.as_str(),
+            "token",
+        )])),
+        built_in_models: vec![built_in_model],
+        models_json_path: None,
+        agent_dir: Some(agent_dir),
+        cwd: cwd.clone(),
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+    let request = recorded.lock().unwrap().clone();
+    let context = request.context.expect("expected recorded context");
+    assert_eq!(last_user_text(&context), "Package review src/lib.rs\n");
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
+async fn run_command_print_mode_loads_prompt_templates_from_temporary_extension_packages() {
+    let provider = unique_name("temporary-package-provider");
+    let model_id = unique_name("temporary-package-model");
+    let (api, recorded) = register_recording_provider("done");
+    let built_in_model = model(&api, &provider, &model_id);
+    let cwd = unique_temp_dir("resources-temporary-package-prompt");
+    let agent_dir = cwd.join("agent");
+    let package_dir = cwd.join("temporary-package");
+    fs::create_dir_all(agent_dir.clone()).unwrap();
+    fs::create_dir_all(package_dir.join("prompts")).unwrap();
+    fs::write(
+        package_dir.join("prompts").join("review.md"),
+        "Temporary review $1\n",
+    )
+    .unwrap();
+
+    let result = run_command(RunCommandOptions {
+        args: vec![
+            String::from("-p"),
+            String::from("--provider"),
+            provider.clone(),
+            String::from("--model"),
+            model_id.clone(),
+            String::from("--extension"),
+            package_dir.to_string_lossy().into_owned(),
+            String::from("/review src/main.rs"),
+        ],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            provider.as_str(),
+            "token",
+        )])),
+        built_in_models: vec![built_in_model],
+        models_json_path: None,
+        agent_dir: Some(agent_dir),
+        cwd: cwd.clone(),
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+    let request = recorded.lock().unwrap().clone();
+    let context = request.context.expect("expected recorded context");
+    assert_eq!(last_user_text(&context), "Temporary review src/main.rs\n");
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
 async fn run_command_rpc_get_commands_lists_prompt_templates_and_skills() {
     let provider = unique_name("rpc-resources-provider");
     let model_id = unique_name("rpc-resources-model");
