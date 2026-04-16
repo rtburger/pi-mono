@@ -25,7 +25,8 @@ use crate::{
 };
 use pi_agent::{AgentUnsubscribe, BeforeToolCallResult, ThinkingLevel};
 use pi_ai::{
-    StreamOptions, ThinkingBudgets, is_context_overflow, models_are_equal, supports_xhigh,
+    StreamOptions, ThinkingBudgets, Transport, is_context_overflow, models_are_equal,
+    supports_xhigh,
 };
 use pi_coding_agent_core::{
     AuthSource, BootstrapDiagnosticLevel, CodingAgentCore, CodingAgentCoreError,
@@ -1520,6 +1521,7 @@ async fn run_interactive_iteration(
     if let Some(session_support) = session_support.as_ref() {
         stream_options.session_id = Some(session_support.session_id.clone());
     }
+    apply_runtime_transport_preference(&mut stream_options, &parsed, &runtime_settings);
 
     let created = create_coding_agent_core(CodingAgentCoreOptions {
         auth_source: Arc::new(overlay_auth),
@@ -3967,6 +3969,7 @@ async fn run_command_with_terminal_factory(
     if let Some(session_support) = session_support.as_ref() {
         stream_options.session_id = Some(session_support.session_id.clone());
     }
+    apply_runtime_transport_preference(&mut stream_options, &parsed, &runtime_settings);
 
     let created = create_coding_agent_core(CodingAgentCoreOptions {
         auth_source: Arc::new(overlay_auth),
@@ -4549,6 +4552,7 @@ async fn build_rpc_state(
     if let Some(session_support) = session_support.as_ref() {
         stream_options.session_id = Some(session_support.session_id.clone());
     }
+    apply_runtime_transport_preference(&mut stream_options, &options.parsed, &runtime_settings);
 
     let default_system_prompt = resolve_interactive_default_system_prompt(
         &options.default_system_prompt,
@@ -6247,6 +6251,18 @@ fn apply_runtime_api_key_override(
     }
 
     Err(API_KEY_MODEL_REQUIREMENT.into())
+}
+
+fn apply_runtime_transport_preference(
+    stream_options: &mut StreamOptions,
+    parsed: &Args,
+    runtime_settings: &LoadedRuntimeSettings,
+) {
+    if let Some(transport) = parsed.transport.or(stream_options.transport) {
+        stream_options.transport = Some(transport);
+    } else if runtime_settings.settings.transport != Transport::Sse {
+        stream_options.transport = Some(runtime_settings.settings.transport);
+    }
 }
 
 fn normalize_stdin_content(stdin_is_tty: bool, stdin_content: Option<String>) -> Option<String> {
@@ -8833,7 +8849,7 @@ fn render_help() -> String {
         "  - non-interactive json mode (--mode json)",
         "  - rpc mode (--mode rpc)",
         "  - interactive mode",
-        "  - --provider, --model, --models, --api-key, --system-prompt, --append-system-prompt, --thinking",
+        "  - --provider, --model, --models, --api-key, --system-prompt, --append-system-prompt, --thinking, --transport",
         "  - --continue, --resume, --session, --fork, --no-session, --session-dir",
         "  - --list-models [search]",
         "  - --export <session.jsonl> [out.html]",

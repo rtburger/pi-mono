@@ -1,4 +1,5 @@
 use pi_agent::ThinkingLevel;
+use pi_ai::Transport;
 use pi_coding_agent_cli::{
     AppMode, DiagnosticKind, ListModels, Mode, PrintOutputMode, ToolName, UnknownFlagValue,
     build_initial_message, parse_args, parse_thinking_level, resolve_app_mode,
@@ -32,6 +33,8 @@ fn parses_common_print_mode_flags() {
         "high",
         "--mode",
         "json",
+        "--transport",
+        "websocket",
         "--print",
         "@README.md",
         "summarize",
@@ -43,6 +46,7 @@ fn parses_common_print_mode_flags() {
     assert_eq!(args.system_prompt.as_deref(), Some("system"));
     assert_eq!(args.append_system_prompt.as_deref(), Some("suffix"));
     assert_eq!(args.thinking, Some(ThinkingLevel::High));
+    assert_eq!(args.transport, Some(Transport::WebSocket));
     assert_eq!(args.mode, Some(Mode::Json));
     assert!(args.print);
     assert_eq!(args.file_args, vec![String::from("README.md")]);
@@ -61,6 +65,20 @@ fn warns_for_invalid_thinking_level() {
         args.diagnostics[0]
             .message
             .contains("Invalid thinking level \"maximum\"")
+    );
+}
+
+#[test]
+fn warns_for_invalid_transport() {
+    let args = parse(&["--transport", "quic"]);
+
+    assert_eq!(args.transport, None);
+    assert_eq!(args.diagnostics.len(), 1);
+    assert_eq!(args.diagnostics[0].kind, DiagnosticKind::Warning);
+    assert!(
+        args.diagnostics[0]
+            .message
+            .contains("Invalid transport \"quic\"")
     );
 }
 

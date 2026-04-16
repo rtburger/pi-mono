@@ -1,7 +1,9 @@
 use pi_agent::ThinkingLevel;
+use pi_ai::Transport;
 use std::collections::BTreeMap;
 
 const VALID_THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh"];
+const VALID_TRANSPORTS: &[&str] = &["sse", "websocket", "auto"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -108,6 +110,7 @@ pub struct Args {
     pub system_prompt: Option<String>,
     pub append_system_prompt: Option<String>,
     pub thinking: Option<ThinkingLevel>,
+    pub transport: Option<Transport>,
     pub continue_session: bool,
     pub resume: bool,
     pub help: bool,
@@ -151,6 +154,15 @@ pub fn parse_thinking_level(level: &str) -> Option<ThinkingLevel> {
         "medium" => Some(ThinkingLevel::Medium),
         "high" => Some(ThinkingLevel::High),
         "xhigh" => Some(ThinkingLevel::XHigh),
+        _ => None,
+    }
+}
+
+fn parse_transport(value: &str) -> Option<Transport> {
+    match value {
+        "sse" => Some(Transport::Sse),
+        "websocket" => Some(Transport::WebSocket),
+        "auto" => Some(Transport::Auto),
         _ => None,
     }
 }
@@ -253,6 +265,20 @@ pub fn parse_args(args: &[String]) -> Args {
                     message: format!(
                         "Invalid thinking level \"{level}\". Valid values: {}",
                         VALID_THINKING_LEVELS.join(", ")
+                    ),
+                });
+            }
+        } else if arg == "--transport" && index + 1 < args.len() {
+            index += 1;
+            let transport = &args[index];
+            if let Some(transport) = parse_transport(transport) {
+                result.transport = Some(transport);
+            } else {
+                result.diagnostics.push(Diagnostic {
+                    kind: DiagnosticKind::Warning,
+                    message: format!(
+                        "Invalid transport \"{transport}\". Valid values: {}",
+                        VALID_TRANSPORTS.join(", ")
                     ),
                 });
             }

@@ -1,3 +1,4 @@
+use pi_ai::Transport;
 use serde::Deserialize;
 use std::{
     fs,
@@ -73,6 +74,7 @@ pub struct RuntimeSettings {
     pub images: ImageSettings,
     pub compaction: CompactionSettings,
     pub thinking_budgets: ThinkingBudgetsSettings,
+    pub transport: Transport,
     pub theme: Option<String>,
     pub editor_padding_x: usize,
     pub autocomplete_max_visible: usize,
@@ -130,6 +132,7 @@ impl Default for RuntimeSettings {
             images: ImageSettings::default(),
             compaction: CompactionSettings::default(),
             thinking_budgets: ThinkingBudgetsSettings::default(),
+            transport: Transport::Sse,
             theme: None,
             editor_padding_x: 0,
             autocomplete_max_visible: 5,
@@ -153,6 +156,8 @@ struct RawSettings {
     compaction: RawCompactionSettings,
     #[serde(default)]
     thinking_budgets: RawThinkingBudgetsSettings,
+    transport: Option<String>,
+    websockets: Option<bool>,
     theme: Option<String>,
     editor_padding_x: Option<f64>,
     autocomplete_max_visible: Option<f64>,
@@ -272,6 +277,24 @@ fn apply_settings_file(loaded: &mut LoadedRuntimeSettings, scope: SettingsScope,
         loaded.settings.thinking_budgets.high = Some(high);
     }
 
+    if let Some(transport) = parsed.transport.as_deref() {
+        match parse_transport_setting(transport) {
+            Some(transport) => loaded.settings.transport = transport,
+            None => loaded.warnings.push(SettingsWarning {
+                scope: scope.clone(),
+                message: format!(
+                    "Invalid transport setting \"{transport}\". Valid values: sse, websocket, auto"
+                ),
+            }),
+        }
+    } else if let Some(websockets) = parsed.websockets {
+        loaded.settings.transport = if websockets {
+            Transport::WebSocket
+        } else {
+            Transport::Sse
+        };
+    }
+
     if let Some(theme) = parsed
         .theme
         .map(|theme| theme.trim().to_owned())
@@ -342,6 +365,15 @@ fn apply_resource_settings_file(
     target.skills = parsed.skills.unwrap_or_default();
     target.prompts = parsed.prompts.unwrap_or_default();
     target.themes = parsed.themes.unwrap_or_default();
+}
+
+fn parse_transport_setting(value: &str) -> Option<Transport> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "sse" => Some(Transport::Sse),
+        "websocket" => Some(Transport::WebSocket),
+        "auto" => Some(Transport::Auto),
+        _ => None,
+    }
 }
 
 fn read_settings_file(

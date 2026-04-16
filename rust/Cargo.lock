@@ -1518,6 +1518,7 @@ dependencies = [
 name = "pi-config"
 version = "0.1.0"
 dependencies = [
+ "pi-ai",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
