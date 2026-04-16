@@ -1,4 +1,5 @@
 pub mod autocomplete;
+mod box_component;
 pub mod editor;
 pub mod fuzzy;
 pub mod image;
@@ -6,6 +7,8 @@ pub mod input;
 pub mod keybindings;
 pub mod keys;
 mod kill_ring;
+pub mod loader;
+pub mod markdown;
 pub mod select_list;
 pub mod settings_list;
 pub mod spacer;
@@ -22,6 +25,7 @@ pub use autocomplete::{
     AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, CombinedAutocompleteProvider,
     CompletionResult, SlashCommand, apply_completion,
 };
+pub use box_component::Box;
 pub use editor::{Editor, EditorCursor, EditorOptions, TextChunk, word_wrap_line};
 pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
 pub use image::{Image, ImageOptions, ImageTheme};
@@ -34,6 +38,8 @@ pub use keys::{
     KeyEventType, decode_kitty_printable, is_key_release, is_key_repeat, is_kitty_protocol_active,
     matches_key, parse_key, set_kitty_protocol_active,
 };
+pub use loader::{CancellableLoader, Loader};
+pub use markdown::{DefaultTextStyle, Markdown, MarkdownTheme};
 pub use select_list::{
     SelectItem, SelectList, SelectListLayoutOptions, SelectListTheme,
     SelectListTruncatePrimaryContext,

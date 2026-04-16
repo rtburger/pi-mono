@@ -7,7 +7,9 @@ license.workspace = true
 [dependencies]
 base64 = "0.22"
 crossterm = "0.28"
+pulldown-cmark = "0.13"
 regex = "1"
 thiserror.workspace = true
+tokio.workspace = true
 unicode-segmentation = "1"
 unicode-width = "0.2"
