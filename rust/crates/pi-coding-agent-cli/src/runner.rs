@@ -412,6 +412,72 @@ async fn select_resume_session(
     }
 }
 
+struct PreparedStartupSession {
+    runtime_cwd: PathBuf,
+    session_support: Option<SessionSupport>,
+}
+
+enum StartupSessionPreparation {
+    Ready(PreparedStartupSession),
+    Cancelled,
+}
+
+async fn select_startup_resume_session(
+    parsed: &Args,
+    cwd: &Path,
+    agent_dir: Option<&Path>,
+    terminal_factory: InteractiveTerminalFactory,
+) -> Result<Option<String>, String> {
+    let keybindings = create_keybindings_manager(agent_dir);
+    let terminal = LiveInteractiveTerminal::new((terminal_factory)());
+    let mut tui = Tui::new(terminal);
+    let cwd_string = cwd.to_string_lossy().into_owned();
+    let session_dir = resolve_session_dir(parsed, cwd, agent_dir);
+    let agent_dir_string = agent_dir.map(|agent_dir| agent_dir.to_string_lossy().into_owned());
+    let current_sessions = SessionManager::list(&cwd_string, session_dir.as_deref());
+    let all_sessions = SessionManager::list_all(agent_dir_string.as_deref());
+    let outcome =
+        select_resume_session(&mut tui, &keybindings, current_sessions, all_sessions).await;
+    let _ = tui.stop();
+    outcome
+}
+
+async fn prepare_startup_session(
+    parsed: &Args,
+    cwd: &Path,
+    agent_dir: Option<&Path>,
+    terminal_factory: InteractiveTerminalFactory,
+) -> Result<StartupSessionPreparation, String> {
+    let show_resume_picker =
+        parsed.resume && !parsed.no_session && parsed.session.is_none() && parsed.fork.is_none();
+
+    let selected_resume_session = if show_resume_picker {
+        match select_startup_resume_session(parsed, cwd, agent_dir, terminal_factory).await? {
+            Some(path) => Some(path),
+            None => return Ok(StartupSessionPreparation::Cancelled),
+        }
+    } else {
+        None
+    };
+
+    let session_support = create_session_support(
+        parsed,
+        cwd,
+        agent_dir,
+        selected_resume_session.as_deref(),
+        None,
+    )?;
+    let runtime_cwd = session_support
+        .as_ref()
+        .map(|session_support| PathBuf::from(session_support.header.cwd.clone()))
+        .unwrap_or_else(|| cwd.to_path_buf());
+
+    Ok(StartupSessionPreparation::Ready(PreparedStartupSession {
+        runtime_cwd,
+        session_support,
+    }))
+}
+
 #[derive(Debug, Clone)]
 enum TreePickerOutcome {
     Selected(String),
@@ -801,7 +867,13 @@ pub async fn run_rpc_command(options: RunCommandOptions) -> i32 {
         let _ = stderr.flush();
     });
 
-    run_rpc_command_live(options, stdout_emitter, stderr_emitter).await
+    run_rpc_command_live_with_terminal_factory(
+        options,
+        stdout_emitter,
+        stderr_emitter,
+        Arc::new(|| Box::new(ProcessTerminal::new())),
+    )
+    .await
 }
 
 async fn run_interactive_command_with_runtime(
@@ -836,19 +908,22 @@ async fn run_interactive_command_with_runtime(
     }
 
     if parsed.help || parsed.version || parsed.export.is_some() || parsed.list_models.is_some() {
-        let result = run_command(RunCommandOptions {
-            args,
-            stdin_is_tty,
-            stdin_content,
-            auth_source,
-            built_in_models,
-            models_json_path,
-            agent_dir,
-            cwd,
-            default_system_prompt,
-            version,
-            stream_options,
-        })
+        let result = run_command_with_terminal_factory(
+            RunCommandOptions {
+                args,
+                stdin_is_tty,
+                stdin_content,
+                auth_source,
+                built_in_models,
+                models_json_path,
+                agent_dir,
+                cwd,
+                default_system_prompt,
+                version,
+                stream_options,
+            },
+            runtime.terminal_factory.clone(),
+        )
         .await;
         if !result.stdout.is_empty() {
             print!("{}", result.stdout);
@@ -866,19 +941,22 @@ async fn run_interactive_command_with_runtime(
 
     let app_mode = resolve_app_mode(&parsed, stdin_is_tty);
     if app_mode != AppMode::Interactive {
-        let result = run_command(RunCommandOptions {
-            args,
-            stdin_is_tty,
-            stdin_content,
-            auth_source,
-            built_in_models,
-            models_json_path,
-            agent_dir,
-            cwd,
-            default_system_prompt,
-            version,
-            stream_options,
-        })
+        let result = run_command_with_terminal_factory(
+            RunCommandOptions {
+                args,
+                stdin_is_tty,
+                stdin_content,
+                auth_source,
+                built_in_models,
+                models_json_path,
+                agent_dir,
+                cwd,
+                default_system_prompt,
+                version,
+                stream_options,
+            },
+            runtime.terminal_factory.clone(),
+        )
         .await;
         if !result.stdout.is_empty() {
             print!("{}", result.stdout);
@@ -3173,6 +3251,13 @@ pub fn finalize_system_prompt(prompt: impl Into<String>) -> String {
 }
 
 pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
+    run_command_with_terminal_factory(options, Arc::new(|| Box::new(ProcessTerminal::new()))).await
+}
+
+async fn run_command_with_terminal_factory(
+    options: RunCommandOptions,
+    resume_terminal_factory: InteractiveTerminalFactory,
+) -> RunCommandResult {
     let RunCommandOptions {
         args,
         stdin_is_tty,
@@ -3280,18 +3365,6 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         };
     }
 
-    if parsed.resume {
-        push_line(
-            &mut stderr,
-            "--resume session picker is only supported in interactive mode in the Rust CLI",
-        );
-        return RunCommandResult {
-            exit_code: 1,
-            stdout,
-            stderr,
-        };
-    }
-
     if let Some(message) = unsupported_flag_message(&parsed) {
         push_line(&mut stderr, &message);
         return RunCommandResult {
@@ -3302,45 +3375,80 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
     }
 
     let app_mode = resolve_app_mode(&parsed, stdin_is_tty);
-    if app_mode == AppMode::Rpc {
-        return run_rpc_command_buffered(RpcPreparedOptions {
-            parsed,
-            initial_stderr: stderr,
-            stdin_content,
-            auth_source,
-            built_in_models,
-            models_json_path,
-            agent_dir,
-            cwd,
-            default_system_prompt,
-            stream_options,
-        })
-        .await;
-    }
-
-    let Some(print_mode) = to_print_output_mode(app_mode) else {
+    if matches!(app_mode, AppMode::Interactive) {
         push_line(&mut stderr, &unsupported_app_mode_message(app_mode));
         return RunCommandResult {
             exit_code: 1,
             stdout,
             stderr,
         };
+    }
+
+    let startup_cwd = cwd;
+    let prepared_session = match prepare_startup_session(
+        &parsed,
+        &startup_cwd,
+        agent_dir.as_deref(),
+        resume_terminal_factory.clone(),
+    )
+    .await
+    {
+        Ok(StartupSessionPreparation::Ready(prepared_session)) => prepared_session,
+        Ok(StartupSessionPreparation::Cancelled) => {
+            push_line(&mut stdout, "No session selected");
+            return RunCommandResult {
+                exit_code: 0,
+                stdout,
+                stderr,
+            };
+        }
+        Err(error) => {
+            push_line(&mut stderr, &format!("Error: {error}"));
+            return RunCommandResult {
+                exit_code: 1,
+                stdout,
+                stderr,
+            };
+        }
     };
+
+    if app_mode == AppMode::Rpc {
+        return run_rpc_command_buffered(
+            RpcPreparedOptions {
+                parsed,
+                initial_stderr: stderr,
+                stdin_content,
+                auth_source,
+                built_in_models,
+                models_json_path,
+                agent_dir,
+                cwd: prepared_session.runtime_cwd,
+                default_system_prompt,
+                stream_options,
+            },
+            prepared_session.session_support,
+        )
+        .await;
+    }
+
+    let print_mode = to_print_output_mode(app_mode).expect("print mode expected");
+    let runtime_cwd = prepared_session.runtime_cwd;
+    let session_support = prepared_session.session_support;
 
     let runtime_settings = agent_dir
         .as_deref()
-        .map(|agent_dir| load_runtime_settings(&cwd, agent_dir))
+        .map(|agent_dir| load_runtime_settings(&runtime_cwd, agent_dir))
         .unwrap_or_default();
     stderr.push_str(&render_settings_warnings(&runtime_settings.warnings));
 
-    let resources = load_cli_resources(&parsed, &cwd, agent_dir.as_deref());
+    let resources = load_cli_resources(&parsed, &runtime_cwd, agent_dir.as_deref());
     for warning in &resources.warnings {
         push_line(&mut stderr, warning);
     }
 
     let (selected_tool_names, selected_tools) = build_selected_tools(
         &parsed,
-        &cwd,
+        &runtime_cwd,
         runtime_settings.settings.images.auto_resize_images,
     );
 
@@ -3356,23 +3464,11 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
     } else {
         Vec::new()
     };
-    let session_support =
-        match create_session_support(&parsed, &cwd, agent_dir.as_deref(), None, None) {
-            Ok(session_support) => session_support,
-            Err(error) => {
-                push_line(&mut stderr, &format!("Error: {error}"));
-                return RunCommandResult {
-                    exit_code: 1,
-                    stdout,
-                    stderr,
-                };
-            }
-        };
 
     let stdin_content = normalize_stdin_content(stdin_is_tty, stdin_content);
     let processed_files = match process_file_arguments(
         &parsed.file_args,
-        &cwd,
+        &runtime_cwd,
         ProcessFileOptions {
             auto_resize_images: runtime_settings.settings.images.auto_resize_images,
         },
@@ -3429,12 +3525,12 @@ pub async fn run_command(options: RunCommandOptions) -> RunCommandResult {
         auth_source: Arc::new(overlay_auth),
         built_in_models,
         models_json_path: models_json_path.clone(),
-        cwd: Some(cwd.clone()),
+        cwd: Some(runtime_cwd.clone()),
         tools: Some(selected_tools),
         system_prompt: build_runtime_system_prompt(
             &default_system_prompt,
             &parsed,
-            &cwd,
+            &runtime_cwd,
             agent_dir.as_deref(),
             &selected_tool_names,
             &resources,
@@ -3658,10 +3754,11 @@ impl RpcShared {
     }
 }
 
-async fn run_rpc_command_live(
+async fn run_rpc_command_live_with_terminal_factory(
     options: RunCommandOptions,
     stdout_emitter: TextEmitter,
     stderr_emitter: TextEmitter,
+    resume_terminal_factory: InteractiveTerminalFactory,
 ) -> i32 {
     let RunCommandOptions {
         args,
@@ -3687,16 +3784,25 @@ async fn run_rpc_command_live(
     {
         return 1;
     }
-    if parsed.resume {
-        stderr_emitter(String::from(
-            "--resume session picker is only supported in interactive mode in the Rust CLI\n",
-        ));
-        return 1;
-    }
     if let Some(message) = unsupported_flag_message(&parsed) {
         stderr_emitter(format!("{message}\n"));
         return 1;
     }
+
+    let prepared_session =
+        match prepare_startup_session(&parsed, &cwd, agent_dir.as_deref(), resume_terminal_factory)
+            .await
+        {
+            Ok(StartupSessionPreparation::Ready(prepared_session)) => prepared_session,
+            Ok(StartupSessionPreparation::Cancelled) => {
+                stdout_emitter(String::from("No session selected\n"));
+                return 0;
+            }
+            Err(error) => {
+                stderr_emitter(format!("Error: {error}\n"));
+                return 1;
+            }
+        };
 
     let prepared = RpcPreparedOptions {
         parsed,
@@ -3706,15 +3812,25 @@ async fn run_rpc_command_live(
         built_in_models,
         models_json_path,
         agent_dir,
-        cwd,
+        cwd: prepared_session.runtime_cwd,
         default_system_prompt,
         stream_options,
     };
 
-    run_rpc_processor(prepared, false, stdout_emitter, stderr_emitter).await
+    run_rpc_processor(
+        prepared,
+        false,
+        stdout_emitter,
+        stderr_emitter,
+        prepared_session.session_support,
+    )
+    .await
 }
 
-async fn run_rpc_command_buffered(options: RpcPreparedOptions) -> RunCommandResult {
+async fn run_rpc_command_buffered(
+    options: RpcPreparedOptions,
+    initial_session_support: Option<SessionSupport>,
+) -> RunCommandResult {
     let stdout = Arc::new(Mutex::new(String::new()));
     let stderr = Arc::new(Mutex::new(options.initial_stderr.clone()));
     let stdout_emitter: TextEmitter = Arc::new({
@@ -3736,7 +3852,14 @@ async fn run_rpc_command_buffered(options: RpcPreparedOptions) -> RunCommandResu
         }
     });
 
-    let exit_code = run_rpc_processor(options, true, stdout_emitter, stderr_emitter).await;
+    let exit_code = run_rpc_processor(
+        options,
+        true,
+        stdout_emitter,
+        stderr_emitter,
+        initial_session_support,
+    )
+    .await;
 
     RunCommandResult {
         exit_code,
@@ -3756,6 +3879,7 @@ async fn run_rpc_processor(
     wait_for_background_tasks: bool,
     stdout_emitter: TextEmitter,
     stderr_emitter: TextEmitter,
+    initial_session_support: Option<SessionSupport>,
 ) -> i32 {
     let buffered_lines = options.stdin_content.as_ref().map(|stdin_content| {
         stdin_content
@@ -3766,7 +3890,12 @@ async fn run_rpc_processor(
             .collect::<Vec<_>>()
     });
 
-    let shared = match create_rpc_shared(options, stdout_emitter, stderr_emitter.clone()) {
+    let shared = match create_rpc_shared(
+        options,
+        initial_session_support,
+        stdout_emitter,
+        stderr_emitter.clone(),
+    ) {
         Ok(shared) => shared,
         Err(error_output) => {
             if !error_output.is_empty() {
@@ -3814,6 +3943,7 @@ async fn run_rpc_processor(
 
 fn create_rpc_shared(
     options: RpcPreparedOptions,
+    initial_session_support: Option<SessionSupport>,
     stdout_emitter: TextEmitter,
     stderr_emitter: TextEmitter,
 ) -> Result<RpcShared, String> {
@@ -3837,6 +3967,7 @@ fn create_rpc_shared(
         &options.cwd,
         runtime_settings,
         scoped_models,
+        initial_session_support,
         None,
         None,
     )?;
@@ -3893,6 +4024,7 @@ fn build_rpc_state(
     cwd: &Path,
     runtime_settings: LoadedRuntimeSettings,
     scoped_models: Vec<ScopedModel>,
+    session_support_override: Option<SessionSupport>,
     manager_override: Option<SessionManager>,
     bootstrap_defaults: Option<BootstrapDefaults>,
 ) -> Result<(RpcState, String), String> {
@@ -3907,15 +4039,19 @@ fn build_rpc_state(
         runtime_settings.settings.images.auto_resize_images,
     );
 
-    let session_support = match manager_override {
-        Some(manager_override) => Some(build_session_support(manager_override)),
-        None => create_session_support(
-            &options.parsed,
-            cwd,
-            options.agent_dir.as_deref(),
-            None,
-            None,
-        )?,
+    let session_support = if let Some(session_support_override) = session_support_override {
+        Some(session_support_override)
+    } else {
+        match manager_override {
+            Some(manager_override) => Some(build_session_support(manager_override)),
+            None => create_session_support(
+                &options.parsed,
+                cwd,
+                options.agent_dir.as_deref(),
+                None,
+                None,
+            )?,
+        }
     };
 
     let overlay_auth = OverlayAuthSource::new(options.auth_source.clone());
@@ -4204,6 +4340,7 @@ async fn handle_rpc_input_line(
                 &next_cwd,
                 snapshot.runtime_settings.clone(),
                 snapshot.scoped_models.clone(),
+                None,
                 Some(manager),
                 Some(BootstrapDefaults::from_model(
                     &snapshot.core.state().model,
@@ -4572,6 +4709,7 @@ async fn handle_rpc_input_line(
                 &next_cwd,
                 next_runtime_settings,
                 snapshot.scoped_models.clone(),
+                None,
                 Some(manager),
                 None,
             ) {
@@ -4643,6 +4781,7 @@ async fn handle_rpc_input_line(
                 &next_cwd,
                 snapshot.runtime_settings.clone(),
                 snapshot.scoped_models.clone(),
+                None,
                 Some(manager),
                 bootstrap_defaults,
             ) {
@@ -8326,6 +8465,189 @@ mod tests {
         assert_eq!(inspector.stop_count(), 2, "output: {output}");
 
         faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn run_command_uses_target_session_cwd_for_noninteractive_file_args() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "session-cwd-print-mode-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "session-cwd-print-mode-faux-1".into(),
+                name: Some("Session Cwd Print Mode Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        faux.set_responses(vec![FauxResponse::text("Cross-project session response")]);
+        let model = faux
+            .get_model(Some("session-cwd-print-mode-faux-1"))
+            .expect("expected faux model");
+        let startup_cwd = unique_temp_dir("session-cwd-startup-cwd");
+        let selected_cwd = unique_temp_dir("session-cwd-selected-cwd");
+        let agent_dir = unique_temp_dir("session-cwd-agent");
+        fs::write(selected_cwd.join("context.txt"), "selected cwd file\n").unwrap();
+
+        let agent_dir_string = agent_dir.to_string_lossy().into_owned();
+        let selected_cwd_string = selected_cwd.to_string_lossy().into_owned();
+        let session_dir = get_default_session_dir(&selected_cwd_string, Some(&agent_dir_string));
+        let mut session_manager =
+            SessionManager::create(&selected_cwd_string, Some(&session_dir)).unwrap();
+        session_manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("resume me"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        session_manager
+            .append_message(Message::Assistant {
+                content: vec![AssistantContent::Text {
+                    text: String::from("saved response"),
+                    text_signature: None,
+                }],
+                api: String::from("faux:test"),
+                provider: model.provider.clone(),
+                model: model.id.clone(),
+                response_id: None,
+                usage: Default::default(),
+                stop_reason: pi_events::StopReason::Stop,
+                error_message: None,
+                timestamp: 2,
+            })
+            .unwrap();
+        let session_file = session_manager
+            .get_session_file()
+            .map(str::to_owned)
+            .expect("expected session file");
+
+        let mut parsed = Args::default();
+        parsed.session = Some(session_file.clone());
+        let prepared = prepare_startup_session(
+            &parsed,
+            &startup_cwd,
+            Some(agent_dir.as_path()),
+            Arc::new(|| Box::new(LifecycleScriptedTerminal::new(Vec::new()))),
+        )
+        .await
+        .expect("startup session preparation should succeed");
+        let StartupSessionPreparation::Ready(prepared) = prepared else {
+            panic!("expected prepared session support");
+        };
+        assert_eq!(prepared.runtime_cwd, selected_cwd);
+
+        let result = timeout(
+            Duration::from_secs(3),
+            run_command(RunCommandOptions {
+                args: vec![
+                    String::from("--session"),
+                    session_file,
+                    String::from("--provider"),
+                    model.provider.clone(),
+                    String::from("--model"),
+                    model.id.clone(),
+                    String::from("--print"),
+                    String::from("@context.txt"),
+                    String::from("Use the file"),
+                ],
+                stdin_is_tty: true,
+                stdin_content: None,
+                auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                    model.provider.as_str(),
+                    "token",
+                )])),
+                built_in_models: vec![model],
+                models_json_path: None,
+                agent_dir: Some(agent_dir),
+                cwd: startup_cwd,
+                default_system_prompt: String::new(),
+                version: String::from("0.1.0"),
+                stream_options: StreamOptions::default(),
+            }),
+        )
+        .await
+        .expect("run_command should complete");
+
+        assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+        assert!(
+            result.stdout.contains("Cross-project session response"),
+            "stdout: {}\nstderr: {}",
+            result.stdout,
+            result.stderr
+        );
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn run_rpc_command_live_allows_resume_picker_cancellation() {
+        let terminal =
+            LifecycleScriptedTerminal::new(vec![(Duration::from_millis(5), String::from("\x1b"))]);
+        let stdout = Arc::new(Mutex::new(String::new()));
+        let stderr = Arc::new(Mutex::new(String::new()));
+        let stdout_emitter: TextEmitter = Arc::new({
+            let stdout = stdout.clone();
+            move |text| {
+                stdout
+                    .lock()
+                    .expect("rpc stdout buffer mutex poisoned")
+                    .push_str(&text);
+            }
+        });
+        let stderr_emitter: TextEmitter = Arc::new({
+            let stderr = stderr.clone();
+            move |text| {
+                stderr
+                    .lock()
+                    .expect("rpc stderr buffer mutex poisoned")
+                    .push_str(&text);
+            }
+        });
+
+        let exit_code = timeout(
+            Duration::from_secs(3),
+            run_rpc_command_live_with_terminal_factory(
+                RunCommandOptions {
+                    args: vec![
+                        String::from("--mode"),
+                        String::from("rpc"),
+                        String::from("--resume"),
+                    ],
+                    stdin_is_tty: true,
+                    stdin_content: None,
+                    auth_source: Arc::new(MemoryAuthStorage::default()),
+                    built_in_models: Vec::new(),
+                    models_json_path: None,
+                    agent_dir: Some(unique_temp_dir("resume-rpc-agent")),
+                    cwd: unique_temp_dir("resume-rpc-cwd"),
+                    default_system_prompt: String::new(),
+                    version: String::from("0.1.0"),
+                    stream_options: StreamOptions::default(),
+                },
+                stdout_emitter,
+                stderr_emitter,
+                Arc::new(move || Box::new(terminal.clone())),
+            ),
+        )
+        .await
+        .expect("rpc command should complete");
+
+        let stdout = stdout
+            .lock()
+            .expect("rpc stdout buffer mutex poisoned")
+            .clone();
+        let stderr = stderr
+            .lock()
+            .expect("rpc stderr buffer mutex poisoned")
+            .clone();
+        assert_eq!(exit_code, 0, "stderr: {stderr}");
+        assert_eq!(stdout, "No session selected\n");
+        assert!(
+            !stderr.contains("--resume session picker is only supported"),
+            "stderr: {stderr}"
+        );
+
+        assert!(stderr.is_empty(), "stderr: {stderr}");
     }
 
     #[test]

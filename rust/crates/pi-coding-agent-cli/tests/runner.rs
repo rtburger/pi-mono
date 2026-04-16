@@ -843,29 +843,31 @@ async fn run_command_rejects_interactive_mode_for_now() {
 }
 
 #[tokio::test]
-async fn run_command_rejects_resume_session_picker_outside_interactive_mode() {
-    let result = run_command(RunCommandOptions {
-        args: vec![String::from("-p"), String::from("--resume")],
-        stdin_is_tty: true,
-        stdin_content: None,
-        auth_source: Arc::new(EnvAuthSource::new()),
-        built_in_models: Vec::new(),
-        models_json_path: None,
-        agent_dir: None,
-        cwd: unique_temp_dir("runner-resume-print"),
-        default_system_prompt: String::new(),
-        version: String::from("0.1.0"),
-        stream_options: StreamOptions::default(),
-    })
+async fn run_command_allows_resume_session_picker_outside_interactive_mode() {
+    let terminal = ScriptedTerminal::new(vec![(
+        Duration::from_millis(20),
+        TerminalAction::Input(String::from("\x1b")),
+    )]);
+
+    let exit_code = run_interactive_command_with_terminal(
+        RunCommandOptions {
+            args: vec![String::from("-p"), String::from("--resume")],
+            stdin_is_tty: true,
+            stdin_content: None,
+            auth_source: Arc::new(EnvAuthSource::new()),
+            built_in_models: Vec::new(),
+            models_json_path: None,
+            agent_dir: None,
+            cwd: unique_temp_dir("runner-resume-print"),
+            default_system_prompt: String::new(),
+            version: String::from("0.1.0"),
+            stream_options: StreamOptions::default(),
+        },
+        Arc::new(move || Box::new(terminal.clone())),
+    )
     .await;
 
-    assert_eq!(result.exit_code, 1);
-    assert!(result.stdout.is_empty());
-    assert!(
-        result.stderr.contains(
-            "--resume session picker is only supported in interactive mode in the Rust CLI"
-        )
-    );
+    assert_eq!(exit_code, 0);
 }
 
 #[tokio::test]
