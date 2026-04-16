@@ -10,6 +10,7 @@ pi-agent = { path = "../pi-agent" }
 pi-coding-agent-core = { path = "../pi-coding-agent-core" }
 pi-events = { path = "../pi-events" }
 pi-tui = { path = "../pi-tui" }
+regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -1507,6 +1507,7 @@ dependencies = [
  "pi-coding-agent-core",
  "pi-events",
  "pi-tui",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
