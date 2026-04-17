@@ -357,6 +357,7 @@ pub struct Tui<T: Terminal> {
     max_lines_rendered: usize,
     previous_viewport_top: usize,
     force_full_redraw: bool,
+    full_redraw_count: usize,
 }
 
 impl<T: Terminal> Tui<T> {
@@ -380,6 +381,7 @@ impl<T: Terminal> Tui<T> {
             max_lines_rendered: 0,
             previous_viewport_top: 0,
             force_full_redraw: false,
+            full_redraw_count: 0,
         }
     }
 
@@ -679,6 +681,10 @@ impl<T: Terminal> Tui<T> {
         }
     }
 
+    pub fn full_redraws(&self) -> usize {
+        self.full_redraw_count
+    }
+
     pub fn show_hardware_cursor(&self) -> bool {
         self.show_hardware_cursor
     }
@@ -692,6 +698,14 @@ impl<T: Terminal> Tui<T> {
             self.terminal.hide_cursor()?;
         }
         self.request_render(false)
+    }
+
+    pub fn clear_on_shrink(&self) -> bool {
+        self.clear_on_shrink
+    }
+
+    pub fn set_clear_on_shrink(&mut self, enabled: bool) {
+        self.clear_on_shrink = enabled;
     }
 
     pub fn render_for_size(&self, width: usize, height: usize) -> Vec<String> {
@@ -723,6 +737,8 @@ impl<T: Terminal> Tui<T> {
         height: usize,
         clear: bool,
     ) -> Result<(), TuiError> {
+        self.full_redraw_count += 1;
+
         let mut buffer = String::from(SYNC_OUTPUT_BEGIN);
         if clear {
             buffer.push_str(FULL_REDRAW_CLEAR);
@@ -804,6 +820,18 @@ impl<T: Terminal> Tui<T> {
             return Ok(());
         }
         self.started = false;
+
+        if !self.previous_lines.is_empty() {
+            let target_row = self.previous_lines.len();
+            let mut buffer = String::new();
+            append_vertical_move(
+                &mut buffer,
+                target_row as isize - self.hardware_cursor_row as isize,
+            );
+            buffer.push_str("\r\n");
+            self.terminal.write(&buffer)?;
+        }
+
         self.terminal.show_cursor()?;
         self.terminal.stop()?;
         self.pending_terminal_events

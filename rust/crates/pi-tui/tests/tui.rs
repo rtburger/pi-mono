@@ -1102,3 +1102,102 @@ fn render_handle_queues_rerender_until_terminal_events_are_drained() {
 
     tui.stop().expect("stop should succeed");
 }
+
+#[test]
+fn clear_on_shrink_triggers_full_redraw_and_tracks_count() {
+    let terminal = MockTerminal::new(20, 5);
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    let (component, lines) = DynamicComponent::new(["Line 0", "Line 1", "Line 2", "Line 3"]);
+    tui.add_child(Box::new(component));
+
+    tui.set_clear_on_shrink(false);
+    assert!(!tui.clear_on_shrink());
+    tui.set_clear_on_shrink(true);
+    assert!(tui.clear_on_shrink());
+
+    tui.start().expect("start should succeed");
+    assert_eq!(tui.full_redraws(), 1);
+    inspector.clear_writes();
+
+    *lines.lock().expect("dynamic lines mutex poisoned") =
+        vec!["Line 0".to_owned(), "Line 1".to_owned()];
+    tui.request_render(false)
+        .expect("shrink render should succeed");
+
+    assert_eq!(tui.full_redraws(), 2);
+    assert!(
+        inspector
+            .writes()
+            .last()
+            .is_some_and(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3JLine 0"))
+    );
+
+    tui.stop().expect("stop should succeed");
+}
+
+#[test]
+fn viewport_reset_after_shrink_allows_append_without_another_full_redraw() {
+    let terminal = MockTerminal::new(20, 5);
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    let (component, lines) = DynamicComponent::new((0..8).map(|index| format!("Line {index}")));
+    tui.add_child(Box::new(component));
+
+    tui.start().expect("start should succeed");
+    assert_eq!(tui.full_redraws(), 1);
+    inspector.clear_writes();
+
+    *lines.lock().expect("dynamic lines mutex poisoned") =
+        vec!["Line 0".to_owned(), "Line 1".to_owned()];
+    tui.request_render(false)
+        .expect("viewport-reset render should succeed");
+
+    assert_eq!(tui.full_redraws(), 2);
+    assert!(
+        inspector
+            .writes()
+            .last()
+            .is_some_and(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3JLine 0"))
+    );
+
+    inspector.clear_writes();
+    *lines.lock().expect("dynamic lines mutex poisoned") = vec![
+        "Line 0".to_owned(),
+        "Line 1".to_owned(),
+        "Line 2".to_owned(),
+    ];
+    tui.request_render(false)
+        .expect("append render should stay differential");
+
+    assert_eq!(tui.full_redraws(), 2);
+    let append_writes = inspector.writes();
+    let append_write = append_writes
+        .last()
+        .expect("expected a differential append write");
+    assert!(append_write.starts_with("\x1b[?2026h"));
+    assert!(!append_write.contains("\x1b[2J"));
+    assert!(append_write.contains("\r\n\x1b[2KLine 2"));
+
+    tui.stop().expect("stop should succeed");
+}
+
+#[test]
+fn stop_moves_cursor_below_rendered_content_before_exiting() {
+    let terminal = MockTerminal::new(20, 5);
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    tui.add_child(Box::new(StaticComponent::new([
+        format!("ab{CURSOR_MARKER}cd"),
+        "tail".to_owned(),
+    ])));
+
+    tui.start().expect("start should succeed");
+    inspector.clear_writes();
+
+    tui.stop().expect("stop should succeed");
+
+    assert_eq!(inspector.writes(), vec!["\x1b[2B\r\n".to_owned()]);
+    assert_eq!(inspector.stopped(), 1);
+    assert!(!inspector.cursor_hidden());
+}
