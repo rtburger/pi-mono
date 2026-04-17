@@ -1174,19 +1174,47 @@ async fn run_interactive_command_with_runtime(
         return result.exit_code;
     }
 
-    let mut current_cwd = cwd;
+    let prepared_session = match prepare_startup_session(
+        &parsed,
+        &cwd,
+        agent_dir.as_deref(),
+        runtime.terminal_factory.clone(),
+    )
+    .await
+    {
+        Ok(StartupSessionPreparation::Ready(prepared_session)) => prepared_session,
+        Ok(StartupSessionPreparation::Cancelled) => {
+            println!("No session selected");
+            return 0;
+        }
+        Err(error) => {
+            eprintln!("Error: {error}");
+            return 1;
+        }
+    };
+
+    let PreparedStartupSession {
+        runtime_cwd,
+        session_support,
+    } = prepared_session;
+    let mut current_cwd = runtime_cwd;
     let mut use_initial_input = true;
-    let mut manager_override = None;
+    let mut manager_override = match session_support {
+        Some(session_support) => match session_manager_from_support(session_support) {
+            Ok(session_manager) => Some(session_manager),
+            Err(error) => {
+                eprintln!("Error: {error}");
+                return 1;
+            }
+        },
+        None => None,
+    };
     let mut prefill_input = None;
     let mut initial_status_message = None;
     let mut bootstrap_defaults = None;
     let mut scoped_models_override = None;
     let mut runtime_settings_override = None;
-    let initial_show_resume_picker = parsed.resume
-        && !parsed.no_session
-        && parsed.session.is_none()
-        && parsed.fork.is_none()
-        && !parsed.continue_session;
+    let initial_show_resume_picker = false;
 
     loop {
         let parsed_for_iteration = if use_initial_input {
@@ -1824,6 +1852,35 @@ fn restore_session_manager(context: InteractiveSessionContext) -> Result<Session
         context.session_dir,
         &context.cwd,
     )
+}
+
+fn session_manager_from_support(session_support: SessionSupport) -> Result<SessionManager, String> {
+    let session_file;
+    let session_dir;
+    let cwd;
+    {
+        let session_manager = session_support
+            .manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        session_file = session_manager.get_session_file().map(str::to_owned);
+        session_dir = (!session_manager.get_session_dir().is_empty())
+            .then(|| session_manager.get_session_dir().to_owned());
+        cwd = session_manager.get_cwd().to_owned();
+    }
+
+    if let Some(session_manager) = Arc::try_unwrap(session_support.manager)
+        .ok()
+        .and_then(|session_manager| session_manager.into_inner().ok())
+    {
+        return Ok(session_manager);
+    }
+
+    if session_file.is_some() {
+        return restore_session_manager_from_parts(None, session_file, session_dir, &cwd);
+    }
+
+    Err(String::from("Failed to recover startup session manager"))
 }
 
 fn restore_session_manager_from_parts(
@@ -10043,6 +10100,111 @@ mod tests {
             "stdout: {}\nstderr: {}",
             result.stdout,
             result.stderr
+        );
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn run_interactive_command_uses_target_session_cwd_for_initial_file_args() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "session-cwd-interactive-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "session-cwd-interactive-faux-1".into(),
+                name: Some("Session Cwd Interactive Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        faux.set_responses(vec![FauxResponse::text(
+            "Cross-project interactive session response",
+        )]);
+        let model = faux
+            .get_model(Some("session-cwd-interactive-faux-1"))
+            .expect("expected faux model");
+        let startup_cwd = unique_temp_dir("interactive-session-cwd-startup-cwd");
+        let selected_cwd = unique_temp_dir("interactive-session-cwd-selected-cwd");
+        let agent_dir = unique_temp_dir("interactive-session-cwd-agent");
+        fs::write(selected_cwd.join("context.txt"), "selected cwd file\n").unwrap();
+
+        let agent_dir_string = agent_dir.to_string_lossy().into_owned();
+        let selected_cwd_string = selected_cwd.to_string_lossy().into_owned();
+        let session_dir = get_default_session_dir(&selected_cwd_string, Some(&agent_dir_string));
+        let mut session_manager =
+            SessionManager::create(&selected_cwd_string, Some(&session_dir)).unwrap();
+        session_manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("resume me"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        session_manager
+            .append_message(Message::Assistant {
+                content: vec![AssistantContent::Text {
+                    text: String::from("saved response"),
+                    text_signature: None,
+                }],
+                api: String::from("faux:test"),
+                provider: model.provider.clone(),
+                model: model.id.clone(),
+                response_id: None,
+                usage: Default::default(),
+                stop_reason: pi_events::StopReason::Stop,
+                error_message: None,
+                timestamp: 2,
+            })
+            .unwrap();
+        let session_file = session_manager
+            .get_session_file()
+            .map(str::to_owned)
+            .expect("expected session file");
+
+        let terminal = LifecycleScriptedTerminal::new(vec![(
+            Duration::from_millis(250),
+            String::from("\x04"),
+        )]);
+        let inspector = terminal.clone();
+        let exit_code = timeout(
+            Duration::from_secs(3),
+            run_interactive_command_with_runtime(
+                RunCommandOptions {
+                    args: vec![
+                        String::from("--session"),
+                        session_file,
+                        String::from("--provider"),
+                        model.provider.clone(),
+                        String::from("--model"),
+                        model.id.clone(),
+                        String::from("@context.txt"),
+                        String::from("Use the file"),
+                    ],
+                    stdin_is_tty: true,
+                    stdin_content: None,
+                    auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                        model.provider.as_str(),
+                        "token",
+                    )])),
+                    built_in_models: vec![model],
+                    models_json_path: None,
+                    agent_dir: Some(agent_dir),
+                    cwd: startup_cwd,
+                    default_system_prompt: String::new(),
+                    version: String::from("0.1.0"),
+                    stream_options: StreamOptions::default(),
+                },
+                InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone()))),
+            ),
+        )
+        .await
+        .expect("interactive command should complete");
+
+        let output = strip_terminal_control_sequences(&inspector.output());
+        assert_eq!(exit_code, 0, "output: {output}");
+        assert!(
+            output.contains("Cross-project interactive session response"),
+            "output: {output}"
         );
 
         faux.unregister();
