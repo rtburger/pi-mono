@@ -6,9 +6,10 @@ use crate::{
 };
 use pi_agent::AgentTool;
 use pi_coding_agent_core::{
-    BuildSystemPromptOptions, ContextFile, PromptTemplate, Skill, SourceInfo, build_system_prompt,
-    expand_prompt_template, expand_skill_command, load_prompt_templates, load_skills,
-    load_system_prompt_resources, resolve_prompt_input,
+    BuildSystemPromptOptions, ContextFile, DefaultResourceLoader, DefaultResourceLoaderOptions,
+    PromptTemplate, Skill, SourceInfo, build_system_prompt, expand_prompt_template,
+    expand_skill_command, load_prompt_templates, load_skills, load_system_prompt_resources,
+    resolve_prompt_input,
 };
 use pi_coding_agent_tools::{
     create_bash_tool, create_edit_tool, create_find_tool, create_grep_tool, create_ls_tool,
@@ -17,6 +18,7 @@ use pi_coding_agent_tools::{
 use pi_coding_agent_tui::{LoadThemesOptions, Theme, load_themes};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    env,
     path::{Component, Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
 };
@@ -232,30 +234,21 @@ pub fn load_cli_resources(
         cwd,
     );
 
-    let prompt_templates =
-        load_prompt_templates(pi_coding_agent_core::LoadPromptTemplatesOptions {
-            cwd: cwd.to_path_buf(),
-            agent_dir: agent_dir.map(Path::to_path_buf),
-            prompt_paths,
-            include_defaults: agent_dir.is_none() && !parsed.no_prompt_templates,
-        });
-    warnings.extend(
-        prompt_templates
-            .diagnostics
-            .iter()
-            .map(format_resource_diagnostic),
-    );
-    let mut prompt_templates = prompt_templates.prompts;
-    apply_prompt_source_info(&mut prompt_templates, &metadata_by_path);
-
-    let skills = load_skills(pi_coding_agent_core::LoadSkillsOptions {
+    let base_resources = DefaultResourceLoader::load(DefaultResourceLoaderOptions {
         cwd: cwd.to_path_buf(),
         agent_dir: agent_dir.map(Path::to_path_buf),
+        prompt_paths,
         skill_paths,
-        include_defaults: agent_dir.is_none() && !parsed.no_skills,
+        include_prompt_defaults: agent_dir.is_none() && !parsed.no_prompt_templates,
+        include_skill_defaults: agent_dir.is_none() && !parsed.no_skills,
+        ..DefaultResourceLoaderOptions::default()
     });
-    warnings.extend(skills.diagnostics.iter().map(format_resource_diagnostic));
-    let mut skills = skills.skills;
+    warnings.extend(base_resources.warnings().iter().cloned());
+
+    let mut prompt_templates = base_resources.prompt_templates().to_vec();
+    apply_prompt_source_info(&mut prompt_templates, &metadata_by_path);
+
+    let mut skills = base_resources.skills().to_vec();
     apply_skill_source_info(&mut skills, &metadata_by_path);
 
     let themes = load_themes(LoadThemesOptions {
@@ -267,22 +260,14 @@ pub fn load_cli_resources(
     warnings.extend(themes.diagnostics.iter().map(format_resource_diagnostic));
     let themes = themes.themes;
 
-    let prompt_resources = agent_dir
-        .map(|agent_dir| load_system_prompt_resources(cwd, agent_dir))
-        .unwrap_or_else(|| pi_coding_agent_core::LoadedSystemPromptResources {
-            context_files: Vec::new(),
-            system_prompt: None,
-            append_system_prompt: Vec::new(),
-        });
-
     LoadedCliResources {
         prompt_templates,
         skills,
         themes,
         warnings,
-        context_files: prompt_resources.context_files,
-        system_prompt: prompt_resources.system_prompt,
-        append_system_prompt: prompt_resources.append_system_prompt,
+        context_files: base_resources.context_files().to_vec(),
+        system_prompt: base_resources.system_prompt().map(ToOwned::to_owned),
+        append_system_prompt: base_resources.append_system_prompt().to_vec(),
     }
 }
 
@@ -603,12 +588,30 @@ pub fn preprocess_prompt_text(text: &str, resources: &LoadedCliResources) -> Str
 }
 
 fn resolve_from_cwd(cwd: &Path, input: &str) -> PathBuf {
-    let path = Path::new(input);
+    let normalized = normalize_input_path(input);
+    let path = Path::new(&normalized);
     if path.is_absolute() {
         path.to_path_buf()
     } else {
         cwd.join(path)
     }
+}
+
+fn normalize_input_path(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed == "~" {
+        return home_dir();
+    }
+    if let Some(path) = trimmed.strip_prefix("~/") {
+        return Path::new(&home_dir()).join(path).display().to_string();
+    }
+    trimmed.to_owned()
+}
+
+fn home_dir() -> String {
+    env::var("HOME")
+        .or_else(|_| env::var("USERPROFILE"))
+        .unwrap_or_else(|_| String::from("~"))
 }
 
 fn format_resource_diagnostic(diagnostic: &pi_coding_agent_core::ResourceDiagnostic) -> String {

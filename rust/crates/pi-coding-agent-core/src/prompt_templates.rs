@@ -2,7 +2,7 @@ use crate::{ResourceDiagnostic, SourceInfo, frontmatter::parse_frontmatter};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -132,15 +132,21 @@ pub fn load_prompt_templates(options: LoadPromptTemplatesOptions) -> LoadPromptT
             continue;
         }
 
+        let default_scope = default_scope_for_path(&resolved, &cwd, agent_dir.as_deref());
         if resolved.is_dir() {
-            load_templates_from_dir(&resolved, &mut prompts_by_name, &mut diagnostics, None);
+            load_templates_from_dir(
+                &resolved,
+                &mut prompts_by_name,
+                &mut diagnostics,
+                default_scope,
+            );
         } else if resolved
             .extension()
             .and_then(|extension| extension.to_str())
             == Some("md")
         {
             if let Some(prompt) =
-                load_template_file(&resolved, source_info_for_path(&resolved, None))
+                load_template_file(&resolved, source_info_for_path(&resolved, default_scope))
             {
                 add_prompt(&mut prompts_by_name, &mut diagnostics, prompt);
             }
@@ -212,7 +218,7 @@ fn load_template_file(path: &Path, source_info: SourceInfo) -> Option<PromptTemp
         .or_else(|| {
             body.lines()
                 .find(|line| !line.trim().is_empty())
-                .map(|line| line.trim().chars().take(60).collect::<String>())
+                .map(|line| truncate_description(line.trim(), 60))
         })
         .unwrap_or_default();
 
@@ -242,11 +248,59 @@ fn source_info_for_path(path: &Path, default_scope: Option<(&str, PathBuf)>) -> 
 }
 
 fn resolve_from_cwd(cwd: &Path, input: &str) -> PathBuf {
-    let path = Path::new(input);
+    let normalized = normalize_path(input);
+    let path = Path::new(&normalized);
     if path.is_absolute() {
         path.to_path_buf()
     } else {
         cwd.join(path)
+    }
+}
+
+fn default_scope_for_path(
+    path: &Path,
+    cwd: &Path,
+    agent_dir: Option<&Path>,
+) -> Option<(&'static str, PathBuf)> {
+    let project_dir = cwd.join(CONFIG_DIR_NAME).join("prompts");
+    if is_under_path(path, &project_dir) {
+        return Some(("project", project_dir));
+    }
+
+    let user_dir = agent_dir.map(|agent_dir| agent_dir.join("prompts"));
+    user_dir.and_then(|user_dir| is_under_path(path, &user_dir).then_some(("user", user_dir)))
+}
+
+fn is_under_path(target: &Path, root: &Path) -> bool {
+    if target == root {
+        return true;
+    }
+    target.starts_with(root)
+}
+
+fn normalize_path(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed == "~" {
+        return home_dir();
+    }
+    if let Some(path) = trimmed.strip_prefix("~/") {
+        return Path::new(&home_dir()).join(path).display().to_string();
+    }
+    trimmed.to_owned()
+}
+
+fn home_dir() -> String {
+    env::var("HOME")
+        .or_else(|_| env::var("USERPROFILE"))
+        .unwrap_or_else(|_| String::from("~"))
+}
+
+fn truncate_description(text: &str, max_chars: usize) -> String {
+    let truncated = text.chars().take(max_chars).collect::<String>();
+    if text.chars().count() > max_chars {
+        format!("{truncated}...")
+    } else {
+        truncated
     }
 }
 

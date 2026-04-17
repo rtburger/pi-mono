@@ -8,6 +8,7 @@ pub mod messages;
 pub mod model_registry;
 pub mod model_resolver;
 pub mod prompt_templates;
+pub mod resource_loader;
 pub mod resource_types;
 pub mod runtime;
 pub mod session_manager;
@@ -50,6 +51,9 @@ pub use model_resolver::{
 pub use prompt_templates::{
     LoadPromptTemplatesOptions, LoadPromptTemplatesResult, PromptTemplate, expand_prompt_template,
     load_prompt_templates, parse_command_args, substitute_args,
+};
+pub use resource_loader::{
+    DefaultResourceLoader, DefaultResourceLoaderOptions, LoadedResources, ResourcePathEntry,
 };
 pub use resource_types::{ResourceDiagnostic, SourceInfo};
 pub use runtime::{
