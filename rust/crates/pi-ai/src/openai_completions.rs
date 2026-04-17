@@ -207,6 +207,8 @@ pub enum OpenAiCompletionsMessageContent {
 pub enum OpenAiCompletionsContentPart {
     Text {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<OpenAiCompletionsCacheControl>,
     },
     ImageUrl {
         image_url: OpenAiCompletionsImageUrl,
@@ -216,6 +218,12 @@ pub enum OpenAiCompletionsContentPart {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenAiCompletionsImageUrl {
     pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiCompletionsCacheControl {
+    #[serde(rename = "type")]
+    pub cache_type: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,7 +312,11 @@ pub fn detect_openai_completions_compat(model: &Model) -> OpenAiCompletionsCompa
         supports_strict_mode: true,
     };
 
-    if let Some(compat) = model.compat.as_ref() {
+    if let Some(compat) = model
+        .compat
+        .as_ref()
+        .and_then(|compat| compat.as_openai_completions())
+    {
         merge_openai_completions_compat(&mut detected, compat);
     }
 
@@ -365,7 +377,8 @@ pub fn build_openai_completions_request_params(
     compat: &OpenAiCompletionsCompat,
     options: &OpenAiCompletionsRequestOptions,
 ) -> OpenAiCompletionsRequestParams {
-    let messages = convert_openai_completions_messages(model, context, compat);
+    let mut messages = convert_openai_completions_messages(model, context, compat);
+    maybe_add_openrouter_anthropic_cache_control(model, &mut messages);
     let tools = if !context.tools.is_empty() {
         Some(convert_tools(&context.tools, compat))
     } else if has_tool_history(&context.messages) {
@@ -681,6 +694,7 @@ pub fn convert_openai_completions_messages(
                     let mut parts = Vec::with_capacity(image_parts.len() + 1);
                     parts.push(OpenAiCompletionsContentPart::Text {
                         text: "Attached image(s) from tool result:".into(),
+                        cache_control: None,
                     });
                     parts.extend(image_parts);
                     params.push(OpenAiCompletionsMessageParam {
@@ -730,6 +744,51 @@ fn map_reasoning_effort(effort: ReasoningEffort, compat: &OpenAiCompletionsCompa
         .unwrap_or_else(|| effort.as_str().to_string())
 }
 
+fn maybe_add_openrouter_anthropic_cache_control(
+    model: &Model,
+    messages: &mut [OpenAiCompletionsMessageParam],
+) {
+    if model.provider != "openrouter" || !model.id.starts_with("anthropic/") {
+        return;
+    }
+
+    let cache_control = Some(OpenAiCompletionsCacheControl {
+        cache_type: "ephemeral".into(),
+    });
+
+    for message in messages.iter_mut().rev() {
+        if message.role != "user" && message.role != "assistant" {
+            continue;
+        }
+
+        match &mut message.content {
+            OpenAiCompletionsMessageContent::Text(text) => {
+                let text = std::mem::take(text);
+                message.content = OpenAiCompletionsMessageContent::Parts(vec![
+                    OpenAiCompletionsContentPart::Text {
+                        text,
+                        cache_control: cache_control.clone(),
+                    },
+                ]);
+                return;
+            }
+            OpenAiCompletionsMessageContent::Parts(parts) => {
+                for part in parts.iter_mut().rev() {
+                    if let OpenAiCompletionsContentPart::Text {
+                        cache_control: slot,
+                        ..
+                    } = part
+                    {
+                        *slot = cache_control.clone();
+                        return;
+                    }
+                }
+            }
+            OpenAiCompletionsMessageContent::Null(()) => {}
+        }
+    }
+}
+
 fn convert_tools(
     tools: &[ToolDefinition],
     compat: &OpenAiCompletionsCompat,
@@ -777,6 +836,7 @@ fn convert_user_content(
             UserContent::Text { text } if !text.is_empty() => {
                 parts.push(OpenAiCompletionsContentPart::Text {
                     text: sanitize_provider_text(text),
+                    cache_control: None,
                 });
             }
             UserContent::Image { data, mime_type } if supports_images => {

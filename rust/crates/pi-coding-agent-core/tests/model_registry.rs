@@ -1,7 +1,7 @@
 use pi_coding_agent_core::{MemoryAuthStorage, ModelRegistry, RequestAuth};
 use pi_events::{
-    Model, ModelCost, ModelRouting, OpenAiCompletionsCompatConfig, OpenAiCompletionsMaxTokensField,
-    OpenAiThinkingFormat,
+    Model, ModelCompat, ModelCost, ModelRouting, OpenAiCompletionsCompatConfig,
+    OpenAiCompletionsMaxTokensField, OpenAiResponsesCompatConfig, OpenAiThinkingFormat,
 };
 use serde_json::json;
 use std::{
@@ -272,15 +272,17 @@ fn custom_models_capture_cost_and_compat() {
     );
     assert_eq!(
         model.compat,
-        Some(OpenAiCompletionsCompatConfig {
-            thinking_format: Some(OpenAiThinkingFormat::OpenRouter),
-            open_router_routing: Some(ModelRouting {
-                only: None,
-                order: Some(vec!["anthropic".into()]),
-            }),
-            requires_tool_result_name: Some(true),
-            ..OpenAiCompletionsCompatConfig::default()
-        })
+        Some(ModelCompat::OpenAiCompletions(
+            OpenAiCompletionsCompatConfig {
+                thinking_format: Some(OpenAiThinkingFormat::OpenRouter),
+                open_router_routing: Some(ModelRouting {
+                    only: None,
+                    order: Some(vec!["anthropic".into()]),
+                }),
+                requires_tool_result_name: Some(true),
+                ..OpenAiCompletionsCompatConfig::default()
+            }
+        ))
     );
 }
 
@@ -329,15 +331,56 @@ fn model_overrides_merge_cost_and_provider_compat() {
     assert_eq!(model.cost.output, 9.0);
     assert_eq!(
         model.compat,
-        Some(OpenAiCompletionsCompatConfig {
-            max_tokens_field: Some(OpenAiCompletionsMaxTokensField::MaxTokens),
-            supports_store: Some(false),
-            vercel_gateway_routing: Some(ModelRouting {
-                only: Some(vec!["openai".into()]),
-                order: Some(vec!["openai".into()]),
-            }),
-            ..OpenAiCompletionsCompatConfig::default()
-        })
+        Some(ModelCompat::OpenAiCompletions(
+            OpenAiCompletionsCompatConfig {
+                max_tokens_field: Some(OpenAiCompletionsMaxTokensField::MaxTokens),
+                supports_store: Some(false),
+                vercel_gateway_routing: Some(ModelRouting {
+                    only: Some(vec!["openai".into()]),
+                    order: Some(vec!["openai".into()]),
+                }),
+                ..OpenAiCompletionsCompatConfig::default()
+            }
+        ))
+    );
+}
+
+#[test]
+fn custom_openai_responses_models_capture_reserved_compat_object() {
+    let temp_dir = unique_temp_dir("responses-compat");
+    let models_json_path = temp_dir.join("models.json");
+    write_models_json(
+        &models_json_path,
+        json!({
+            "providers": {
+                "custom-openai": {
+                    "baseUrl": "https://proxy.example.com/v1",
+                    "apiKey": "OPENAI_API_KEY",
+                    "api": "openai-responses",
+                    "models": [
+                        {
+                            "id": "responses-model",
+                            "name": "Responses Model",
+                            "compat": {}
+                        }
+                    ]
+                }
+            }
+        }),
+    );
+
+    let registry = ModelRegistry::new(
+        Arc::new(MemoryAuthStorage::new()),
+        built_in_models(),
+        Some(models_json_path),
+    );
+    let model = registry.find("custom-openai", "responses-model").unwrap();
+
+    assert_eq!(
+        model.compat,
+        Some(ModelCompat::OpenAiResponses(
+            OpenAiResponsesCompatConfig::default()
+        ))
     );
 }
 

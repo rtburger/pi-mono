@@ -233,6 +233,45 @@ pub struct OpenAiCompletionsCompatConfig {
     pub supports_strict_mode: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OpenAiResponsesCompatConfig {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ModelCompat {
+    OpenAiResponses(OpenAiResponsesCompatConfig),
+    OpenAiCompletions(OpenAiCompletionsCompatConfig),
+}
+
+impl ModelCompat {
+    pub fn as_openai_completions(&self) -> Option<&OpenAiCompletionsCompatConfig> {
+        match self {
+            Self::OpenAiCompletions(config) => Some(config),
+            Self::OpenAiResponses(_) => None,
+        }
+    }
+
+    pub fn as_openai_responses(&self) -> Option<&OpenAiResponsesCompatConfig> {
+        match self {
+            Self::OpenAiResponses(config) => Some(config),
+            Self::OpenAiCompletions(_) => None,
+        }
+    }
+}
+
+impl From<OpenAiCompletionsCompatConfig> for ModelCompat {
+    fn from(value: OpenAiCompletionsCompatConfig) -> Self {
+        Self::OpenAiCompletions(value)
+    }
+}
+
+impl From<OpenAiResponsesCompatConfig> for ModelCompat {
+    fn from(value: OpenAiResponsesCompatConfig) -> Self {
+        Self::OpenAiResponses(value)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Model {
     pub id: String,
@@ -247,7 +286,7 @@ pub struct Model {
     pub context_window: u64,
     pub max_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compat: Option<OpenAiCompletionsCompatConfig>,
+    pub compat: Option<ModelCompat>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

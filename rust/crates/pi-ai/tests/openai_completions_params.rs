@@ -1,11 +1,13 @@
 use pi_ai::openai_completions::{
-    ModelRouting, OpenAiCompletionsCompat, OpenAiCompletionsMaxTokensField,
-    OpenAiCompletionsReasoning, OpenAiCompletionsRequestOptions, OpenAiCompletionsToolChoice,
-    OpenAiCompletionsToolChoiceMode, OpenAiThinkingFormat, ReasoningEffort,
-    build_openai_completions_request_params, detect_openai_completions_compat,
+    ModelRouting, OpenAiCompletionsCompat, OpenAiCompletionsContentPart,
+    OpenAiCompletionsMaxTokensField, OpenAiCompletionsMessageContent, OpenAiCompletionsReasoning,
+    OpenAiCompletionsRequestOptions, OpenAiCompletionsToolChoice, OpenAiCompletionsToolChoiceMode,
+    OpenAiThinkingFormat, ReasoningEffort, build_openai_completions_request_params,
+    detect_openai_completions_compat,
 };
 use pi_events::{
-    Context, Model, ModelCost, OpenAiCompletionsCompatConfig, ToolDefinition, UserContent,
+    Context, Model, ModelCompat, ModelCost, OpenAiCompletionsCompatConfig, ToolDefinition,
+    UserContent,
 };
 use serde_json::json;
 
@@ -173,13 +175,15 @@ fn applies_model_compat_overrides_to_openrouter_request_shapes() {
         "https://openrouter.ai/api/v1",
         true,
     );
-    model.compat = Some(OpenAiCompletionsCompatConfig {
-        open_router_routing: Some(ModelRouting {
-            only: Some(vec!["anthropic".into()]),
-            order: Some(vec!["openai".into()]),
-        }),
-        ..OpenAiCompletionsCompatConfig::default()
-    });
+    model.compat = Some(ModelCompat::OpenAiCompletions(
+        OpenAiCompletionsCompatConfig {
+            open_router_routing: Some(ModelRouting {
+                only: Some(vec!["anthropic".into()]),
+                order: Some(vec!["openai".into()]),
+            }),
+            ..OpenAiCompletionsCompatConfig::default()
+        },
+    ));
 
     let compat = detect_openai_completions_compat(&model);
     let params = build_openai_completions_request_params(
@@ -219,10 +223,12 @@ fn applies_model_compat_overrides_to_openrouter_request_shapes() {
 #[test]
 fn applies_zai_enable_thinking_and_tool_stream_overrides() {
     let mut model = model("zai", "glm-4.5", "https://api.z.ai/v1", true);
-    model.compat = Some(OpenAiCompletionsCompatConfig {
-        zai_tool_stream: Some(true),
-        ..OpenAiCompletionsCompatConfig::default()
-    });
+    model.compat = Some(ModelCompat::OpenAiCompletions(
+        OpenAiCompletionsCompatConfig {
+            zai_tool_stream: Some(true),
+            ..OpenAiCompletionsCompatConfig::default()
+        },
+    ));
 
     let compat = detect_openai_completions_compat(&model);
     let params = build_openai_completions_request_params(
@@ -263,6 +269,47 @@ fn applies_reasoning_effort_for_reasoning_models() {
     );
 
     assert_eq!(params.reasoning_effort.as_deref(), Some("high"));
+}
+
+#[test]
+fn adds_openrouter_anthropic_cache_control_to_last_text_message_part() {
+    let model = model(
+        "openrouter",
+        "anthropic/claude-sonnet-4-5",
+        "https://openrouter.ai/api/v1",
+        false,
+    );
+    let compat = detect_openai_completions_compat(&model);
+    let params = build_openai_completions_request_params(
+        &model,
+        &Context {
+            system_prompt: None,
+            messages: vec![pi_events::Message::User {
+                content: vec![UserContent::Text { text: "Hi".into() }],
+                timestamp: 1,
+            }],
+            tools: vec![],
+        },
+        &compat,
+        &OpenAiCompletionsRequestOptions::default(),
+    );
+
+    match &params.messages[0].content {
+        OpenAiCompletionsMessageContent::Parts(parts) => match &parts[0] {
+            OpenAiCompletionsContentPart::Text {
+                text,
+                cache_control,
+            } => {
+                assert_eq!(text, "Hi");
+                assert_eq!(
+                    serde_json::to_value(cache_control).unwrap(),
+                    json!({"type": "ephemeral"})
+                );
+            }
+            other => panic!("expected cached text part, got {other:?}"),
+        },
+        other => panic!("expected multipart content, got {other:?}"),
+    }
 }
 
 #[test]

@@ -5,7 +5,7 @@ use crate::{
     },
     model_resolver::ModelCatalog,
 };
-use pi_events::{Model, ModelCost, ModelRouting, OpenAiCompletionsCompatConfig};
+use pi_events::{Model, ModelCompat, ModelCost, ModelRouting, OpenAiCompletionsCompatConfig};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -378,7 +378,7 @@ impl CustomModelsResult {
 #[derive(Debug, Clone)]
 struct ProviderOverride {
     base_url: Option<String>,
-    compat: Option<OpenAiCompletionsCompatConfig>,
+    compat: Option<ModelCompat>,
 }
 
 #[derive(Debug, Clone)]
@@ -401,7 +401,7 @@ struct ProviderConfigFile {
     api_key: Option<String>,
     api: Option<String>,
     headers: Option<BTreeMap<String, String>>,
-    compat: Option<OpenAiCompletionsCompatConfig>,
+    compat: Option<ModelCompat>,
     auth_header: Option<bool>,
     models: Option<Vec<ModelDefinitionFile>>,
     model_overrides: Option<BTreeMap<String, ModelOverrideFile>>,
@@ -420,7 +420,7 @@ struct ModelDefinitionFile {
     context_window: Option<u64>,
     max_tokens: Option<u64>,
     headers: Option<BTreeMap<String, String>>,
-    compat: Option<OpenAiCompletionsCompatConfig>,
+    compat: Option<ModelCompat>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -433,7 +433,7 @@ struct ModelOverrideFile {
     context_window: Option<u64>,
     max_tokens: Option<u64>,
     headers: Option<BTreeMap<String, String>>,
-    compat: Option<OpenAiCompletionsCompatConfig>,
+    compat: Option<ModelCompat>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -612,53 +612,76 @@ fn apply_model_override(model: &Model, model_override: &ModelOverrideFile) -> Mo
 }
 
 fn merge_compat(
-    base: Option<&OpenAiCompletionsCompatConfig>,
-    override_compat: Option<&OpenAiCompletionsCompatConfig>,
-) -> Option<OpenAiCompletionsCompatConfig> {
+    base: Option<&ModelCompat>,
+    override_compat: Option<&ModelCompat>,
+) -> Option<ModelCompat> {
     match (base, override_compat) {
         (None, None) => None,
         (Some(base), None) => Some(base.clone()),
         (None, Some(override_compat)) => Some(override_compat.clone()),
-        (Some(base), Some(override_compat)) => Some(OpenAiCompletionsCompatConfig {
-            supports_store: override_compat.supports_store.or(base.supports_store),
-            supports_developer_role: override_compat
-                .supports_developer_role
-                .or(base.supports_developer_role),
-            supports_reasoning_effort: override_compat
-                .supports_reasoning_effort
-                .or(base.supports_reasoning_effort),
-            reasoning_effort_map: if override_compat.reasoning_effort_map.is_empty() {
-                base.reasoning_effort_map.clone()
-            } else {
-                override_compat.reasoning_effort_map.clone()
-            },
-            supports_usage_in_streaming: override_compat
-                .supports_usage_in_streaming
-                .or(base.supports_usage_in_streaming),
-            max_tokens_field: override_compat.max_tokens_field.or(base.max_tokens_field),
-            requires_tool_result_name: override_compat
-                .requires_tool_result_name
-                .or(base.requires_tool_result_name),
-            requires_assistant_after_tool_result: override_compat
-                .requires_assistant_after_tool_result
-                .or(base.requires_assistant_after_tool_result),
-            requires_thinking_as_text: override_compat
-                .requires_thinking_as_text
-                .or(base.requires_thinking_as_text),
-            thinking_format: override_compat.thinking_format.or(base.thinking_format),
-            open_router_routing: merge_routing(
-                base.open_router_routing.as_ref(),
-                override_compat.open_router_routing.as_ref(),
-            ),
-            vercel_gateway_routing: merge_routing(
-                base.vercel_gateway_routing.as_ref(),
-                override_compat.vercel_gateway_routing.as_ref(),
-            ),
-            zai_tool_stream: override_compat.zai_tool_stream.or(base.zai_tool_stream),
-            supports_strict_mode: override_compat
-                .supports_strict_mode
-                .or(base.supports_strict_mode),
-        }),
+        (
+            Some(ModelCompat::OpenAiCompletions(base)),
+            Some(ModelCompat::OpenAiCompletions(override_compat)),
+        ) => Some(ModelCompat::OpenAiCompletions(
+            merge_openai_completions_compat(base, override_compat),
+        )),
+        (
+            Some(ModelCompat::OpenAiResponses(_)),
+            Some(ModelCompat::OpenAiResponses(override_compat)),
+        ) => Some(ModelCompat::OpenAiResponses(override_compat.clone())),
+        (Some(ModelCompat::OpenAiCompletions(base)), Some(ModelCompat::OpenAiResponses(_))) => {
+            Some(ModelCompat::OpenAiCompletions(base.clone()))
+        }
+        (
+            Some(ModelCompat::OpenAiResponses(_)),
+            Some(ModelCompat::OpenAiCompletions(override_compat)),
+        ) => Some(ModelCompat::OpenAiCompletions(override_compat.clone())),
+    }
+}
+
+fn merge_openai_completions_compat(
+    base: &OpenAiCompletionsCompatConfig,
+    override_compat: &OpenAiCompletionsCompatConfig,
+) -> OpenAiCompletionsCompatConfig {
+    OpenAiCompletionsCompatConfig {
+        supports_store: override_compat.supports_store.or(base.supports_store),
+        supports_developer_role: override_compat
+            .supports_developer_role
+            .or(base.supports_developer_role),
+        supports_reasoning_effort: override_compat
+            .supports_reasoning_effort
+            .or(base.supports_reasoning_effort),
+        reasoning_effort_map: if override_compat.reasoning_effort_map.is_empty() {
+            base.reasoning_effort_map.clone()
+        } else {
+            override_compat.reasoning_effort_map.clone()
+        },
+        supports_usage_in_streaming: override_compat
+            .supports_usage_in_streaming
+            .or(base.supports_usage_in_streaming),
+        max_tokens_field: override_compat.max_tokens_field.or(base.max_tokens_field),
+        requires_tool_result_name: override_compat
+            .requires_tool_result_name
+            .or(base.requires_tool_result_name),
+        requires_assistant_after_tool_result: override_compat
+            .requires_assistant_after_tool_result
+            .or(base.requires_assistant_after_tool_result),
+        requires_thinking_as_text: override_compat
+            .requires_thinking_as_text
+            .or(base.requires_thinking_as_text),
+        thinking_format: override_compat.thinking_format.or(base.thinking_format),
+        open_router_routing: merge_routing(
+            base.open_router_routing.as_ref(),
+            override_compat.open_router_routing.as_ref(),
+        ),
+        vercel_gateway_routing: merge_routing(
+            base.vercel_gateway_routing.as_ref(),
+            override_compat.vercel_gateway_routing.as_ref(),
+        ),
+        zai_tool_stream: override_compat.zai_tool_stream.or(base.zai_tool_stream),
+        supports_strict_mode: override_compat
+            .supports_strict_mode
+            .or(base.supports_strict_mode),
     }
 }
 

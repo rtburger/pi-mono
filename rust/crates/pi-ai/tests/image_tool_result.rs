@@ -349,7 +349,7 @@ fn openai_completions_moves_tool_result_images_to_followup_user_message() {
         OpenAiCompletionsMessageContent::Parts(parts) => {
             assert_eq!(parts.len(), 2);
             match &parts[0] {
-                OpenAiCompletionsContentPart::Text { text } => {
+                OpenAiCompletionsContentPart::Text { text, .. } => {
                     assert_eq!(text, "Attached image(s) from tool result:");
                 }
                 other => panic!("expected follow-up text part, got {other:?}"),
