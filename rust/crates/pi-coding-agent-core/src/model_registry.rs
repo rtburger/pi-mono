@@ -651,11 +651,10 @@ fn merge_openai_completions_compat(
         supports_reasoning_effort: override_compat
             .supports_reasoning_effort
             .or(base.supports_reasoning_effort),
-        reasoning_effort_map: if override_compat.reasoning_effort_map.is_empty() {
-            base.reasoning_effort_map.clone()
-        } else {
-            override_compat.reasoning_effort_map.clone()
-        },
+        reasoning_effort_map: override_compat
+            .reasoning_effort_map
+            .clone()
+            .or(base.reasoning_effort_map.clone()),
         supports_usage_in_streaming: override_compat
             .supports_usage_in_streaming
             .or(base.supports_usage_in_streaming),

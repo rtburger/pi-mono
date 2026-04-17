@@ -298,6 +298,9 @@ fn model_overrides_merge_cost_and_provider_compat() {
                     "baseUrl": "https://proxy.example.com/v1",
                     "compat": {
                         "maxTokensField": "max_tokens",
+                        "reasoningEffortMap": {
+                            "high": "provider-high"
+                        },
                         "vercelGatewayRouting": {
                             "order": ["openai"]
                         }
@@ -309,6 +312,7 @@ fn model_overrides_merge_cost_and_provider_compat() {
                             },
                             "compat": {
                                 "supportsStore": false,
+                                "reasoningEffortMap": {},
                                 "vercelGatewayRouting": {
                                     "only": ["openai"]
                                 }
@@ -335,6 +339,7 @@ fn model_overrides_merge_cost_and_provider_compat() {
             OpenAiCompletionsCompatConfig {
                 max_tokens_field: Some(OpenAiCompletionsMaxTokensField::MaxTokens),
                 supports_store: Some(false),
+                reasoning_effort_map: Some(std::collections::BTreeMap::new()),
                 vercel_gateway_routing: Some(ModelRouting {
                     only: Some(vec!["openai".into()]),
                     order: Some(vec!["openai".into()]),

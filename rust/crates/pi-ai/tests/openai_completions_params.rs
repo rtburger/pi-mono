@@ -168,6 +168,26 @@ fn detects_non_standard_provider_compat_and_reasoning_mappings() {
 }
 
 #[test]
+fn explicit_empty_reasoning_effort_map_override_clears_detected_mapping() {
+    let mut model = model(
+        "groq",
+        "qwen/qwen3-32b",
+        "https://api.groq.com/openai/v1",
+        true,
+    );
+    model.compat = Some(ModelCompat::OpenAiCompletions(
+        OpenAiCompletionsCompatConfig {
+            reasoning_effort_map: Some(std::collections::BTreeMap::new()),
+            ..OpenAiCompletionsCompatConfig::default()
+        },
+    ));
+
+    let compat = detect_openai_completions_compat(&model);
+
+    assert!(compat.reasoning_effort_map.is_empty());
+}
+
+#[test]
 fn applies_model_compat_overrides_to_openrouter_request_shapes() {
     let mut model = model(
         "openrouter",

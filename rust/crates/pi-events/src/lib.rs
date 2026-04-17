@@ -209,8 +209,8 @@ pub struct OpenAiCompletionsCompatConfig {
     pub supports_developer_role: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_reasoning_effort: Option<bool>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub reasoning_effort_map: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_map: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_usage_in_streaming: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

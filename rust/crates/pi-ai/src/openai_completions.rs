@@ -336,8 +336,8 @@ fn merge_openai_completions_compat(
     if let Some(value) = override_compat.supports_reasoning_effort {
         detected.supports_reasoning_effort = value;
     }
-    if !override_compat.reasoning_effort_map.is_empty() {
-        detected.reasoning_effort_map = override_compat.reasoning_effort_map.clone();
+    if let Some(reasoning_effort_map) = override_compat.reasoning_effort_map.as_ref() {
+        detected.reasoning_effort_map = reasoning_effort_map.clone();
     }
     if let Some(value) = override_compat.supports_usage_in_streaming {
         detected.supports_usage_in_streaming = value;
