@@ -3930,21 +3930,54 @@ async fn run_command_with_terminal_factory(
         }
     };
 
-    let mut messages = parsed.messages.clone();
+    let mut raw_messages = parsed.messages.clone();
     let mut initial_message = build_initial_message(
-        &mut messages,
+        &mut raw_messages,
         (!processed_files.text.is_empty()).then_some(processed_files.text),
         processed_files.images,
         stdin_content,
     );
+    let raw_initial_message = initial_message.initial_message.clone();
+    let messages = raw_messages
+        .iter()
+        .map(|message| preprocess_prompt_text(message, &resources))
+        .collect::<Vec<_>>();
     initial_message.initial_message = initial_message
         .initial_message
         .as_deref()
         .map(|message| preprocess_prompt_text(message, &resources));
-    messages = messages
-        .iter()
-        .map(|message| preprocess_prompt_text(message, &resources))
-        .collect();
+
+    if should_start_extension_host(
+        &runtime_cwd,
+        agent_dir.as_deref(),
+        parsed.extensions.as_deref().unwrap_or(&[]),
+        parsed.no_extensions,
+    ) {
+        return run_extension_aware_print_command(
+            RpcPreparedOptions {
+                parsed,
+                initial_stderr: String::new(),
+                stdin_content: None,
+                auth_source: auth_source.clone(),
+                built_in_models: built_in_models.clone(),
+                models_json_path: models_json_path.clone(),
+                agent_dir: agent_dir.clone(),
+                cwd: runtime_cwd.clone(),
+                default_system_prompt,
+                stream_options: stream_options.clone(),
+            },
+            session_support,
+            runtime_settings,
+            scoped_models,
+            print_mode,
+            raw_messages,
+            raw_initial_message,
+            initial_message.initial_images,
+            stdout,
+            stderr,
+        )
+        .await;
+    }
 
     let overlay_auth = OverlayAuthSource::new(auth_source);
     if let Err(error) = apply_runtime_api_key_override(
@@ -4112,6 +4145,7 @@ struct RpcShared {
     state: Arc<Mutex<RpcState>>,
     stdout_emitter: TextEmitter,
     stderr_emitter: TextEmitter,
+    emit_session_events: bool,
 }
 
 impl RpcShared {
@@ -4168,10 +4202,13 @@ impl RpcShared {
             .clone()
     }
 
-    async fn replace_state(&self, mut next: RpcState) {
-        attach_rpc_event_subscription(&mut next, self.stdout_emitter.clone());
+    async fn swap_state_without_shutdown(&self, mut next: RpcState) {
+        if self.emit_session_events {
+            attach_rpc_event_subscription(&mut next, self.stdout_emitter.clone());
+        }
+        let next_extension_host = next.extension_host.clone();
 
-        let previous_extension_host = {
+        {
             let mut state = self.state.lock().expect("rpc state mutex poisoned");
             if let Some(unsubscribe) = state.event_unsubscribe.take() {
                 let _ = unsubscribe();
@@ -4179,12 +4216,25 @@ impl RpcShared {
             if let Some(bash_abort_tx) = state.bash_abort_tx.take() {
                 let _ = bash_abort_tx.send(true);
             }
-            let previous_extension_host = state.extension_host.clone();
             *state = next;
-            previous_extension_host
-        };
+        }
 
+        if let Some(extension_host) = next_extension_host {
+            install_extension_host_app_request_handler(self.clone(), &extension_host);
+        }
+    }
+
+    async fn replace_state(&self, next: RpcState) {
+        let previous_extension_host = self.snapshot().extension_host;
+        self.swap_state_without_shutdown(next).await;
         if let Some(extension_host) = previous_extension_host {
+            let current_extension_host = self.snapshot().extension_host;
+            if current_extension_host
+                .as_ref()
+                .is_some_and(|current| current.is_same_instance(&extension_host))
+            {
+                return;
+            }
             let _ = extension_host.shutdown().await;
         }
     }
@@ -4214,6 +4264,27 @@ impl RpcShared {
             let _ = extension_host.shutdown().await;
         }
     }
+}
+
+fn install_extension_host_app_request_handler(
+    shared: RpcShared,
+    extension_host: &RpcExtensionHost,
+) {
+    extension_host.set_app_request_handler(move |request| {
+        let shared = shared.clone();
+        async move { handle_extension_host_app_request(shared, request).await }
+    });
+}
+
+async fn shutdown_stale_extension_host(shared: &RpcShared, extension_host: RpcExtensionHost) {
+    let current_extension_host = shared.snapshot().extension_host;
+    if current_extension_host
+        .as_ref()
+        .is_some_and(|current| current.is_same_instance(&extension_host))
+    {
+        return;
+    }
+    let _ = extension_host.shutdown().await;
 }
 
 async fn run_rpc_command_live_with_terminal_factory(
@@ -4448,12 +4519,256 @@ async fn create_rpc_shared(
         stderr_emitter(stderr);
     }
 
-    Ok(RpcShared {
+    let shared = RpcShared {
         options: Arc::new(options),
         state: Arc::new(Mutex::new(state)),
         stdout_emitter,
         stderr_emitter,
-    })
+        emit_session_events: true,
+    };
+    if let Some(extension_host) = shared.snapshot().extension_host {
+        install_extension_host_app_request_handler(shared.clone(), &extension_host);
+    }
+
+    Ok(shared)
+}
+
+async fn run_extension_aware_print_command(
+    options: RpcPreparedOptions,
+    initial_session_support: Option<SessionSupport>,
+    runtime_settings: LoadedRuntimeSettings,
+    scoped_models: Vec<ScopedModel>,
+    print_mode: crate::PrintOutputMode,
+    messages: Vec<String>,
+    initial_message: Option<String>,
+    initial_images: Option<Vec<UserContent>>,
+    initial_stdout: String,
+    initial_stderr: String,
+) -> RunCommandResult {
+    let stdout = Arc::new(Mutex::new(initial_stdout));
+    let stderr = Arc::new(Mutex::new(initial_stderr));
+    let stdout_emitter: TextEmitter = Arc::new({
+        let stdout = stdout.clone();
+        move |text| {
+            stdout
+                .lock()
+                .expect("print stdout buffer mutex poisoned")
+                .push_str(&text);
+        }
+    });
+    let stderr_emitter: TextEmitter = Arc::new({
+        let stderr = stderr.clone();
+        move |text| {
+            stderr
+                .lock()
+                .expect("print stderr buffer mutex poisoned")
+                .push_str(&text);
+        }
+    });
+
+    let (mut state, bootstrap_output) = match build_rpc_state(
+        &options,
+        &options.cwd,
+        runtime_settings,
+        scoped_models,
+        initial_session_support,
+        None,
+        None,
+        String::from("startup"),
+        None,
+        stdout_emitter.clone(),
+        stderr_emitter.clone(),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error_output) => {
+            if !error_output.is_empty() {
+                stderr_emitter(error_output);
+            }
+            return RunCommandResult {
+                exit_code: 1,
+                stdout: stdout
+                    .lock()
+                    .expect("print stdout buffer mutex poisoned")
+                    .clone(),
+                stderr: stderr
+                    .lock()
+                    .expect("print stderr buffer mutex poisoned")
+                    .clone(),
+            };
+        }
+    };
+    if print_mode == crate::PrintOutputMode::Json {
+        attach_rpc_event_subscription(&mut state, stdout_emitter.clone());
+    }
+    if !bootstrap_output.is_empty() {
+        stderr_emitter(bootstrap_output);
+    }
+
+    let shared = RpcShared {
+        options: Arc::new(options),
+        state: Arc::new(Mutex::new(state)),
+        stdout_emitter,
+        stderr_emitter,
+        emit_session_events: print_mode == crate::PrintOutputMode::Json,
+    };
+    if let Some(extension_host) = shared.snapshot().extension_host {
+        install_extension_host_app_request_handler(shared.clone(), &extension_host);
+    }
+
+    if print_mode == crate::PrintOutputMode::Json
+        && let Some(session_manager) = shared.snapshot().session_manager
+    {
+        let header = session_manager
+            .lock()
+            .expect("print session manager mutex poisoned")
+            .get_header()
+            .clone();
+        shared.emit_stdout(format!(
+            "{}\n",
+            serde_json::to_string(&json!({
+                "type": "session",
+                "version": header.version,
+                "id": header.id,
+                "timestamp": header.timestamp,
+                "cwd": header.cwd,
+                "parentSession": header.parent_session,
+            }))
+            .expect("print session header serialization must succeed")
+        ));
+    }
+
+    let mut exit_code = 0;
+    let mut trailing_stdout = String::new();
+    let mut trailing_stderr = String::new();
+    let prompt_result = run_extension_aware_print_prompts(
+        &shared,
+        &messages,
+        initial_message.as_deref(),
+        initial_images.as_deref(),
+    )
+    .await;
+
+    match prompt_result {
+        Ok(()) => {
+            if print_mode == crate::PrintOutputMode::Text {
+                shared.current_core().wait_for_idle().await;
+                let state = shared.current_session().state();
+                if let Some(last_message) = state
+                    .messages
+                    .last()
+                    .and_then(pi_agent::AgentMessage::as_standard_message)
+                    && let Message::Assistant {
+                        content,
+                        stop_reason,
+                        error_message,
+                        ..
+                    } = last_message
+                {
+                    if matches!(
+                        stop_reason,
+                        pi_events::StopReason::Error | pi_events::StopReason::Aborted
+                    ) {
+                        push_line(
+                            &mut trailing_stderr,
+                            error_message
+                                .as_deref()
+                                .unwrap_or_else(|| match stop_reason {
+                                    pi_events::StopReason::Error => "Request error",
+                                    pi_events::StopReason::Aborted => "Request aborted",
+                                    pi_events::StopReason::Stop
+                                    | pi_events::StopReason::Length
+                                    | pi_events::StopReason::ToolUse => "Request error",
+                                }),
+                        );
+                        exit_code = 1;
+                    } else {
+                        for block in content {
+                            if let AssistantContent::Text { text, .. } = block {
+                                push_line(&mut trailing_stdout, text);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            push_line(&mut trailing_stderr, &error);
+            exit_code = 1;
+        }
+    }
+
+    shared.shutdown_extension_host().await;
+
+    let mut stdout = stdout
+        .lock()
+        .expect("print stdout buffer mutex poisoned")
+        .clone();
+    let mut stderr = stderr
+        .lock()
+        .expect("print stderr buffer mutex poisoned")
+        .clone();
+    stdout.push_str(&trailing_stdout);
+    stderr.push_str(&trailing_stderr);
+
+    RunCommandResult {
+        exit_code,
+        stdout,
+        stderr,
+    }
+}
+
+async fn run_extension_aware_print_prompts(
+    shared: &RpcShared,
+    messages: &[String],
+    initial_message: Option<&str>,
+    initial_images: Option<&[UserContent]>,
+) -> Result<(), String> {
+    if let Some(initial_message) = initial_message {
+        execute_extension_aware_print_prompt(shared, initial_message, initial_images).await?;
+    }
+
+    for message in messages {
+        execute_extension_aware_print_prompt(shared, message, None).await?;
+    }
+
+    Ok(())
+}
+
+async fn execute_extension_aware_print_prompt(
+    shared: &RpcShared,
+    message: &str,
+    images: Option<&[UserContent]>,
+) -> Result<(), String> {
+    let snapshot = shared.snapshot();
+    if let Some((command_name, args)) = parse_rpc_extension_command(message)
+        && let Some(extension_host) = snapshot.extension_host.clone()
+        && extension_host.has_command(&command_name)
+    {
+        let handled = extension_host.execute_command(&command_name, &args).await?;
+        shutdown_stale_extension_host(shared, extension_host).await;
+        if !handled {
+            return Err(format!("Unknown extension command: /{command_name}"));
+        }
+        shared.current_core().wait_for_idle().await;
+        return Ok(());
+    }
+
+    let prepared = preprocess_prompt_text(message, &snapshot.resources);
+    if let Some(images) = images {
+        snapshot
+            .session
+            .prompt_message(build_rpc_user_message(prepared, images.to_vec()))
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        snapshot
+            .session
+            .prompt_text(prepared)
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 fn resolve_rpc_scoped_models(
@@ -5616,6 +5931,349 @@ async fn handle_rpc_input_line(
     }
 }
 
+async fn handle_extension_host_app_request(
+    shared: RpcShared,
+    request: Value,
+) -> Result<Value, String> {
+    let Some(request) = request.as_object() else {
+        return Err(String::from("Extension app request must be a JSON object"));
+    };
+    let method = required_string_field(request, "method")?;
+
+    match method.as_str() {
+        "wait_for_idle" => {
+            shared.current_core().wait_for_idle().await;
+            Ok(Value::Null)
+        }
+        "send_user_message" => {
+            let content = request
+                .get("content")
+                .ok_or_else(|| String::from("Missing required field: content"))?;
+            let deliver_as = request
+                .get("options")
+                .and_then(Value::as_object)
+                .and_then(|options| optional_string_field(options, "deliverAs"));
+            execute_extension_send_user_message(&shared, content, deliver_as.as_deref()).await?;
+            Ok(Value::Null)
+        }
+        "set_session_name" => {
+            let name = required_string_field(request, "name")?;
+            if name.trim().is_empty() {
+                return Err(String::from("Session name cannot be empty"));
+            }
+            let snapshot = shared.snapshot();
+            let Some(session_manager) = snapshot.session_manager.as_ref() else {
+                return Err(String::from("Session naming is unavailable"));
+            };
+            session_manager
+                .lock()
+                .expect("rpc session manager mutex poisoned")
+                .append_session_info(&name)
+                .map_err(|error| error.to_string())?;
+            sync_rpc_extension_state(&shared).await;
+            Ok(Value::Null)
+        }
+        "set_model" => {
+            let model = serde_json::from_value::<Model>(
+                request
+                    .get("model")
+                    .cloned()
+                    .ok_or_else(|| String::from("Missing required field: model"))?,
+            )
+            .map_err(|error| format!("Invalid model payload: {error}"))?;
+            let snapshot = shared.snapshot();
+            if !snapshot.core.model_registry().has_configured_auth(&model) {
+                return Ok(Value::Bool(false));
+            }
+            apply_interactive_model_state(
+                &snapshot.core,
+                &model,
+                None,
+                snapshot.session_manager.as_ref(),
+            )?;
+            sync_rpc_extension_state(&shared).await;
+            Ok(Value::Bool(true))
+        }
+        "set_thinking_level" => {
+            let level = request
+                .get("level")
+                .and_then(Value::as_str)
+                .and_then(parse_thinking_level)
+                .ok_or_else(|| String::from("Invalid thinking level"))?;
+            let snapshot = shared.snapshot();
+            let model = snapshot.core.state().model;
+            apply_interactive_model_state(
+                &snapshot.core,
+                &model,
+                Some(level),
+                snapshot.session_manager.as_ref(),
+            )?;
+            sync_rpc_extension_state(&shared).await;
+            Ok(Value::Null)
+        }
+        "new_session" => {
+            let snapshot = shared.snapshot();
+            if snapshot.core.state().is_streaming {
+                return Err(String::from(
+                    "Cannot create a new session while a request is running",
+                ));
+            }
+            let parent_session = request
+                .get("options")
+                .and_then(Value::as_object)
+                .and_then(|options| optional_string_field(options, "parentSession"));
+            let mut manager = recreate_session_manager_from_rpc(&snapshot)?;
+            manager.new_session(NewSessionOptions {
+                id: None,
+                parent_session,
+            });
+            let next_cwd = PathBuf::from(manager.get_cwd());
+            let (next_state, bootstrap_output) = build_rpc_state(
+                &shared.options,
+                &next_cwd,
+                snapshot.runtime_settings.clone(),
+                snapshot.scoped_models.clone(),
+                None,
+                Some(manager),
+                Some(BootstrapDefaults::from_model(
+                    &snapshot.core.state().model,
+                    snapshot.core.state().thinking_level,
+                )),
+                String::from("new"),
+                current_rpc_session_file(snapshot.session_manager.as_ref()),
+                shared.stdout_emitter.clone(),
+                shared.stderr_emitter.clone(),
+            )
+            .await?;
+            if !bootstrap_output.is_empty() {
+                shared.emit_stderr(bootstrap_output);
+            }
+            shared.swap_state_without_shutdown(next_state).await;
+            Ok(json!({ "cancelled": false }))
+        }
+        "switch_session" => {
+            let snapshot = shared.snapshot();
+            if snapshot.core.state().is_streaming {
+                return Err(String::from(
+                    "Cannot switch sessions while a request is running",
+                ));
+            }
+            let session_path = resolve_session_path(
+                &snapshot.cwd,
+                &required_string_field(request, "sessionPath")?,
+            );
+            let session_dir = snapshot
+                .session_manager
+                .as_ref()
+                .and_then(current_rpc_session_dir);
+            let manager = SessionManager::open(&session_path, session_dir.as_deref(), None)
+                .map_err(|error| error.to_string())?;
+            let next_cwd = PathBuf::from(manager.get_cwd());
+            let runtime_settings = shared
+                .options
+                .agent_dir
+                .as_deref()
+                .map(|agent_dir| load_runtime_settings(&next_cwd, agent_dir))
+                .unwrap_or(snapshot.runtime_settings.clone());
+            let (next_state, bootstrap_output) = build_rpc_state(
+                &shared.options,
+                &next_cwd,
+                runtime_settings,
+                snapshot.scoped_models.clone(),
+                None,
+                Some(manager),
+                None,
+                String::from("resume"),
+                current_rpc_session_file(snapshot.session_manager.as_ref()),
+                shared.stdout_emitter.clone(),
+                shared.stderr_emitter.clone(),
+            )
+            .await?;
+            if !bootstrap_output.is_empty() {
+                shared.emit_stderr(bootstrap_output);
+            }
+            shared.swap_state_without_shutdown(next_state).await;
+            Ok(json!({ "cancelled": false }))
+        }
+        "fork" => {
+            let snapshot = shared.snapshot();
+            if snapshot.core.state().is_streaming {
+                return Err(String::from("Cannot fork while a request is running"));
+            }
+            let entry_id = required_string_field(request, "entryId")?;
+            let mut manager = recreate_session_manager_from_rpc(&snapshot)?;
+            let candidates = collect_fork_candidates(&manager);
+            let Some(selected) = candidates
+                .into_iter()
+                .find(|candidate| candidate.entry_id == entry_id)
+            else {
+                return Err(String::from("Invalid entry ID for forking"));
+            };
+            let bootstrap_defaults = if let Some(parent_id) = selected.parent_id.as_deref() {
+                manager
+                    .create_branched_session(parent_id)
+                    .map_err(|error| error.to_string())?;
+                None
+            } else {
+                manager.new_session(NewSessionOptions {
+                    id: None,
+                    parent_session: manager.get_session_file().map(ToOwned::to_owned),
+                });
+                Some(BootstrapDefaults::from_model(
+                    &snapshot.core.state().model,
+                    snapshot.core.state().thinking_level,
+                ))
+            };
+            let next_cwd = PathBuf::from(manager.get_cwd());
+            let (next_state, bootstrap_output) = build_rpc_state(
+                &shared.options,
+                &next_cwd,
+                snapshot.runtime_settings.clone(),
+                snapshot.scoped_models.clone(),
+                None,
+                Some(manager),
+                bootstrap_defaults,
+                String::from("fork"),
+                current_rpc_session_file(snapshot.session_manager.as_ref()),
+                shared.stdout_emitter.clone(),
+                shared.stderr_emitter.clone(),
+            )
+            .await?;
+            if !bootstrap_output.is_empty() {
+                shared.emit_stderr(bootstrap_output);
+            }
+            shared.swap_state_without_shutdown(next_state).await;
+            Ok(json!({ "cancelled": false }))
+        }
+        "navigate_tree" => {
+            let snapshot = shared.snapshot();
+            if snapshot.core.state().is_streaming {
+                return Err(String::from(
+                    "Cannot navigate the session tree while a request is running",
+                ));
+            }
+            let target_id = required_string_field(request, "targetId")?;
+            let Some(session_manager) = snapshot.session_manager.as_ref() else {
+                return Err(String::from("Session tree navigation is unavailable"));
+            };
+            switch_interactive_tree_branch(
+                &snapshot.core,
+                snapshot.core.model_registry().as_ref(),
+                session_manager,
+                &target_id,
+            )?;
+            sync_rpc_extension_state(&shared).await;
+            Ok(json!({ "cancelled": false }))
+        }
+        "reload" => {
+            let snapshot = shared.snapshot();
+            if snapshot.core.state().is_streaming {
+                return Err(String::from("Cannot reload while a request is running"));
+            }
+            let manager = recreate_session_manager_from_rpc(&snapshot)?;
+            let next_cwd = PathBuf::from(manager.get_cwd());
+            let runtime_settings = shared
+                .options
+                .agent_dir
+                .as_deref()
+                .map(|agent_dir| load_runtime_settings(&next_cwd, agent_dir))
+                .unwrap_or(snapshot.runtime_settings.clone());
+            let (next_state, bootstrap_output) = build_rpc_state(
+                &shared.options,
+                &next_cwd,
+                runtime_settings,
+                snapshot.scoped_models.clone(),
+                None,
+                Some(manager),
+                None,
+                String::from("reload"),
+                current_rpc_session_file(snapshot.session_manager.as_ref()),
+                shared.stdout_emitter.clone(),
+                shared.stderr_emitter.clone(),
+            )
+            .await?;
+            if !bootstrap_output.is_empty() {
+                shared.emit_stderr(bootstrap_output);
+            }
+            shared.swap_state_without_shutdown(next_state).await;
+            Ok(Value::Null)
+        }
+        other => Err(format!("Unsupported extension app request: {other}")),
+    }
+}
+
+async fn execute_extension_send_user_message(
+    shared: &RpcShared,
+    content: &Value,
+    deliver_as: Option<&str>,
+) -> Result<(), String> {
+    let (text, images) = parse_extension_user_message_content(content)?;
+    let snapshot = shared.snapshot();
+    if snapshot.core.state().is_streaming {
+        match deliver_as {
+            Some("followUp") => queue_rpc_message(&snapshot.session, "follow_up", text, images),
+            Some("steer") => queue_rpc_message(&snapshot.session, "steer", text, images),
+            Some(other) => return Err(format!("Invalid deliverAs value: {other}")),
+            None => {
+                return Err(String::from(
+                    "Agent is already processing. Specify deliverAs ('steer' or 'followUp') to queue the message.",
+                ));
+            }
+        }
+        return Ok(());
+    }
+
+    if images.is_empty() {
+        snapshot
+            .session
+            .prompt_text(text)
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        snapshot
+            .session
+            .prompt_message(build_rpc_user_message(text, images))
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn parse_extension_user_message_content(
+    content: &Value,
+) -> Result<(String, Vec<UserContent>), String> {
+    if let Some(text) = content.as_str() {
+        return Ok((text.to_owned(), Vec::new()));
+    }
+
+    let Some(parts) = content.as_array() else {
+        return Err(String::from(
+            "send_user_message content must be a string or content array",
+        ));
+    };
+
+    let mut text_parts = Vec::new();
+    let mut images = Vec::new();
+    for part in parts {
+        let Some(part) = part.as_object() else {
+            return Err(String::from("Content parts must be objects"));
+        };
+        let part_type = required_string_field(part, "type")?;
+        match part_type.as_str() {
+            "text" => text_parts.push(required_string_field(part, "text")?),
+            "image" => {
+                let data = required_string_field(part, "data")?;
+                let mime_type = optional_string_field(part, "mimeType")
+                    .or_else(|| optional_string_field(part, "mime_type"))
+                    .ok_or_else(|| String::from("Image content must include mimeType"))?;
+                images.push(UserContent::Image { data, mime_type });
+            }
+            _ => return Err(format!("Unsupported content type: {part_type}")),
+        }
+    }
+
+    Ok((text_parts.join("\n"), images))
+}
+
 fn optional_string_field(command: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     command
         .get(key)
@@ -5732,6 +6390,7 @@ fn spawn_rpc_extension_command_task(
             }
             Err(error) => shared.emit_error(id.as_deref(), "prompt", error),
         }
+        shutdown_stale_extension_host(&shared, extension_host).await;
     })
 }
 
@@ -10753,12 +11412,21 @@ mod tests {
             ));
         }
 
-        let rendered = shell.render(120).join("\n");
+        let rendered = strip_terminal_control_sequences(&shell.render(120).join("\n"));
+        let expected_changelog_heading = render_changelog_text()
+            .expect("expected changelog text")
+            .lines()
+            .find(|line| line.starts_with("## ["))
+            .map(|line| line.trim_start_matches("## ").to_owned())
+            .expect("expected changelog heading");
         assert!(
             rendered.contains("Keyboard Shortcuts"),
             "output: {rendered}"
         );
-        assert!(rendered.contains("## ["), "output: {rendered}");
+        assert!(
+            rendered.contains(&expected_changelog_heading),
+            "output: {rendered}"
+        );
 
         faux.unregister();
     }

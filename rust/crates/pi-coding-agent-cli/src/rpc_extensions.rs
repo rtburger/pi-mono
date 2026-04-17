@@ -5,7 +5,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -71,6 +73,10 @@ pub struct RpcExtensionHostStartResult {
     pub init: RpcExtensionInitOutput,
 }
 
+type RpcExtensionHostAppRequestFuture = Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>;
+type RpcExtensionHostAppRequestHandler =
+    Arc<dyn Fn(Value) -> RpcExtensionHostAppRequestFuture + Send + Sync>;
+
 #[derive(Clone)]
 pub struct RpcExtensionHost {
     inner: Arc<RpcExtensionHostInner>,
@@ -82,6 +88,7 @@ struct RpcExtensionHostInner {
     child: AsyncMutex<Option<Child>>,
     pending: Mutex<BTreeMap<String, oneshot::Sender<Result<Value, String>>>>,
     next_request_id: AtomicUsize,
+    app_request_handler: Mutex<Option<RpcExtensionHostAppRequestHandler>>,
     stdout_emitter: TextEmitter,
     stderr_emitter: TextEmitter,
 }
@@ -172,6 +179,7 @@ impl RpcExtensionHost {
             child: AsyncMutex::new(Some(child)),
             pending: Mutex::new(BTreeMap::new()),
             next_request_id: AtomicUsize::new(1),
+            app_request_handler: Mutex::new(None),
             stdout_emitter: options.stdout_emitter.clone(),
             stderr_emitter: options.stderr_emitter.clone(),
         });
@@ -217,6 +225,24 @@ impl RpcExtensionHost {
 
     pub fn commands(&self) -> Vec<RpcExtensionCommandInfo> {
         (*self.commands).clone()
+    }
+
+    pub fn set_app_request_handler<F, Fut>(&self, handler: F)
+    where
+        F: Fn(Value) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Value, String>> + Send + 'static,
+    {
+        let handler =
+            Arc::new(move |request| Box::pin(handler(request)) as RpcExtensionHostAppRequestFuture);
+        *self
+            .inner
+            .app_request_handler
+            .lock()
+            .expect("extension host app request handler mutex poisoned") = Some(handler);
+    }
+
+    pub fn is_same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     pub fn has_command(&self, name: &str) -> bool {
@@ -422,7 +448,7 @@ fn spawn_stdout_reader(inner: Arc<RpcExtensionHostInner>, stdout: tokio::process
         let mut lines = BufReader::new(stdout).lines();
         loop {
             match lines.next_line().await {
-                Ok(Some(line)) => handle_stdout_line(&inner, line),
+                Ok(Some(line)) => handle_stdout_line(inner.clone(), line),
                 Ok(None) => {
                     reject_all_pending(&inner, "Extension host exited unexpectedly");
                     break;
@@ -458,7 +484,7 @@ fn spawn_stderr_reader(inner: Arc<RpcExtensionHostInner>, stderr: tokio::process
     });
 }
 
-fn handle_stdout_line(inner: &RpcExtensionHostInner, line: String) {
+fn handle_stdout_line(inner: Arc<RpcExtensionHostInner>, line: String) {
     let value = match serde_json::from_str::<Value>(&line) {
         Ok(value) => value,
         Err(error) => {
@@ -507,6 +533,34 @@ fn handle_stdout_line(inner: &RpcExtensionHostInner, line: String) {
         return;
     }
 
+    if message_type == "app_request" {
+        let Some(request_id) = value
+            .get("id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+        else {
+            (inner.stderr_emitter)(String::from(
+                "Warning: extension host app request is missing an id\n",
+            ));
+            return;
+        };
+        let handler = inner
+            .app_request_handler
+            .lock()
+            .expect("extension host app request handler mutex poisoned")
+            .clone();
+        tokio::spawn(async move {
+            let result = match handler {
+                Some(handler) => handler(value).await,
+                None => Err(String::from(
+                    "Extension app requests are unavailable in this mode",
+                )),
+            };
+            let _ = send_app_response(inner, &request_id, result).await;
+        });
+        return;
+    }
+
     if message_type == "shutdown_requested" {
         return;
     }
@@ -514,6 +568,49 @@ fn handle_stdout_line(inner: &RpcExtensionHostInner, line: String) {
     (inner.stderr_emitter)(format!(
         "Warning: extension host emitted unexpected message: {line}\n"
     ));
+}
+
+async fn send_app_response(
+    inner: Arc<RpcExtensionHostInner>,
+    request_id: &str,
+    result: Result<Value, String>,
+) -> Result<(), String> {
+    let payload = match result {
+        Ok(data) => json!({
+            "type": "app_response",
+            "id": request_id,
+            "success": true,
+            "data": data,
+        }),
+        Err(error) => json!({
+            "type": "app_response",
+            "id": request_id,
+            "success": false,
+            "error": error,
+        }),
+    };
+    send_inner_message(&inner, &payload).await
+}
+
+async fn send_inner_message(
+    inner: &Arc<RpcExtensionHostInner>,
+    payload: &Value,
+) -> Result<(), String> {
+    let line = serde_json::to_string(payload)
+        .map_err(|error| format!("Failed to serialize extension host request: {error}"))?;
+    let mut stdin = inner.stdin.lock().await;
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|error| format!("Failed to write to extension host: {error}"))?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .map_err(|error| format!("Failed to write to extension host: {error}"))?;
+    stdin
+        .flush()
+        .await
+        .map_err(|error| format!("Failed to flush extension host stdin: {error}"))
 }
 
 fn reject_all_pending(inner: &RpcExtensionHostInner, message: &str) {

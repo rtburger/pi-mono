@@ -87,6 +87,11 @@ fn unique_name(prefix: &str) -> String {
     format!("{prefix}-{timestamp}-{counter}")
 }
 
+fn short_unique_name(prefix: &str) -> String {
+    let counter = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{counter}")
+}
+
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let path = std::env::temp_dir().join(unique_name(prefix));
     fs::create_dir_all(&path).unwrap();
@@ -287,6 +292,13 @@ fn strip_terminal_control_sequences(output: &str) -> String {
     }
 
     result
+}
+
+fn output_contains_line_fields(output: &str, fields: &[&str]) -> bool {
+    output.lines().any(|line| {
+        let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        fields.iter().all(|field| normalized.contains(field))
+    })
 }
 
 #[tokio::test]
@@ -1824,17 +1836,20 @@ async fn run_interactive_command_renders_slash_command_autocomplete_for_supporte
 
     assert_eq!(exit_code, 0);
     let output = strip_terminal_control_sequences(&inspector.output());
-    assert!(output.contains("model — Select model"), "output: {output}");
+    assert!(
+        output_contains_line_fields(&output, &["model", "Select model"]),
+        "output: {output}"
+    );
 
     unregister_provider(&api);
 }
 
 #[tokio::test]
 async fn run_interactive_command_renders_model_argument_autocomplete_in_prompt() {
-    let initial_provider = unique_name("p1");
-    let suggestion_provider = unique_name("p2");
-    let initial_model_id = unique_name("a");
-    let suggestion_model_id = unique_name("b");
+    let initial_provider = short_unique_name("p1");
+    let suggestion_provider = short_unique_name("p2");
+    let initial_model_id = short_unique_name("a");
+    let suggestion_model_id = short_unique_name("b");
     let (api, _recorded) = register_recording_provider("unused");
     let partial_model_id = &suggestion_model_id[..suggestion_model_id.len().min(1)];
     let mut script = format!("/model {partial_model_id}")
@@ -1891,7 +1906,10 @@ async fn run_interactive_command_renders_model_argument_autocomplete_in_prompt()
     assert_eq!(exit_code, 0);
     let output = strip_terminal_control_sequences(&inspector.output());
     assert!(
-        output.contains(&format!("{suggestion_model_id} — {suggestion_provider}")),
+        output_contains_line_fields(
+            &output,
+            &[suggestion_model_id.as_str(), suggestion_provider.as_str()],
+        ),
         "output: {output}"
     );
 
@@ -1900,10 +1918,10 @@ async fn run_interactive_command_renders_model_argument_autocomplete_in_prompt()
 
 #[tokio::test]
 async fn run_interactive_command_scopes_model_autocomplete_and_switching_to_scoped_models() {
-    let provider = unique_name("interactive-provider");
-    let initial_model_id = unique_name("alpha-scoped-model");
-    let scoped_target_model_id = unique_name("beta-scoped-model");
-    let unscoped_model_id = unique_name("beta-global-model");
+    let provider = short_unique_name("interactive-provider");
+    let initial_model_id = short_unique_name("alpha-scoped-model");
+    let scoped_target_model_id = short_unique_name("beta-scoped-model");
+    let unscoped_model_id = short_unique_name("beta-global-model");
     let (api, recorded) = register_recording_provider("interactive-scoped");
     let mut script = String::from("/model beta")
         .chars()
@@ -1974,7 +1992,10 @@ async fn run_interactive_command_scopes_model_autocomplete_and_switching_to_scop
     assert_eq!(exit_code, 0);
     let output = strip_terminal_control_sequences(&inspector.output());
     assert!(
-        output.contains(&format!("{scoped_target_model_id} — {provider}")),
+        output_contains_line_fields(
+            &output,
+            &[scoped_target_model_id.as_str(), provider.as_str()]
+        ),
         "output: {output}"
     );
     assert!(!output.contains(&unscoped_model_id), "output: {output}");

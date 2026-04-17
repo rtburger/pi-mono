@@ -3,7 +3,10 @@ import { ExtensionRunner, discoverAndLoadExtensions } from "../../packages/codin
 
 let runner;
 let uiCounter = 0;
+let appRequestCounter = 0;
+let commandActionPromises = null;
 const pendingUiRequests = new Map();
+const pendingAppRequests = new Map();
 const runtimeState = {
 	model: undefined,
 	thinkingLevel: "off",
@@ -29,13 +32,63 @@ function replyError(id, error) {
 	send({ type: "response", id, success: false, error });
 }
 
-function emitUnsupported(event, error) {
+function emitRuntimeError(event, error) {
 	send({ type: "extension_error", extensionPath: "<runtime>", event, error });
+}
+
+function emitUnsupported(event, error) {
+	emitRuntimeError(event, error);
 }
 
 function nextUiId() {
 	uiCounter += 1;
 	return `ui-${uiCounter}`;
+}
+
+function nextAppRequestId() {
+	appRequestCounter += 1;
+	return `app-${appRequestCounter}`;
+}
+
+function requestHost(method, payload = {}) {
+	const id = nextAppRequestId();
+	return new Promise((resolve, reject) => {
+		pendingAppRequests.set(id, { resolve, reject });
+		send({ type: "app_request", id, method, ...payload });
+	});
+}
+
+function trackCommandAction(promise) {
+	if (Array.isArray(commandActionPromises)) {
+		commandActionPromises.push(promise);
+	}
+	return promise;
+}
+
+function fireAndTrackHostRequest(method, payload, event, onSuccess) {
+	const tracked = requestHost(method, payload)
+		.then((data) => {
+			onSuccess?.(data);
+			return data;
+		})
+		.catch((error) => {
+			emitRuntimeError(event, error instanceof Error ? error.message : String(error));
+			return undefined;
+		});
+	trackCommandAction(tracked);
+}
+
+function resolveAppResponse(message) {
+	const pending = pendingAppRequests.get(message.id);
+	if (!pending) {
+		return;
+	}
+	pendingAppRequests.delete(message.id);
+	if (message.success) {
+		pending.resolve(message.data);
+		return;
+	}
+	pending.reject(new Error(typeof message.error === "string" ? message.error : "Host request failed"));
 }
 
 function applyRuntimeState(next) {
@@ -312,15 +365,25 @@ function bindRunner(loaded, cwd) {
 			sendMessage() {
 				unsupported("send_message");
 			},
-			sendUserMessage() {
-				unsupported("send_user_message");
+			sendUserMessage(content, options) {
+				fireAndTrackHostRequest(
+					"send_user_message",
+					{ content, options },
+					"send_user_message",
+				);
 			},
 			appendEntry() {
 				unsupported("append_entry");
 			},
 			setSessionName(name) {
-				runtimeState.sessionName = name;
-				emitUnsupported("set_session_name");
+				fireAndTrackHostRequest(
+					"set_session_name",
+					{ name },
+					"set_session_name",
+					() => {
+						runtimeState.sessionName = name;
+					},
+				);
 			},
 			getSessionName() {
 				return runtimeState.sessionName;
@@ -342,16 +405,25 @@ function bindRunner(loaded, cwd) {
 			getCommands() {
 				return runtimeState.commands;
 			},
-			async setModel() {
-				emitUnsupported("set_model");
-				return false;
+			async setModel(model) {
+				const success = await requestHost("set_model", { model });
+				if (success) {
+					runtimeState.model = model;
+				}
+				return Boolean(success);
 			},
 			getThinkingLevel() {
 				return runtimeState.thinkingLevel;
 			},
 			setThinkingLevel(level) {
-				runtimeState.thinkingLevel = level;
-				emitUnsupported("set_thinking_level");
+				fireAndTrackHostRequest(
+					"set_thinking_level",
+					{ level },
+					"set_thinking_level",
+					() => {
+						runtimeState.thinkingLevel = level;
+					},
+				);
 			},
 		},
 		{
@@ -393,25 +465,27 @@ function bindRunner(loaded, cwd) {
 		},
 	);
 	runner.bindCommandContext({
-		async waitForIdle() {},
-		async newSession() {
-			emitUnsupported("new_session");
-			return { cancelled: false };
+		async waitForIdle() {
+			await requestHost("wait_for_idle");
 		},
-		async fork() {
-			emitUnsupported("fork");
-			return { cancelled: false };
+		async newSession(options) {
+			const result = await requestHost("new_session", { options });
+			return result ?? { cancelled: false };
 		},
-		async navigateTree() {
-			emitUnsupported("navigate_tree");
-			return { cancelled: false };
+		async fork(entryId) {
+			const result = await requestHost("fork", { entryId });
+			return result ?? { cancelled: false };
 		},
-		async switchSession() {
-			emitUnsupported("switch_session");
-			return { cancelled: false };
+		async navigateTree(targetId, options) {
+			const result = await requestHost("navigate_tree", { targetId, options });
+			return result ?? { cancelled: false };
+		},
+		async switchSession(sessionPath) {
+			const result = await requestHost("switch_session", { sessionPath });
+			return result ?? { cancelled: false };
 		},
 		async reload() {
-			emitUnsupported("reload");
+			await requestHost("reload");
 		},
 	});
 	runner.setUIContext(createUiContext());
@@ -488,11 +562,16 @@ async function handleExecuteCommand(message) {
 		reply(message.id, { handled: false });
 		return;
 	}
+	const previousActionPromises = commandActionPromises;
+	commandActionPromises = [];
 	try {
 		await command.handler(message.args ?? "", runner.createCommandContext());
+		await Promise.all(commandActionPromises);
 		reply(message.id, { handled: true });
 	} catch (error) {
 		replyError(message.id, error instanceof Error ? error.message : String(error));
+	} finally {
+		commandActionPromises = previousActionPromises;
 	}
 }
 
@@ -582,6 +661,9 @@ async function handleMessage(rawLine) {
 
 	try {
 		switch (message.type) {
+			case "app_response":
+				resolveAppResponse(message);
+				break;
 			case "init":
 				await handleInit(message);
 				break;
