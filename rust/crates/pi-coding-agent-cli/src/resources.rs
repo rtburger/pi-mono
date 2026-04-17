@@ -6,7 +6,7 @@ use crate::{
 };
 use pi_agent::AgentTool;
 use pi_coding_agent_core::{
-    BuildSystemPromptOptions, PromptTemplate, Skill, SourceInfo, build_system_prompt,
+    BuildSystemPromptOptions, ContextFile, PromptTemplate, Skill, SourceInfo, build_system_prompt,
     expand_prompt_template, expand_skill_command, load_prompt_templates, load_skills,
     load_system_prompt_resources, resolve_prompt_input,
 };
@@ -29,6 +29,102 @@ pub struct LoadedCliResources {
     pub skills: Vec<Skill>,
     pub themes: Vec<Theme>,
     pub warnings: Vec<String>,
+    pub context_files: Vec<ContextFile>,
+    pub system_prompt: Option<String>,
+    pub append_system_prompt: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CliResourceLoader {
+    parsed: Args,
+    cwd: PathBuf,
+    agent_dir: Option<PathBuf>,
+    resources: LoadedCliResources,
+}
+
+impl CliResourceLoader {
+    pub fn load(parsed: &Args, cwd: &Path, agent_dir: Option<&Path>) -> Self {
+        Self {
+            parsed: parsed.clone(),
+            cwd: cwd.to_path_buf(),
+            agent_dir: agent_dir.map(Path::to_path_buf),
+            resources: load_cli_resources(parsed, cwd, agent_dir),
+        }
+    }
+
+    pub fn resources(&self) -> &LoadedCliResources {
+        &self.resources
+    }
+
+    pub fn warnings(&self) -> &[String] {
+        &self.resources.warnings
+    }
+
+    pub fn prompt_templates(&self) -> &[PromptTemplate] {
+        &self.resources.prompt_templates
+    }
+
+    pub fn skills(&self) -> &[Skill] {
+        &self.resources.skills
+    }
+
+    pub fn themes(&self) -> &[Theme] {
+        &self.resources.themes
+    }
+
+    pub fn context_files(&self) -> &[ContextFile] {
+        &self.resources.context_files
+    }
+
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.resources.system_prompt.as_deref()
+    }
+
+    pub fn append_system_prompt(&self) -> &[String] {
+        &self.resources.append_system_prompt
+    }
+
+    pub fn reload(&mut self) {
+        self.resources = load_cli_resources(&self.parsed, &self.cwd, self.agent_dir.as_deref());
+    }
+
+    pub fn extend_resources_from_extensions(
+        &mut self,
+        skill_paths: &[ExtensionResourcePath],
+        prompt_paths: &[ExtensionResourcePath],
+        theme_paths: &[ExtensionResourcePath],
+    ) -> Vec<String> {
+        extend_cli_resources_from_extensions(
+            &mut self.resources,
+            &self.cwd,
+            skill_paths,
+            prompt_paths,
+            theme_paths,
+        )
+    }
+
+    pub fn build_system_prompt(
+        &self,
+        default_system_prompt: &str,
+        selected_tools: &[String],
+    ) -> String {
+        build_runtime_system_prompt(
+            default_system_prompt,
+            &self.parsed,
+            &self.cwd,
+            self.agent_dir.as_deref(),
+            selected_tools,
+            &self.resources,
+        )
+    }
+
+    pub fn preprocess_prompt_text(&self, text: &str) -> String {
+        preprocess_prompt_text(text, &self.resources)
+    }
+
+    pub fn into_resources(self) -> LoadedCliResources {
+        self.resources
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,11 +267,22 @@ pub fn load_cli_resources(
     warnings.extend(themes.diagnostics.iter().map(format_resource_diagnostic));
     let themes = themes.themes;
 
+    let prompt_resources = agent_dir
+        .map(|agent_dir| load_system_prompt_resources(cwd, agent_dir))
+        .unwrap_or_else(|| pi_coding_agent_core::LoadedSystemPromptResources {
+            context_files: Vec::new(),
+            system_prompt: None,
+            append_system_prompt: Vec::new(),
+        });
+
     LoadedCliResources {
         prompt_templates,
         skills,
         themes,
         warnings,
+        context_files: prompt_resources.context_files,
+        system_prompt: prompt_resources.system_prompt,
+        append_system_prompt: prompt_resources.append_system_prompt,
     }
 }
 
@@ -382,7 +489,13 @@ pub fn extend_cli_resources_from_extensions(
                 ));
                 continue;
             }
-            resources.themes.push(theme);
+            let source_path = theme
+                .source_path()
+                .unwrap_or(entry.path.as_str())
+                .to_owned();
+            resources.themes.push(theme.with_source_info(Some(
+                source_info_for_extension_resource(&source_path, &entry.extension_path),
+            )));
         }
     }
 
@@ -588,4 +701,190 @@ fn tool_snippets() -> BTreeMap<String, String> {
         ),
         (String::from("ls"), String::from("List directory contents")),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CliResourceLoader, ExtensionResourcePath};
+    use crate::Args;
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    const DARK_THEME_JSON: &str = include_str!("../../pi-coding-agent-tui/src/theme/dark.json");
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "pi-coding-agent-cli-resource-loader-{prefix}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn custom_theme_json(name: &str) -> String {
+        DARK_THEME_JSON.replace("\"name\": \"dark\"", &format!("\"name\": \"{name}\""))
+    }
+
+    #[test]
+    fn cli_resource_loader_reload_refreshes_disk_backed_resources() {
+        let temp_dir = unique_temp_dir("reload");
+        let cwd = temp_dir.join("project");
+        let agent_dir = temp_dir.join("agent");
+        let prompts_dir = cwd.join(".pi").join("prompts");
+        let skill_dir = cwd.join(".pi").join("skills").join("review-code");
+        let themes_dir = cwd.join(".pi").join("themes");
+        fs::create_dir_all(&prompts_dir).unwrap();
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::create_dir_all(&themes_dir).unwrap();
+        fs::create_dir_all(&agent_dir).unwrap();
+
+        fs::write(prompts_dir.join("review.md"), "Review $1\n").unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Review code safely\n---\nRead the target file first.\n",
+        )
+        .unwrap();
+        fs::write(themes_dir.join("custom.json"), custom_theme_json("custom")).unwrap();
+        fs::write(agent_dir.join("AGENTS.md"), "global rules\n").unwrap();
+        fs::write(cwd.join(".pi").join("SYSTEM.md"), "project system\n").unwrap();
+        fs::write(cwd.join(".pi").join("APPEND_SYSTEM.md"), "project append\n").unwrap();
+
+        let mut loader = CliResourceLoader::load(&Args::default(), &cwd, Some(&agent_dir));
+        assert!(
+            loader.warnings().is_empty(),
+            "warnings: {:?}",
+            loader.warnings()
+        );
+        assert_eq!(loader.prompt_templates().len(), 1);
+        assert_eq!(loader.skills().len(), 1);
+        assert_eq!(loader.themes().len(), 1);
+        assert!(
+            loader
+                .context_files()
+                .iter()
+                .any(|file| file.path.ends_with("AGENTS.md")),
+            "context files: {:?}",
+            loader.context_files()
+        );
+        assert_eq!(loader.system_prompt(), Some("project system\n"));
+        assert_eq!(
+            loader.append_system_prompt(),
+            &[String::from("project append\n")]
+        );
+        assert_eq!(
+            loader.preprocess_prompt_text("/review src/lib.rs"),
+            "Review src/lib.rs\n"
+        );
+
+        fs::write(prompts_dir.join("review.md"), "Updated review $1\n").unwrap();
+        fs::write(cwd.join(".pi").join("SYSTEM.md"), "updated system\n").unwrap();
+        fs::write(cwd.join(".pi").join("APPEND_SYSTEM.md"), "updated append\n").unwrap();
+
+        loader.reload();
+
+        assert_eq!(
+            loader.preprocess_prompt_text("/review src/main.rs"),
+            "Updated review src/main.rs\n"
+        );
+        assert_eq!(loader.system_prompt(), Some("updated system\n"));
+        assert_eq!(
+            loader.append_system_prompt(),
+            &[String::from("updated append\n")]
+        );
+    }
+
+    #[test]
+    fn cli_resource_loader_extends_resources_from_extension_paths() {
+        let temp_dir = unique_temp_dir("extend");
+        let cwd = temp_dir.join("project");
+        let agent_dir = temp_dir.join("agent");
+        let extension_dir = temp_dir.join("extension");
+        let extension_skill_dir = extension_dir.join("skills").join("extension-review");
+        let extension_prompts_dir = extension_dir.join("prompts");
+        let extension_themes_dir = extension_dir.join("themes");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::create_dir_all(&extension_skill_dir).unwrap();
+        fs::create_dir_all(&extension_prompts_dir).unwrap();
+        fs::create_dir_all(&extension_themes_dir).unwrap();
+
+        fs::write(
+            extension_skill_dir.join("SKILL.md"),
+            "---\ndescription: Review extension code\n---\nCheck extension assets first.\n",
+        )
+        .unwrap();
+        fs::write(
+            extension_prompts_dir.join("review.md"),
+            "Extension review $1\n",
+        )
+        .unwrap();
+        fs::write(
+            extension_themes_dir.join("extension.json"),
+            custom_theme_json("extension"),
+        )
+        .unwrap();
+
+        let mut loader = CliResourceLoader::load(&Args::default(), &cwd, Some(&agent_dir));
+        let warnings = loader.extend_resources_from_extensions(
+            &[ExtensionResourcePath {
+                path: extension_skill_dir.join("SKILL.md").display().to_string(),
+                extension_path: extension_dir.join("index.ts").display().to_string(),
+            }],
+            &[ExtensionResourcePath {
+                path: extension_prompts_dir
+                    .join("review.md")
+                    .display()
+                    .to_string(),
+                extension_path: extension_dir.join("index.ts").display().to_string(),
+            }],
+            &[ExtensionResourcePath {
+                path: extension_themes_dir
+                    .join("extension.json")
+                    .display()
+                    .to_string(),
+                extension_path: extension_dir.join("index.ts").display().to_string(),
+            }],
+        );
+
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+        assert_eq!(loader.skills().len(), 1);
+        assert_eq!(loader.prompt_templates().len(), 1);
+        assert_eq!(loader.themes().len(), 1);
+        assert_eq!(
+            loader.preprocess_prompt_text("/review src/lib.rs"),
+            "Extension review src/lib.rs\n"
+        );
+        assert!(
+            loader
+                .resources()
+                .skills
+                .iter()
+                .all(|skill| skill.source_info.source.starts_with("extension:")),
+            "skills: {:?}",
+            loader.resources().skills
+        );
+        assert!(
+            loader
+                .resources()
+                .prompt_templates
+                .iter()
+                .all(|prompt| prompt.source_info.source.starts_with("extension:")),
+            "prompts: {:?}",
+            loader.resources().prompt_templates
+        );
+        assert!(
+            loader.resources().themes.iter().all(|theme| theme
+                .source_info()
+                .is_some_and(|source| source.source.starts_with("extension:"))),
+            "themes: {:?}",
+            loader.resources().themes
+        );
+    }
 }

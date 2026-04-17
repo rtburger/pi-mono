@@ -212,6 +212,19 @@ impl Theme {
         self.inner.source_info.as_ref()
     }
 
+    pub fn with_source_info(&self, source_info: Option<SourceInfo>) -> Self {
+        Self::new(
+            self.inner.name.clone(),
+            self.inner.mode,
+            self.inner.source_path.clone(),
+            source_info,
+            self.inner.resolved_colors.clone(),
+            self.inner.export_colors.clone(),
+            self.inner.fg_codes.clone(),
+            self.inner.bg_codes.clone(),
+        )
+    }
+
     pub fn mode(&self) -> ColorMode {
         self.inner.mode
     }

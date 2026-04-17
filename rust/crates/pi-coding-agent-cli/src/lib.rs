@@ -26,6 +26,11 @@ pub use package_manager::{
 };
 pub use pi_coding_agent_core::{AuthFileSource, ChainedAuthSource};
 pub use print_mode::{PrintModeOptions, PrintModeRunResult, run_print_mode};
+pub use resources::{
+    CliResourceLoader, ExtensionResourcePath, LoadedCliResources, build_runtime_system_prompt,
+    build_selected_tools, extend_cli_resources_from_extensions, load_cli_resources,
+    preprocess_prompt_text,
+};
 pub use runner::{
     RunCommandOptions, RunCommandResult, finalize_system_prompt, run_command,
     run_interactive_command, run_interactive_command_with_terminal, run_rpc_command,
