@@ -82,7 +82,6 @@ pub fn build_startup_header_text(
             "to exit",
         ),
         hint("app.exit", "to exit (empty)"),
-        hint("app.suspend", "to suspend"),
         hint("tui.editor.deleteToLineEnd", "to delete to end"),
         hint("app.thinking.cycle", "to cycle thinking level"),
         raw_key_hint(
@@ -95,8 +94,8 @@ pub fn build_startup_header_text(
             "to cycle models",
         ),
         hint("app.model.select", "to select model"),
-        hint("app.tools.expand", "to expand tools"),
-        hint("app.thinking.toggle", "to expand thinking"),
+        hint("app.tools.expand", "to toggle tool output"),
+        hint("app.thinking.toggle", "to toggle thinking"),
         hint("app.editor.external", "for external editor"),
         raw_key_hint(styler, "/", "for commands"),
         raw_key_hint(styler, "!", "to run bash"),
@@ -104,7 +103,6 @@ pub fn build_startup_header_text(
         hint("app.message.followUp", "to queue follow-up"),
         hint("app.message.dequeue", "to edit all queued messages"),
         hint("app.clipboard.pasteImage", "to paste image"),
-        raw_key_hint(styler, "drop files", "to attach"),
     ]
     .join("\n");
 

@@ -1,12 +1,13 @@
 use crate::{
-    AssistantMessageComponent, BuiltInHeaderComponent, ClipboardImageSource, CustomEditor,
-    DEFAULT_HIDDEN_THINKING_LABEL, ExtensionEditorComponent, ExternalEditorCommandRunner,
-    ExternalEditorHost, FooterComponent, FooterState, FooterStateHandle, KeyHintStyler,
-    KeybindingsManager, ModelSelectorComponent, PendingMessagesComponent, StartupHeaderStyler,
-    ThemedKeyHintStyler, ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult,
-    TranscriptComponent, UserMessageComponent, current_theme, paste_clipboard_image_into_shell,
+    AssistantMessageComponent, BashExecutionComponent, BashExecutionHandle, BuiltInHeaderComponent,
+    ClipboardImageSource, CustomEditor, DEFAULT_HIDDEN_THINKING_LABEL, ExtensionEditorComponent,
+    ExternalEditorCommandRunner, ExternalEditorHost, FooterComponent, FooterState,
+    FooterStateHandle, KeyHintStyler, KeybindingsManager, ModelSelectorComponent,
+    PendingMessagesComponent, StartupHeaderStyler, ThemedKeyHintStyler, ToolExecutionComponent,
+    ToolExecutionOptions, ToolExecutionResult, TranscriptComponent, UserMessageComponent,
+    current_theme, paste_clipboard_image_into_shell,
 };
-use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
+use pi_coding_agent_core::{BashExecutionMessage, FooterDataProvider, FooterDataSnapshot};
 use pi_events::{AssistantMessage, Model, UserContent};
 use pi_tui::{
     AutocompleteProvider, Component, ComponentId, EditorCursor, RenderHandle, matches_key,
@@ -97,6 +98,9 @@ enum ShellUpdate {
     AppendUserMessage {
         text: String,
     },
+    AppendBashExecution {
+        message: BashExecutionMessage,
+    },
     AppendToolResult {
         tool_call_id: String,
         tool_name: String,
@@ -167,6 +171,10 @@ impl ShellUpdateHandle {
 
     pub fn append_user_message(&self, text: impl Into<String>) {
         self.push(ShellUpdate::AppendUserMessage { text: text.into() });
+    }
+
+    pub fn append_bash_execution(&self, message: BashExecutionMessage) {
+        self.push(ShellUpdate::AppendBashExecution { message });
     }
 
     pub fn append_tool_result(
@@ -251,7 +259,11 @@ pub struct StartupShellComponent {
     clipboard_image_paste: Option<ClipboardImagePasteConfig>,
     pending_updates: Arc<Mutex<VecDeque<ShellUpdate>>>,
     current_assistant: RefCell<Option<SharedComponent<AssistantMessageComponent>>>,
+    assistant_components: RefCell<Vec<SharedComponent<AssistantMessageComponent>>>,
     tool_components: RefCell<HashMap<String, SharedComponent<ToolExecutionComponent>>>,
+    bash_components: RefCell<Vec<BashExecutionHandle>>,
+    tool_output_expanded: Cell<bool>,
+    hide_thinking_blocks: Cell<bool>,
     extension_editor: Option<ExtensionEditorComponent>,
     extension_editor_events: Arc<Mutex<VecDeque<ExtensionEditorEvent>>>,
     extension_editor_on_submit: Option<SubmitCallback>,
@@ -336,7 +348,11 @@ impl StartupShellComponent {
             clipboard_image_paste: None,
             pending_updates: Arc::new(Mutex::new(VecDeque::new())),
             current_assistant: RefCell::new(None),
+            assistant_components: RefCell::new(Vec::new()),
             tool_components: RefCell::new(HashMap::new()),
+            bash_components: RefCell::new(Vec::new()),
+            tool_output_expanded: Cell::new(false),
+            hide_thinking_blocks: Cell::new(false),
             extension_editor: None,
             extension_editor_events: Arc::new(Mutex::new(VecDeque::new())),
             extension_editor_on_submit: None,
@@ -565,6 +581,9 @@ impl StartupShellComponent {
                     .borrow_mut()
                     .add_item(Box::new(UserMessageComponent::new(text)));
             }
+            ShellUpdate::AppendBashExecution { message } => {
+                self.append_bash_execution_message(message);
+            }
             ShellUpdate::AppendToolResult {
                 tool_call_id,
                 tool_name,
@@ -637,12 +656,15 @@ impl StartupShellComponent {
 
         let component = SharedComponent::new(AssistantMessageComponent::new(
             Some(message),
-            false,
+            self.hide_thinking_blocks.get(),
             DEFAULT_HIDDEN_THINKING_LABEL,
         ));
         self.transcript
             .borrow_mut()
             .add_item(Box::new(component.clone()));
+        self.assistant_components
+            .borrow_mut()
+            .push(component.clone());
         *self.current_assistant.borrow_mut() = Some(component.clone());
         component
     }
@@ -664,6 +686,7 @@ impl StartupShellComponent {
             ToolExecutionOptions::default(),
             &self.keybindings,
         ));
+        component.with_mut(|component| component.set_expanded(self.tool_output_expanded.get()));
         self.transcript
             .borrow_mut()
             .add_item(Box::new(component.clone()));
@@ -671,6 +694,13 @@ impl StartupShellComponent {
             .borrow_mut()
             .insert(tool_call_id.to_owned(), component.clone());
         component
+    }
+
+    fn append_bash_execution_message(&self, message: BashExecutionMessage) {
+        let (component, handle) = BashExecutionComponent::from_message(&message, &self.keybindings);
+        handle.set_expanded(self.tool_output_expanded.get());
+        self.transcript.borrow_mut().add_item(Box::new(component));
+        self.bash_components.borrow_mut().push(handle);
     }
 
     pub fn set_on_submit<F>(&mut self, mut on_submit: F)
@@ -989,8 +1019,50 @@ impl StartupShellComponent {
             .expect("pending shell updates mutex poisoned")
             .clear();
         self.current_assistant.borrow_mut().take();
+        self.assistant_components.borrow_mut().clear();
         self.tool_components.borrow_mut().clear();
+        self.bash_components.borrow_mut().clear();
         self.transcript.borrow_mut().clear_items();
+    }
+
+    pub fn start_bash_execution(
+        &mut self,
+        command: impl Into<String>,
+        exclude_from_context: bool,
+        render_handle: RenderHandle,
+    ) -> BashExecutionHandle {
+        let (component, mut handle) =
+            BashExecutionComponent::new(command, &self.keybindings, exclude_from_context);
+        handle.set_render_handle(render_handle);
+        handle.set_expanded(self.tool_output_expanded.get());
+        self.transcript.borrow_mut().add_item(Box::new(component));
+        self.bash_components.borrow_mut().push(handle.clone());
+        handle
+    }
+
+    pub fn tools_expanded(&self) -> bool {
+        self.tool_output_expanded.get()
+    }
+
+    pub fn set_tools_expanded(&self, expanded: bool) {
+        self.tool_output_expanded.set(expanded);
+        for component in self.tool_components.borrow().values() {
+            component.with_mut(|component| component.set_expanded(expanded));
+        }
+        for handle in self.bash_components.borrow().iter() {
+            handle.set_expanded(expanded);
+        }
+    }
+
+    pub fn hide_thinking_blocks(&self) -> bool {
+        self.hide_thinking_blocks.get()
+    }
+
+    pub fn set_hide_thinking_blocks(&self, hide: bool) {
+        self.hide_thinking_blocks.set(hide);
+        for component in self.assistant_components.borrow().iter() {
+            component.with_mut(|component| component.set_hide_thinking_block(hide));
+        }
     }
 
     pub fn transcript_item_count(&self) -> usize {

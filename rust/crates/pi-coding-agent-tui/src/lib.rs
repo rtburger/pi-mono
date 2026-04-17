@@ -1,4 +1,5 @@
 mod assistant_message;
+mod bash_execution;
 mod branch_summary;
 mod clipboard_image;
 mod compaction_summary;
@@ -32,6 +33,7 @@ mod tree_selector;
 mod user_message;
 
 pub use assistant_message::{AssistantMessageComponent, DEFAULT_HIDDEN_THINKING_LABEL};
+pub use bash_execution::{BashExecutionComponent, BashExecutionHandle};
 pub use branch_summary::BranchSummaryMessageComponent;
 pub use clipboard_image::{
     ClipboardCommandRunner, ClipboardImage, ClipboardImageSource, ClipboardPlatform, CommandOutput,

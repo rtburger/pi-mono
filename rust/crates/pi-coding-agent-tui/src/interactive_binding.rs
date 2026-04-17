@@ -1,7 +1,7 @@
 use crate::startup_shell::{ShellUpdateHandle, tool_result_from_user_content, user_message_text};
 use crate::{FooterState, StartupShellComponent, StatusHandle};
 use pi_agent::{AgentEvent, AgentUnsubscribe, ThinkingLevel};
-use pi_coding_agent_core::{BashExecutionMessage, CodingAgentCore, bash_execution_to_text};
+use pi_coding_agent_core::{BashExecutionMessage, CodingAgentCore};
 use pi_events::{AssistantMessage, Message, UserContent};
 use pi_tui::RenderHandle;
 use std::{
@@ -186,7 +186,7 @@ fn apply_existing_agent_message(
             if let Ok(payload) =
                 serde_json::from_value::<BashExecutionMessage>(message.payload.clone())
             {
-                update_handle.append_user_message(bash_execution_to_text(&payload));
+                update_handle.append_bash_execution(payload);
             }
         }
         pi_agent::AgentMessage::Custom(_) => {}
@@ -304,7 +304,7 @@ fn apply_agent_event(
                 if let Ok(payload) =
                     serde_json::from_value::<BashExecutionMessage>(message.payload.clone())
                 {
-                    update_handle.append_user_message(bash_execution_to_text(&payload));
+                    update_handle.append_bash_execution(payload);
                 }
             }
             pi_agent::AgentMessage::Custom(_) => {}

@@ -31,30 +31,29 @@ use pi_ai::{
 #[cfg(test)]
 use pi_coding_agent_core::create_coding_agent_core;
 use pi_coding_agent_core::{
-    AgentSession, AgentSessionEvent, AgentSessionOptions, AuthSource, BashExecutionMessage,
-    BootstrapDiagnosticLevel, CodingAgentCore, CodingAgentCoreError, CodingAgentCoreOptions,
-    CompactionResult, CompactionSettings, ContextUsageEstimate, CustomMessage,
-    CustomMessageContent, ExistingSessionSelection, FooterDataProvider, ModelRegistry,
-    NewSessionOptions, ScopedModel, SessionBootstrapOptions, SessionEntry, SessionHeader,
-    SessionInfo, SessionManager, bash_execution_to_text, build_default_pi_system_prompt,
-    calculate_context_tokens, compact, create_agent_session, create_bash_execution_message,
-    estimate_context_tokens, find_exact_model_reference_match, get_default_session_dir,
-    parse_thinking_level, prepare_compaction, resolve_cli_model, resolve_model_scope,
-    restore_model_from_session, should_compact,
+    AgentSession, AgentSessionEvent, AgentSessionOptions, AuthSource, BootstrapDiagnosticLevel,
+    CodingAgentCore, CodingAgentCoreError, CodingAgentCoreOptions, CompactionResult,
+    CompactionSettings, ContextUsageEstimate, CustomMessage, CustomMessageContent,
+    ExistingSessionSelection, FooterDataProvider, ModelRegistry, NewSessionOptions, ScopedModel,
+    SessionBootstrapOptions, SessionEntry, SessionHeader, SessionInfo, SessionManager,
+    build_default_pi_system_prompt, calculate_context_tokens, compact, create_agent_session,
+    create_bash_execution_message, estimate_context_tokens, find_exact_model_reference_match,
+    get_default_session_dir, parse_thinking_level, prepare_compaction, resolve_cli_model,
+    resolve_model_scope, restore_model_from_session, should_compact,
 };
 #[cfg(test)]
 use pi_coding_agent_tui::PlainKeyHintStyler;
 use pi_coding_agent_tui::{
     CustomMessageComponent, DEFAULT_APP_KEYBINDINGS, ExternalEditorCommandRunner,
     ExternalEditorHost, FooterStateHandle, InteractiveCoreBinding, KeybindingsManager,
-    StartupShellComponent, StatusHandle, ThemedKeyHintStyler, init_theme, key_hint, key_text,
-    set_registered_themes,
+    StartupShellComponent, StatusHandle, SystemClipboardImageSource, ThemedKeyHintStyler,
+    init_theme, key_hint, key_text, set_registered_themes,
 };
 use pi_config::{LoadedRuntimeSettings, ThinkingBudgetsSettings, load_runtime_settings};
 use pi_events::{AssistantContent, Message, Model, UserContent};
 use pi_tui::{
-    AutocompleteItem, CombinedAutocompleteProvider, Component, Container, Input, ProcessTerminal,
-    RenderHandle, SlashCommand, Spacer, Terminal, Text, Tui, TuiError, fuzzy_filter, matches_key,
+    AutocompleteItem, CombinedAutocompleteProvider, Component, Input, ProcessTerminal,
+    RenderHandle, SlashCommand, Terminal, Tui, TuiError, fuzzy_filter, matches_key,
     truncate_to_width,
 };
 use std::{
@@ -1558,6 +1557,8 @@ async fn run_interactive_iteration(
         None,
         false,
     );
+    shell.set_clipboard_image_source(SystemClipboardImageSource::default(), env::temp_dir());
+    shell.set_hide_thinking_blocks(runtime_settings.settings.hide_thinking_block);
     shell.set_input_padding_x(runtime_settings.settings.editor_padding_x);
     shell.set_autocomplete_max_visible(runtime_settings.settings.autocomplete_max_visible);
     shell.set_autocomplete_provider(Arc::new(CombinedAutocompleteProvider::new(
@@ -2486,6 +2487,12 @@ fn persist_enabled_models_setting(
                 Value::Array(enabled_models.iter().cloned().map(Value::String).collect()),
             );
         }
+    })
+}
+
+fn persist_hide_thinking_block_setting(path: &Path, hide: bool) -> Result<(), String> {
+    update_settings_file(path, |config| {
+        config.insert(String::from("hideThinkingBlock"), Value::Bool(hide));
     })
 }
 
@@ -8013,121 +8020,6 @@ struct InteractiveBashController {
     abort_tx: Option<watch::Sender<bool>>,
 }
 
-#[derive(Debug, Clone)]
-enum InteractiveBashTranscriptStatus {
-    Running,
-    Complete(InteractiveBashResult),
-    Error(String),
-}
-
-#[derive(Debug, Clone)]
-struct InteractiveBashTranscriptState {
-    command: String,
-    cancel_key_text: String,
-    exclude_from_context: bool,
-    status: InteractiveBashTranscriptStatus,
-}
-
-struct InteractiveBashTranscriptComponent {
-    state: Arc<Mutex<InteractiveBashTranscriptState>>,
-}
-
-#[derive(Clone)]
-struct InteractiveBashTranscriptHandle {
-    state: Arc<Mutex<InteractiveBashTranscriptState>>,
-    render_handle: RenderHandle,
-}
-
-impl InteractiveBashTranscriptComponent {
-    fn new(
-        command: impl Into<String>,
-        cancel_key_text: impl Into<String>,
-        exclude_from_context: bool,
-        render_handle: RenderHandle,
-    ) -> (Self, InteractiveBashTranscriptHandle) {
-        let state = Arc::new(Mutex::new(InteractiveBashTranscriptState {
-            command: command.into(),
-            cancel_key_text: cancel_key_text.into(),
-            exclude_from_context,
-            status: InteractiveBashTranscriptStatus::Running,
-        }));
-        (
-            Self {
-                state: state.clone(),
-            },
-            InteractiveBashTranscriptHandle {
-                state,
-                render_handle,
-            },
-        )
-    }
-}
-
-impl InteractiveBashTranscriptHandle {
-    fn set_complete(&self, result: InteractiveBashResult) {
-        self.state
-            .lock()
-            .expect("interactive bash transcript mutex poisoned")
-            .status = InteractiveBashTranscriptStatus::Complete(result);
-        self.render_handle.request_render();
-    }
-
-    fn set_error(&self, error: impl Into<String>) {
-        self.state
-            .lock()
-            .expect("interactive bash transcript mutex poisoned")
-            .status = InteractiveBashTranscriptStatus::Error(error.into());
-        self.render_handle.request_render();
-    }
-}
-
-impl Component for InteractiveBashTranscriptComponent {
-    fn render(&self, width: usize) -> Vec<String> {
-        let state = self
-            .state
-            .lock()
-            .expect("interactive bash transcript mutex poisoned")
-            .clone();
-        let label = if state.exclude_from_context {
-            "[bash no context]"
-        } else {
-            "[bash]"
-        };
-        let body = match state.status {
-            InteractiveBashTranscriptStatus::Running => {
-                format!(
-                    "$ {}\n\nRunning... ({} to cancel)",
-                    state.command, state.cancel_key_text
-                )
-            }
-            InteractiveBashTranscriptStatus::Complete(result) => {
-                bash_execution_to_text(&BashExecutionMessage {
-                    command: state.command,
-                    output: result.output,
-                    exit_code: result.exit_code.map(i64::from),
-                    cancelled: result.cancelled,
-                    truncated: result.truncated,
-                    full_output_path: result.full_output_path,
-                    exclude_from_context: state.exclude_from_context,
-                })
-            }
-            InteractiveBashTranscriptStatus::Error(error) => {
-                format!("$ {}\n\nError: {error}", state.command)
-            }
-        };
-
-        let mut container = Container::new();
-        container.add_child(Box::new(Spacer::new(1)));
-        container.add_child(Box::new(Text::new(label, 1, 0)));
-        container.add_child(Box::new(Spacer::new(1)));
-        container.add_child(Box::new(Text::new(body, 1, 0)));
-        container.add_child(Box::new(Spacer::new(1)));
-        container.render(width)
-    }
-
-    fn invalidate(&mut self) {}
-}
-
 fn matches_shell_binding(keybindings: &KeybindingsManager, data: &str, keybinding: &str) -> bool {
     keybindings
         .get_keys(keybinding)
@@ -8359,14 +8251,8 @@ fn submit_interactive_bash_command(
         return;
     }
 
-    let cancel_key_text = key_text(keybindings, "app.interrupt");
-    let (component, component_handle) = InteractiveBashTranscriptComponent::new(
-        command,
-        cancel_key_text,
-        exclude_from_context,
-        render_handle.clone(),
-    );
-    shell.add_transcript_item(Box::new(component));
+    let component_handle =
+        shell.start_bash_execution(command, exclude_from_context, render_handle.clone());
 
     let (abort_tx, abort_rx) = watch::channel(false);
     bash_controller
@@ -8389,7 +8275,13 @@ fn submit_interactive_bash_command(
 
         match result {
             Ok(result) => {
-                component_handle.set_complete(result.clone());
+                component_handle.set_output(&result.output);
+                component_handle.set_complete(
+                    result.exit_code,
+                    result.cancelled,
+                    result.truncated,
+                    result.full_output_path.clone(),
+                );
                 if let Err(error) = record_interactive_bash_result(
                     &core,
                     session_manager.as_ref(),
@@ -8457,6 +8349,19 @@ fn install_interactive_submit_handler(
             cycle_backward_session_manager.as_ref(),
             &cycle_backward_status_handle,
             &cycle_backward_footer_state_handle,
+        );
+    });
+
+    let thinking_cycle_core = core.clone();
+    let thinking_cycle_session_manager = session_manager.clone();
+    let thinking_cycle_status_handle = status_handle.clone();
+    let thinking_cycle_footer_state_handle = footer_state_handle.clone();
+    shell.on_action("app.thinking.cycle", move || {
+        handle_interactive_thinking_cycle(
+            &thinking_cycle_core,
+            thinking_cycle_session_manager.as_ref(),
+            &thinking_cycle_status_handle,
+            &thinking_cycle_footer_state_handle,
         );
     });
 
@@ -8546,6 +8451,35 @@ fn install_interactive_submit_handler(
             &tree_transition_request,
             &tree_exit_requested,
         );
+    });
+
+    shell.on_action_with_shell("app.tools.expand", move |shell| {
+        shell.set_tools_expanded(!shell.tools_expanded());
+    });
+
+    let toggle_thinking_runtime_settings = slash_command_context.runtime_settings.clone();
+    let toggle_thinking_agent_dir = slash_command_context.agent_dir.clone();
+    let toggle_thinking_status_handle = status_handle.clone();
+    shell.on_action_with_shell("app.thinking.toggle", move |shell| {
+        let hide = !shell.hide_thinking_blocks();
+        if let Some(agent_dir) = toggle_thinking_agent_dir.as_ref()
+            && let Err(error) =
+                persist_hide_thinking_block_setting(&agent_dir.join("settings.json"), hide)
+        {
+            toggle_thinking_status_handle.set_message(format!("Error: {error}"));
+            return;
+        }
+
+        toggle_thinking_runtime_settings
+            .lock()
+            .expect("interactive runtime settings mutex poisoned")
+            .settings
+            .hide_thinking_block = hide;
+        shell.set_hide_thinking_blocks(hide);
+        toggle_thinking_status_handle.set_message(format!(
+            "Thinking blocks: {}",
+            if hide { "hidden" } else { "visible" }
+        ));
     });
 
     let bash_controller = Arc::new(Mutex::new(InteractiveBashController::default()));
@@ -8687,6 +8621,24 @@ fn handle_interactive_model_cycle(
                 "Only one model in scope"
             };
             status_handle.set_message(message);
+        }
+        Err(error) => status_handle.set_message(format!("Error: {error}")),
+    }
+}
+
+fn handle_interactive_thinking_cycle(
+    core: &CodingAgentCore,
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
+    status_handle: &StatusHandle,
+    footer_state_handle: &FooterStateHandle,
+) {
+    match cycle_rpc_thinking_level(core, session_manager) {
+        Ok(Some(level)) => {
+            update_interactive_footer_state(footer_state_handle, core, session_manager);
+            status_handle.set_message(format!("Thinking level: {}", thinking_level_label(level)));
+        }
+        Ok(None) => {
+            status_handle.set_message("Current model does not support thinking");
         }
         Err(error) => status_handle.set_message(format!("Error: {error}")),
     }
