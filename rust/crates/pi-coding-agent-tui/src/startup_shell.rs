@@ -263,6 +263,7 @@ pub struct StartupShellComponent {
     tool_components: RefCell<HashMap<String, SharedComponent<ToolExecutionComponent>>>,
     bash_components: RefCell<Vec<BashExecutionHandle>>,
     tool_output_expanded: Cell<bool>,
+    show_images: Cell<bool>,
     hide_thinking_blocks: Cell<bool>,
     extension_editor: Option<ExtensionEditorComponent>,
     extension_editor_events: Arc<Mutex<VecDeque<ExtensionEditorEvent>>>,
@@ -352,6 +353,7 @@ impl StartupShellComponent {
             tool_components: RefCell::new(HashMap::new()),
             bash_components: RefCell::new(Vec::new()),
             tool_output_expanded: Cell::new(false),
+            show_images: Cell::new(true),
             hide_thinking_blocks: Cell::new(false),
             extension_editor: None,
             extension_editor_events: Arc::new(Mutex::new(VecDeque::new())),
@@ -679,11 +681,13 @@ impl StartupShellComponent {
             return component;
         }
 
+        let mut options = ToolExecutionOptions::default();
+        options.show_images = self.show_images.get();
         let component = SharedComponent::new(ToolExecutionComponent::new(
             tool_name.to_owned(),
             tool_call_id.to_owned(),
             args,
-            ToolExecutionOptions::default(),
+            options,
             &self.keybindings,
         ));
         component.with_mut(|component| component.set_expanded(self.tool_output_expanded.get()));
@@ -1051,6 +1055,17 @@ impl StartupShellComponent {
         }
         for handle in self.bash_components.borrow().iter() {
             handle.set_expanded(expanded);
+        }
+    }
+
+    pub fn show_images(&self) -> bool {
+        self.show_images.get()
+    }
+
+    pub fn set_show_images(&self, show_images: bool) {
+        self.show_images.set(show_images);
+        for component in self.tool_components.borrow().values() {
+            component.with_mut(|component| component.set_show_images(show_images));
         }
     }
 

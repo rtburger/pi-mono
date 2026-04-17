@@ -315,6 +315,24 @@ impl ClipboardImageSource for StaticClipboardImageSource {
 }
 
 #[test]
+fn startup_shell_tracks_show_images_setting() {
+    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
+    let shell = StartupShellComponent::new(
+        "Pi",
+        "1.2.3",
+        &keybindings,
+        &PlainKeyHintStyler,
+        true,
+        None,
+        false,
+    );
+
+    assert!(shell.show_images());
+    shell.set_show_images(false);
+    assert!(!shell.show_images());
+}
+
+#[test]
 fn startup_shell_renders_header_above_prompt() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let shell = StartupShellComponent::new(

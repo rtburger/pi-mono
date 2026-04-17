@@ -150,6 +150,24 @@ fn startup_header_text_uses_resolved_keybinding_overrides() {
 }
 
 #[test]
+fn startup_header_text_skips_unbound_optional_shortcuts() {
+    let keybindings = KeybindingsManager::new(
+        config(&[
+            ("app.tools.expand", &[]),
+            ("app.model.cycleForward", &[]),
+            ("app.model.cycleBackward", &[]),
+        ]),
+        None,
+    );
+
+    let text = build_startup_header_text("Pi", "1.2.3", &keybindings, &PlainStyler, false);
+
+    assert!(!text.contains("to toggle tool output"));
+    assert!(!text.contains("to cycle models"));
+    assert!(text.contains("ctrl+t to toggle thinking"));
+}
+
+#[test]
 fn startup_header_text_is_empty_when_quiet() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
 

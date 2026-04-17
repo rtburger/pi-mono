@@ -1341,6 +1341,7 @@ async fn run_interactive_iteration(
     let keybindings = create_keybindings_manager(agent_dir.as_deref());
     let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
     let mut tui = Tui::new(terminal.clone());
+    let _ = tui.set_show_hardware_cursor(runtime_settings.settings.show_hardware_cursor);
     let mut resume_picker_was_shown = false;
     let selected_resume_session = if show_resume_picker {
         let cwd_string = cwd.to_string_lossy().into_owned();
@@ -1526,6 +1527,12 @@ async fn run_interactive_iteration(
     core.set_thinking_budgets(map_thinking_budgets(
         &runtime_settings.settings.thinking_budgets,
     ));
+    if let Some(mode) = queue_mode_from_str(&runtime_settings.settings.steering_mode) {
+        core.agent().set_steering_mode(mode);
+    }
+    if let Some(mode) = queue_mode_from_str(&runtime_settings.settings.follow_up_mode) {
+        core.agent().set_follow_up_mode(mode);
+    }
 
     let bootstrap_output = render_bootstrap_diagnostics(&created.diagnostics);
     if !bootstrap_output.is_empty() {
@@ -1558,6 +1565,7 @@ async fn run_interactive_iteration(
         false,
     );
     shell.set_clipboard_image_source(SystemClipboardImageSource::default(), env::temp_dir());
+    shell.set_show_images(runtime_settings.settings.terminal.show_images);
     shell.set_hide_thinking_blocks(runtime_settings.settings.hide_thinking_block);
     shell.set_input_padding_x(runtime_settings.settings.editor_padding_x);
     shell.set_autocomplete_max_visible(runtime_settings.settings.autocomplete_max_visible);
@@ -7202,7 +7210,8 @@ fn render_hotkeys_text(keybindings: &KeybindingsManager) -> String {
 
     let mut current_section = None::<&str>;
     for (keybinding, definition) in DEFAULT_APP_KEYBINDINGS.iter() {
-        if keybinding.starts_with("app.scopedModels.") {
+        if keybinding.starts_with("app.scopedModels.") || !is_advertised_hotkey(keybinding.as_str())
+        {
             continue;
         }
 
@@ -7233,6 +7242,22 @@ fn render_hotkeys_text(keybindings: &KeybindingsManager) -> String {
     }
 
     output.trim_end().to_owned()
+}
+
+fn is_advertised_hotkey(keybinding: &str) -> bool {
+    !matches!(
+        keybinding,
+        "app.session.toggleNamedFilter"
+            | "app.session.togglePath"
+            | "app.session.toggleSort"
+            | "app.session.rename"
+            | "app.session.delete"
+            | "app.session.deleteNoninvasive"
+            | "app.tree.foldOrUp"
+            | "app.tree.unfoldOrDown"
+            | "app.tree.editLabel"
+            | "app.tree.toggleLabelTimestamp"
+    )
 }
 
 fn format_key_ids(keys: &[pi_tui::KeyId]) -> String {
@@ -10574,6 +10599,23 @@ mod tests {
         assert!(rendered.contains("## ["), "output: {rendered}");
 
         faux.unregister();
+    }
+
+    #[test]
+    fn hotkeys_text_skips_unimplemented_session_and_tree_shortcuts() {
+        let keybindings = create_keybindings_manager(None);
+
+        let rendered = render_hotkeys_text(&keybindings);
+
+        assert!(
+            rendered.contains("Toggle thinking blocks"),
+            "output: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Toggle session path display"),
+            "output: {rendered}"
+        );
+        assert!(!rendered.contains("Edit tree label"), "output: {rendered}");
     }
 
     #[test]
