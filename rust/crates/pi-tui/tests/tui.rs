@@ -1,13 +1,13 @@
 use pi_tui::{
-    get_cell_dimensions, set_cell_dimensions, visible_width, Component, Container,
-    InputListenerResult, OverlayAnchor, OverlayMargin, OverlayOptions, SizeValue, Terminal, Tui,
-    TuiError, CURSOR_MARKER,
+    CURSOR_MARKER, Component, Container, InputListenerResult, OverlayAnchor, OverlayMargin,
+    OverlayOptions, SizeValue, Terminal, Tui, TuiError, get_cell_dimensions, set_cell_dimensions,
+    visible_width,
 };
 use std::{
     cell::Cell,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -1007,9 +1007,11 @@ fn terminal_resize_callbacks_trigger_rerender_when_drained() {
 
     let writes_after = inspector.writes();
     assert!(writes_after.len() > writes_before);
-    assert!(writes_after
-        .last()
-        .is_some_and(|write| { write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3J") }));
+    assert!(
+        writes_after
+            .last()
+            .is_some_and(|write| { write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3J") })
+    );
     tui.stop().expect("stop should succeed");
 }
 
@@ -1026,12 +1028,16 @@ fn start_and_request_render_write_a_full_frame_to_terminal() {
     tui.stop().expect("stop should succeed");
 
     let writes = inspector.writes();
-    assert!(writes
-        .iter()
-        .any(|write| write.starts_with("\x1b[?2026hhello")));
-    assert!(writes
-        .iter()
-        .any(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3Jhello")));
+    assert!(
+        writes
+            .iter()
+            .any(|write| write.starts_with("\x1b[?2026hhello"))
+    );
+    assert!(
+        writes
+            .iter()
+            .any(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3Jhello"))
+    );
     assert_eq!(inspector.started(), 1);
     assert_eq!(inspector.stopped(), 1);
     assert!(!inspector.cursor_hidden());
@@ -1088,9 +1094,11 @@ fn render_handle_queues_rerender_until_terminal_events_are_drained() {
         .expect("queued render request should drain successfully");
     let writes_after = inspector.writes();
     assert!(writes_after.len() > writes_before);
-    assert!(writes_after
-        .last()
-        .is_some_and(|write| write.contains("there")));
+    assert!(
+        writes_after
+            .last()
+            .is_some_and(|write| write.contains("there"))
+    );
 
     tui.stop().expect("stop should succeed");
 }
@@ -1186,10 +1194,12 @@ fn clear_on_shrink_triggers_full_redraw_and_tracks_count() {
         .expect("shrink render should succeed");
 
     assert_eq!(tui.full_redraws(), 2);
-    assert!(inspector
-        .writes()
-        .last()
-        .is_some_and(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3JLine 0")));
+    assert!(
+        inspector
+            .writes()
+            .last()
+            .is_some_and(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3JLine 0"))
+    );
 
     tui.stop().expect("stop should succeed");
 }
@@ -1212,10 +1222,12 @@ fn viewport_reset_after_shrink_allows_append_without_another_full_redraw() {
         .expect("viewport-reset render should succeed");
 
     assert_eq!(tui.full_redraws(), 2);
-    assert!(inspector
-        .writes()
-        .last()
-        .is_some_and(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3JLine 0")));
+    assert!(
+        inspector
+            .writes()
+            .last()
+            .is_some_and(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3JLine 0"))
+    );
 
     inspector.clear_writes();
     *lines.lock().expect("dynamic lines mutex poisoned") = vec![

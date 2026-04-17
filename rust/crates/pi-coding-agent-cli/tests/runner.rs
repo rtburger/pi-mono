@@ -861,14 +861,19 @@ async fn run_command_help_lists_tool_selection_and_user_bash_support() {
 
     assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
     assert!(result.stderr.is_empty(), "stderr: {}", result.stderr);
-    assert!(result.stdout.contains("--no-tools"), "stdout: {}", result.stdout);
+    assert!(
+        result.stdout.contains("--no-tools"),
+        "stdout: {}",
+        result.stdout
+    );
     assert!(
         result.stdout.contains("--tools <tools>"),
         "stdout: {}",
         result.stdout
     );
     assert!(
-        result.stdout
+        result
+            .stdout
             .contains("available tools: read, bash, edit, write, grep, find, ls"),
         "stdout: {}",
         result.stdout

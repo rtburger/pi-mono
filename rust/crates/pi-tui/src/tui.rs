@@ -1,13 +1,13 @@
 use crate::{
-    extract_segments, get_capabilities, is_image_line, is_key_release, matches_key,
-    set_cell_dimensions, slice_by_column, slice_with_width, visible_width, CellDimensions,
-    Terminal, TuiError,
+    CellDimensions, Terminal, TuiError, extract_segments, get_capabilities, is_image_line,
+    is_key_release, matches_key, set_cell_dimensions, slice_by_column, slice_with_width,
+    visible_width,
 };
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
