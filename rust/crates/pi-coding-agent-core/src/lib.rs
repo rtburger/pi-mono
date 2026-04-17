@@ -51,7 +51,10 @@ pub use prompt_templates::{
 };
 pub use resource_types::{ResourceDiagnostic, SourceInfo};
 pub use runtime::{
-    CodingAgentCore, CodingAgentCoreOptions, CreateCodingAgentCoreResult, create_coding_agent_core,
+    AgentSession, AgentSessionOptions, AgentSessionRuntime, AgentSessionRuntimeError,
+    AgentSessionRuntimeRequest, CodingAgentCore, CodingAgentCoreOptions, CreateAgentSessionResult,
+    CreateAgentSessionRuntimeFactory, CreateAgentSessionRuntimeFuture, CreateCodingAgentCoreResult,
+    create_agent_session, create_agent_session_runtime, create_coding_agent_core,
 };
 pub use session_manager::{
     CURRENT_SESSION_VERSION, FileEntry, NewSessionOptions, SessionContext, SessionEntry,

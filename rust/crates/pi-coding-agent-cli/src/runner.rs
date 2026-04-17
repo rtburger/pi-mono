@@ -28,14 +28,16 @@ use pi_ai::{
     StreamOptions, ThinkingBudgets, Transport, is_context_overflow, models_are_equal,
     supports_xhigh,
 };
+#[cfg(test)]
+use pi_coding_agent_core::create_coding_agent_core;
 use pi_coding_agent_core::{
-    AuthSource, BashExecutionMessage, BootstrapDiagnosticLevel, CodingAgentCore,
-    CodingAgentCoreError, CodingAgentCoreOptions, CompactionResult, CompactionSettings,
-    ContextUsageEstimate, CustomMessage, CustomMessageContent, ExistingSessionSelection,
-    FooterDataProvider, ModelRegistry, NewSessionOptions, ScopedModel, SessionBootstrapOptions,
-    SessionEntry, SessionHeader, SessionInfo, SessionManager, bash_execution_to_text,
-    build_default_pi_system_prompt, calculate_context_tokens, compact,
-    create_bash_execution_message, create_coding_agent_core, estimate_context_tokens,
+    AgentSession, AgentSessionOptions, AuthSource, BashExecutionMessage, BootstrapDiagnosticLevel,
+    CodingAgentCore, CodingAgentCoreError, CodingAgentCoreOptions, CompactionResult,
+    CompactionSettings, ContextUsageEstimate, CustomMessage, CustomMessageContent,
+    ExistingSessionSelection, FooterDataProvider, ModelRegistry, NewSessionOptions, ScopedModel,
+    SessionBootstrapOptions, SessionEntry, SessionHeader, SessionInfo, SessionManager,
+    bash_execution_to_text, build_default_pi_system_prompt, calculate_context_tokens, compact,
+    create_agent_session, create_bash_execution_message, estimate_context_tokens,
     find_exact_model_reference_match, get_default_session_dir, parse_thinking_level,
     prepare_compaction, resolve_cli_model, resolve_model_scope, restore_model_from_session,
     should_compact,
@@ -131,9 +133,6 @@ impl InteractiveRuntime {
 struct SessionSupport {
     manager: Arc<Mutex<SessionManager>>,
     header: SessionHeader,
-    restored_messages: Vec<pi_agent::AgentMessage>,
-    has_existing_messages: bool,
-    has_thinking_entry: bool,
     existing_session: ExistingSessionSelection,
     session_id: String,
 }
@@ -371,9 +370,6 @@ fn build_session_support(session_manager: SessionManager) -> SessionSupport {
     SessionSupport {
         manager: Arc::new(Mutex::new(session_manager)),
         header,
-        restored_messages: restored_context.messages,
-        has_existing_messages,
-        has_thinking_entry,
         existing_session,
         session_id,
     }
@@ -801,58 +797,6 @@ async fn select_oauth_provider(
             .map_err(|error| error.to_string())?;
         sleep(Duration::from_millis(16)).await;
     }
-}
-
-fn apply_session_support(
-    core: &CodingAgentCore,
-    session_support: &SessionSupport,
-) -> Result<(), String> {
-    core.agent()
-        .set_session_id(Some(session_support.session_id.clone()));
-
-    if !session_support.restored_messages.is_empty() {
-        let restored_messages = session_support.restored_messages.clone();
-        core.agent().update_state(move |state| {
-            state.messages = restored_messages;
-        });
-    }
-
-    let state = core.state();
-    {
-        let mut session_manager = session_support
-            .manager
-            .lock()
-            .expect("session manager mutex poisoned");
-        if session_support.has_existing_messages {
-            if !session_support.has_thinking_entry {
-                session_manager
-                    .append_thinking_level_change(thinking_level_label(state.thinking_level))
-                    .map_err(|error| error.to_string())?;
-            }
-        } else {
-            session_manager
-                .append_model_change(state.model.provider.clone(), state.model.id.clone())
-                .map_err(|error| error.to_string())?;
-            session_manager
-                .append_thinking_level_change(thinking_level_label(state.thinking_level))
-                .map_err(|error| error.to_string())?;
-        }
-    }
-
-    let session_manager = session_support.manager.clone();
-    let _ = core.agent().subscribe(move |event, _signal| {
-        let session_manager = session_manager.clone();
-        Box::pin(async move {
-            if let pi_agent::AgentEvent::MessageEnd { message } = event {
-                let _ = session_manager
-                    .lock()
-                    .expect("session manager mutex poisoned")
-                    .append_message(message);
-            }
-        })
-    });
-
-    Ok(())
 }
 
 fn session_header_json_line(header: &SessionHeader) -> String {
@@ -1525,40 +1469,45 @@ async fn run_interactive_iteration(
     }
     apply_runtime_transport_preference(&mut stream_options, &parsed, &runtime_settings);
 
-    let created = create_coding_agent_core(CodingAgentCoreOptions {
-        auth_source: Arc::new(overlay_auth),
-        built_in_models,
-        models_json_path: models_json_path.clone(),
-        cwd: Some(cwd.clone()),
-        tools: Some(selected_tools),
-        system_prompt: build_runtime_system_prompt(
-            &default_system_prompt,
-            &parsed,
-            &cwd,
-            agent_dir.as_deref(),
-            &selected_tool_names,
-            &resources,
-        ),
-        bootstrap: SessionBootstrapOptions {
-            cli_provider: parsed.provider.clone(),
-            cli_model: parsed.model.clone(),
-            cli_thinking_level: parsed.thinking,
-            scoped_models,
-            default_provider: bootstrap_defaults
-                .as_ref()
-                .map(|defaults| defaults.provider.clone()),
-            default_model_id: bootstrap_defaults
-                .as_ref()
-                .map(|defaults| defaults.model_id.clone()),
-            default_thinking_level: bootstrap_defaults
-                .as_ref()
-                .map(|defaults| defaults.thinking_level),
-            existing_session: session_support
-                .as_ref()
-                .map(|session_support| session_support.existing_session.clone())
-                .unwrap_or_default(),
+    let created = create_agent_session(AgentSessionOptions {
+        core: CodingAgentCoreOptions {
+            auth_source: Arc::new(overlay_auth),
+            built_in_models,
+            models_json_path: models_json_path.clone(),
+            cwd: Some(cwd.clone()),
+            tools: Some(selected_tools),
+            system_prompt: build_runtime_system_prompt(
+                &default_system_prompt,
+                &parsed,
+                &cwd,
+                agent_dir.as_deref(),
+                &selected_tool_names,
+                &resources,
+            ),
+            bootstrap: SessionBootstrapOptions {
+                cli_provider: parsed.provider.clone(),
+                cli_model: parsed.model.clone(),
+                cli_thinking_level: parsed.thinking,
+                scoped_models,
+                default_provider: bootstrap_defaults
+                    .as_ref()
+                    .map(|defaults| defaults.provider.clone()),
+                default_model_id: bootstrap_defaults
+                    .as_ref()
+                    .map(|defaults| defaults.model_id.clone()),
+                default_thinking_level: bootstrap_defaults
+                    .as_ref()
+                    .map(|defaults| defaults.thinking_level),
+                existing_session: session_support
+                    .as_ref()
+                    .map(|session_support| session_support.existing_session.clone())
+                    .unwrap_or_default(),
+            },
+            stream_options,
         },
-        stream_options,
+        session_manager: session_support
+            .as_ref()
+            .map(|support| support.manager.clone()),
     });
 
     let created = match created {
@@ -1583,25 +1532,12 @@ async fn run_interactive_iteration(
         }
     };
 
-    if let Some(session_support) = session_support.as_ref()
-        && let Err(error) = apply_session_support(&created.core, session_support)
-    {
-        let _ = tui.stop();
-        eprintln!("Error: {error}");
-        return InteractiveIterationOutcome {
-            exit_code: 1,
-            transition: None,
-            session_context: None,
-        };
-    }
+    let _session = created.session;
+    let core = _session.core();
 
-    created
-        .core
-        .set_auto_resize_images(runtime_settings.settings.images.auto_resize_images);
-    created
-        .core
-        .set_block_images(runtime_settings.settings.images.block_images);
-    created.core.set_thinking_budgets(map_thinking_budgets(
+    core.set_auto_resize_images(runtime_settings.settings.images.auto_resize_images);
+    core.set_block_images(runtime_settings.settings.images.block_images);
+    core.set_thinking_budgets(map_thinking_budgets(
         &runtime_settings.settings.thinking_budgets,
     ));
 
@@ -1639,7 +1575,7 @@ async fn run_interactive_iteration(
     shell.set_autocomplete_max_visible(runtime_settings.settings.autocomplete_max_visible);
     shell.set_autocomplete_provider(Arc::new(CombinedAutocompleteProvider::new(
         build_interactive_slash_commands(
-            created.core.model_registry(),
+            core.model_registry(),
             interactive_scoped_models.clone(),
             &resources,
         ),
@@ -1679,20 +1615,19 @@ async fn run_interactive_iteration(
         auth_operation_in_progress: Arc::new(AtomicBool::new(false)),
     };
     shell.bind_footer_data_provider_with_render_handle(&footer_provider, render_handle.clone());
-    let binding =
-        InteractiveCoreBinding::bind(created.core.clone(), &mut shell, render_handle.clone());
+    let binding = InteractiveCoreBinding::bind(core.clone(), &mut shell, render_handle.clone());
     let status_handle = shell.status_handle_with_render_handle(render_handle.clone());
     let footer_state_handle = shell.footer_state_handle_with_render_handle(render_handle.clone());
     update_interactive_footer_state(
         &footer_state_handle,
-        &created.core,
+        &core,
         interactive_session_manager.as_ref(),
     );
     footer_state_handle.update(|footer_state| {
         footer_state.auto_compact_enabled = runtime_settings.settings.compaction.enabled;
     });
     let auto_compaction_binding = install_interactive_auto_compaction(
-        &created.core,
+        &core,
         interactive_session_manager.as_ref(),
         &status_handle,
         &footer_state_handle,
@@ -1700,8 +1635,8 @@ async fn run_interactive_iteration(
     );
     install_interactive_submit_handler(
         &mut shell,
-        created.core.clone(),
-        created.core.model_registry(),
+        core.clone(),
+        core.model_registry(),
         interactive_scoped_models.clone(),
         interactive_session_manager.clone(),
         slash_command_context,
@@ -1731,7 +1666,7 @@ async fn run_interactive_iteration(
         let _ = tui.request_render(false);
     }
 
-    spawn_initial_interactive_messages(created.core.clone(), initial_message, messages);
+    spawn_initial_interactive_messages(core.clone(), initial_message, messages);
 
     let mut exit_code = 0;
     while !exit_requested.load(Ordering::Relaxed) {
@@ -1743,14 +1678,14 @@ async fn run_interactive_iteration(
         sleep(Duration::from_millis(16)).await;
     }
 
-    created.core.abort();
-    created.core.wait_for_idle().await;
+    core.abort();
+    core.wait_for_idle().await;
     let transition = transition_request
         .lock()
         .expect("interactive transition request mutex poisoned")
         .take();
-    let final_state = created.core.state();
-    let available_models = created.core.model_registry().get_available();
+    let final_state = core.state();
+    let available_models = core.model_registry().get_available();
     let _ = tui
         .terminal_mut()
         .drain_input(Duration::from_millis(1000), Duration::from_millis(50));
@@ -1758,7 +1693,7 @@ async fn run_interactive_iteration(
     drop(auto_compaction_binding);
     drop(binding);
     drop(tui);
-    drop(created);
+    drop(_session);
     drop(interactive_session_manager);
 
     let session_context = if transition.is_some() {
@@ -3974,32 +3909,37 @@ async fn run_command_with_terminal_factory(
     }
     apply_runtime_transport_preference(&mut stream_options, &parsed, &runtime_settings);
 
-    let created = create_coding_agent_core(CodingAgentCoreOptions {
-        auth_source: Arc::new(overlay_auth),
-        built_in_models,
-        models_json_path: models_json_path.clone(),
-        cwd: Some(runtime_cwd.clone()),
-        tools: Some(selected_tools),
-        system_prompt: build_runtime_system_prompt(
-            &default_system_prompt,
-            &parsed,
-            &runtime_cwd,
-            agent_dir.as_deref(),
-            &selected_tool_names,
-            &resources,
-        ),
-        bootstrap: SessionBootstrapOptions {
-            cli_provider: parsed.provider.clone(),
-            cli_model: parsed.model.clone(),
-            cli_thinking_level: parsed.thinking,
-            scoped_models,
-            existing_session: session_support
-                .as_ref()
-                .map(|session_support| session_support.existing_session.clone())
-                .unwrap_or_default(),
-            ..SessionBootstrapOptions::default()
+    let created = create_agent_session(AgentSessionOptions {
+        core: CodingAgentCoreOptions {
+            auth_source: Arc::new(overlay_auth),
+            built_in_models,
+            models_json_path: models_json_path.clone(),
+            cwd: Some(runtime_cwd.clone()),
+            tools: Some(selected_tools),
+            system_prompt: build_runtime_system_prompt(
+                &default_system_prompt,
+                &parsed,
+                &runtime_cwd,
+                agent_dir.as_deref(),
+                &selected_tool_names,
+                &resources,
+            ),
+            bootstrap: SessionBootstrapOptions {
+                cli_provider: parsed.provider.clone(),
+                cli_model: parsed.model.clone(),
+                cli_thinking_level: parsed.thinking,
+                scoped_models,
+                existing_session: session_support
+                    .as_ref()
+                    .map(|session_support| session_support.existing_session.clone())
+                    .unwrap_or_default(),
+                ..SessionBootstrapOptions::default()
+            },
+            stream_options,
         },
-        stream_options,
+        session_manager: session_support
+            .as_ref()
+            .map(|support| support.manager.clone()),
     });
 
     let created = match created {
@@ -4022,24 +3962,12 @@ async fn run_command_with_terminal_factory(
         }
     };
 
-    if let Some(session_support) = session_support.as_ref()
-        && let Err(error) = apply_session_support(&created.core, session_support)
-    {
-        push_line(&mut stderr, &format!("Error: {error}"));
-        return RunCommandResult {
-            exit_code: 1,
-            stdout,
-            stderr,
-        };
-    }
+    let _session = created.session;
+    let core = _session.core();
 
-    created
-        .core
-        .set_auto_resize_images(runtime_settings.settings.images.auto_resize_images);
-    created
-        .core
-        .set_block_images(runtime_settings.settings.images.block_images);
-    created.core.set_thinking_budgets(map_thinking_budgets(
+    core.set_auto_resize_images(runtime_settings.settings.images.auto_resize_images);
+    core.set_block_images(runtime_settings.settings.images.block_images);
+    core.set_thinking_budgets(map_thinking_budgets(
         &runtime_settings.settings.thinking_budgets,
     ));
 
@@ -4065,7 +3993,7 @@ async fn run_command_with_terminal_factory(
     };
 
     let run_result = run_print_mode(
-        &created.core,
+        &core,
         PrintModeOptions {
             mode: print_mode,
             messages,
@@ -4102,6 +4030,7 @@ struct RpcPreparedOptions {
 }
 
 struct RpcState {
+    _session: AgentSession,
     core: CodingAgentCore,
     session_manager: Option<Arc<Mutex<SessionManager>>>,
     cwd: PathBuf,
@@ -4563,40 +4492,45 @@ async fn build_rpc_state(
         options.agent_dir.as_deref(),
         &options.parsed,
     );
-    let created = create_coding_agent_core(CodingAgentCoreOptions {
-        auth_source: Arc::new(overlay_auth),
-        built_in_models: options.built_in_models.clone(),
-        models_json_path: options.models_json_path.clone(),
-        cwd: Some(cwd.to_path_buf()),
-        tools: Some(selected_tools),
-        system_prompt: build_runtime_system_prompt(
-            &default_system_prompt,
-            &options.parsed,
-            cwd,
-            options.agent_dir.as_deref(),
-            &selected_tool_names,
-            &resources,
-        ),
-        bootstrap: SessionBootstrapOptions {
-            cli_provider: options.parsed.provider.clone(),
-            cli_model: options.parsed.model.clone(),
-            cli_thinking_level: options.parsed.thinking,
-            scoped_models: scoped_models.clone(),
-            default_provider: bootstrap_defaults
-                .as_ref()
-                .map(|defaults| defaults.provider.clone()),
-            default_model_id: bootstrap_defaults
-                .as_ref()
-                .map(|defaults| defaults.model_id.clone()),
-            default_thinking_level: bootstrap_defaults
-                .as_ref()
-                .map(|defaults| defaults.thinking_level),
-            existing_session: session_support
-                .as_ref()
-                .map(|session_support| session_support.existing_session.clone())
-                .unwrap_or_default(),
+    let created = create_agent_session(AgentSessionOptions {
+        core: CodingAgentCoreOptions {
+            auth_source: Arc::new(overlay_auth),
+            built_in_models: options.built_in_models.clone(),
+            models_json_path: options.models_json_path.clone(),
+            cwd: Some(cwd.to_path_buf()),
+            tools: Some(selected_tools),
+            system_prompt: build_runtime_system_prompt(
+                &default_system_prompt,
+                &options.parsed,
+                cwd,
+                options.agent_dir.as_deref(),
+                &selected_tool_names,
+                &resources,
+            ),
+            bootstrap: SessionBootstrapOptions {
+                cli_provider: options.parsed.provider.clone(),
+                cli_model: options.parsed.model.clone(),
+                cli_thinking_level: options.parsed.thinking,
+                scoped_models: scoped_models.clone(),
+                default_provider: bootstrap_defaults
+                    .as_ref()
+                    .map(|defaults| defaults.provider.clone()),
+                default_model_id: bootstrap_defaults
+                    .as_ref()
+                    .map(|defaults| defaults.model_id.clone()),
+                default_thinking_level: bootstrap_defaults
+                    .as_ref()
+                    .map(|defaults| defaults.thinking_level),
+                existing_session: session_support
+                    .as_ref()
+                    .map(|session_support| session_support.existing_session.clone())
+                    .unwrap_or_default(),
+            },
+            stream_options,
         },
-        stream_options,
+        session_manager: session_support
+            .as_ref()
+            .map(|support| support.manager.clone()),
     });
 
     let created = match created {
@@ -4611,17 +4545,12 @@ async fn build_rpc_state(
         }
     };
 
-    if let Some(session_support) = session_support.as_ref() {
-        apply_session_support(&created.core, session_support)?;
-    }
+    let session = created.session;
+    let core = session.core();
 
-    created
-        .core
-        .set_auto_resize_images(runtime_settings.settings.images.auto_resize_images);
-    created
-        .core
-        .set_block_images(runtime_settings.settings.images.block_images);
-    created.core.set_thinking_budgets(map_thinking_budgets(
+    core.set_auto_resize_images(runtime_settings.settings.images.auto_resize_images);
+    core.set_block_images(runtime_settings.settings.images.block_images);
+    core.set_thinking_budgets(map_thinking_budgets(
         &runtime_settings.settings.thinking_budgets,
     ));
 
@@ -4650,12 +4579,7 @@ async fn build_rpc_state(
             extension_paths: options.parsed.extensions.clone().unwrap_or_default(),
             no_extensions: options.parsed.no_extensions,
             flag_values: unknown_flags_to_json(&options.parsed.unknown_flags),
-            state: rpc_extension_state_json(
-                &created.core,
-                session_manager.as_ref(),
-                &resources,
-                &[],
-            ),
+            state: rpc_extension_state_json(&core, session_manager.as_ref(), &resources, &[]),
             session_start_reason,
             previous_session_file,
             stdout_emitter,
@@ -4721,11 +4645,11 @@ async fn build_rpc_state(
                 &selected_tool_names,
                 &resources,
             );
-            created.core.agent().update_state(|state| {
+            core.agent().update_state(|state| {
                 state.system_prompt = extension_system_prompt.clone();
             });
             host.update_state(rpc_extension_state_json(
-                &created.core,
+                &core,
                 session_manager.as_ref(),
                 &resources,
                 &extension_commands,
@@ -4733,45 +4657,41 @@ async fn build_rpc_state(
             .await?;
 
             let before_tool_call_host = host.clone();
-            created
-                .core
-                .agent()
-                .set_before_tool_call(move |context, _signal| {
-                    let before_tool_call_host = before_tool_call_host.clone();
-                    async move {
-                        let input = context
-                            .args
-                            .lock()
-                            .expect("rpc before_tool_call args mutex poisoned")
-                            .clone();
-                        match before_tool_call_host
-                            .tool_call(&context.tool_name, &context.tool_call_id, input)
-                            .await
-                        {
-                            Ok(Some(RpcToolCallResult {
-                                block: true,
-                                reason,
-                            })) => Some(BeforeToolCallResult {
-                                block: true,
-                                reason,
-                            }),
-                            Ok(_) => None,
-                            Err(error) => Some(BeforeToolCallResult {
-                                block: true,
-                                reason: Some(format!(
-                                    "Extension failed, blocking execution: {error}"
-                                )),
-                            }),
-                        }
+            core.agent().set_before_tool_call(move |context, _signal| {
+                let before_tool_call_host = before_tool_call_host.clone();
+                async move {
+                    let input = context
+                        .args
+                        .lock()
+                        .expect("rpc before_tool_call args mutex poisoned")
+                        .clone();
+                    match before_tool_call_host
+                        .tool_call(&context.tool_name, &context.tool_call_id, input)
+                        .await
+                    {
+                        Ok(Some(RpcToolCallResult {
+                            block: true,
+                            reason,
+                        })) => Some(BeforeToolCallResult {
+                            block: true,
+                            reason,
+                        }),
+                        Ok(_) => None,
+                        Err(error) => Some(BeforeToolCallResult {
+                            block: true,
+                            reason: Some(format!("Extension failed, blocking execution: {error}")),
+                        }),
                     }
-                });
+                }
+            });
             extension_host = Some(host);
         }
     }
 
     Ok((
         RpcState {
-            core: created.core,
+            _session: session,
+            core,
             session_manager,
             cwd: cwd.to_path_buf(),
             scoped_models,

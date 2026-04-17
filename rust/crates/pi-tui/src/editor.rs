@@ -1807,10 +1807,30 @@ impl Editor {
         let items = state
             .items
             .iter()
-            .map(|item| SelectItem {
-                value: item.value.clone(),
-                label: item.label.clone(),
-                description: item.description.clone(),
+            .map(|item| {
+                let display_label = if let Some(description) = item
+                    .description
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|description| !description.is_empty())
+                {
+                    let base_label = if item.label.is_empty() {
+                        item.value.as_str()
+                    } else {
+                        item.label.as_str()
+                    };
+                    format!("{base_label} — {description}")
+                } else if item.label.is_empty() {
+                    item.value.clone()
+                } else {
+                    item.label.clone()
+                };
+
+                SelectItem {
+                    value: item.value.clone(),
+                    label: display_label,
+                    description: None,
+                }
             })
             .collect::<Vec<_>>();
         let layout = if state.prefix.starts_with('/') {
