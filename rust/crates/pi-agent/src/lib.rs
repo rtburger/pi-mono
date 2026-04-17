@@ -16,7 +16,7 @@ pub use r#loop::{
     BeforeToolCallResult, ConvertToLlmHook, DefaultAssistantStreamer, GetApiKeyHook,
     SharedToolArgs, ToolExecutionMode, TransformContextHook, agent_loop, agent_loop_continue,
 };
-pub use message::{AgentMessage, CustomAgentMessage};
+pub use message::{AgentMessage, CustomAgentMessage, CustomAgentPayload};
 pub use pi_ai::{PayloadHook, ThinkingBudgets, Transport};
 pub use proxy::{ProxyStreamConfig, ProxyStreamer, stream_proxy};
 pub use state::{AgentContext, AgentState, ThinkingLevel};

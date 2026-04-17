@@ -1,4 +1,4 @@
-use pi_agent::AgentMessage;
+use pi_agent::{AgentMessage, CustomAgentPayload};
 use pi_events::{Message, UserContent};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,9 +25,13 @@ pub struct BashExecutionMessage {
     pub exclude_from_context: bool,
 }
 
+impl CustomAgentPayload for BashExecutionMessage {
+    const ROLE: &'static str = "bashExecution";
+}
+
 impl BashExecutionMessage {
     pub fn into_agent_message(self, timestamp: u64) -> AgentMessage {
-        custom_agent_message("bashExecution", self, timestamp)
+        custom_agent_message(self, timestamp)
     }
 }
 
@@ -48,9 +52,13 @@ pub struct CustomMessage {
     pub details: Option<Value>,
 }
 
+impl CustomAgentPayload for CustomMessage {
+    const ROLE: &'static str = "custom";
+}
+
 impl CustomMessage {
     pub fn into_agent_message(self, timestamp: u64) -> AgentMessage {
-        custom_agent_message("custom", self, timestamp)
+        custom_agent_message(self, timestamp)
     }
 }
 
@@ -61,9 +69,13 @@ pub struct BranchSummaryMessage {
     pub from_id: String,
 }
 
+impl CustomAgentPayload for BranchSummaryMessage {
+    const ROLE: &'static str = "branchSummary";
+}
+
 impl BranchSummaryMessage {
     pub fn into_agent_message(self, timestamp: u64) -> AgentMessage {
-        custom_agent_message("branchSummary", self, timestamp)
+        custom_agent_message(self, timestamp)
     }
 }
 
@@ -74,9 +86,13 @@ pub struct CompactionSummaryMessage {
     pub tokens_before: u64,
 }
 
+impl CustomAgentPayload for CompactionSummaryMessage {
+    const ROLE: &'static str = "compactionSummary";
+}
+
 impl CompactionSummaryMessage {
     pub fn into_agent_message(self, timestamp: u64) -> AgentMessage {
-        custom_agent_message("compactionSummary", self, timestamp)
+        custom_agent_message(self, timestamp)
     }
 }
 
@@ -191,53 +207,67 @@ fn convert_message_to_llm(message: AgentMessage) -> Option<Message> {
 fn convert_custom_message_to_llm(message: pi_agent::CustomAgentMessage) -> Option<Message> {
     let timestamp = message.timestamp;
 
-    match message.role.as_str() {
-        "bashExecution" => {
-            let payload: BashExecutionMessage = serde_json::from_value(message.payload).ok()?;
-            if payload.exclude_from_context {
-                return None;
-            }
-            Some(Message::User {
-                content: vec![UserContent::Text {
-                    text: bash_execution_to_text(&payload),
-                }],
-                timestamp,
-            })
+    if let Some(payload) = message
+        .decode_typed_payload::<BashExecutionMessage>()
+        .ok()
+        .flatten()
+    {
+        if payload.exclude_from_context {
+            return None;
         }
-        "custom" => {
-            let payload: CustomMessage = serde_json::from_value(message.payload).ok()?;
-            let content = match payload.content {
-                CustomMessageContent::Text(text) => vec![UserContent::Text { text }],
-                CustomMessageContent::Blocks(content) => content,
-            };
-            Some(Message::User { content, timestamp })
-        }
-        "branchSummary" => {
-            let payload: BranchSummaryMessage = serde_json::from_value(message.payload).ok()?;
-            Some(Message::User {
-                content: vec![UserContent::Text {
-                    text: format!(
-                        "{BRANCH_SUMMARY_PREFIX}{}{BRANCH_SUMMARY_SUFFIX}",
-                        payload.summary
-                    ),
-                }],
-                timestamp,
-            })
-        }
-        "compactionSummary" => {
-            let payload: CompactionSummaryMessage = serde_json::from_value(message.payload).ok()?;
-            Some(Message::User {
-                content: vec![UserContent::Text {
-                    text: format!(
-                        "{COMPACTION_SUMMARY_PREFIX}{}{COMPACTION_SUMMARY_SUFFIX}",
-                        payload.summary
-                    ),
-                }],
-                timestamp,
-            })
-        }
-        _ => None,
+        return Some(Message::User {
+            content: vec![UserContent::Text {
+                text: bash_execution_to_text(&payload),
+            }],
+            timestamp,
+        });
     }
+
+    if let Some(payload) = message
+        .decode_typed_payload::<CustomMessage>()
+        .ok()
+        .flatten()
+    {
+        let content = match payload.content {
+            CustomMessageContent::Text(text) => vec![UserContent::Text { text }],
+            CustomMessageContent::Blocks(content) => content,
+        };
+        return Some(Message::User { content, timestamp });
+    }
+
+    if let Some(payload) = message
+        .decode_typed_payload::<BranchSummaryMessage>()
+        .ok()
+        .flatten()
+    {
+        return Some(Message::User {
+            content: vec![UserContent::Text {
+                text: format!(
+                    "{BRANCH_SUMMARY_PREFIX}{}{BRANCH_SUMMARY_SUFFIX}",
+                    payload.summary
+                ),
+            }],
+            timestamp,
+        });
+    }
+
+    if let Some(payload) = message
+        .decode_typed_payload::<CompactionSummaryMessage>()
+        .ok()
+        .flatten()
+    {
+        return Some(Message::User {
+            content: vec![UserContent::Text {
+                text: format!(
+                    "{COMPACTION_SUMMARY_PREFIX}{}{COMPACTION_SUMMARY_SUFFIX}",
+                    payload.summary
+                ),
+            }],
+            timestamp,
+        });
+    }
+
+    None
 }
 
 fn filter_blocked_images_in_message(message: Message) -> Message {
@@ -290,15 +320,10 @@ fn push_blocked_image_placeholder(content: &mut Vec<UserContent>) {
     });
 }
 
-fn custom_agent_message(
-    payload_role: &str,
-    payload: impl Serialize,
-    timestamp: u64,
-) -> AgentMessage {
-    AgentMessage::custom(
-        payload_role,
-        serde_json::to_value(payload)
-            .expect("coding-agent message payload should always serialize"),
-        timestamp,
-    )
+fn custom_agent_message<T>(payload: T, timestamp: u64) -> AgentMessage
+where
+    T: CustomAgentPayload,
+{
+    AgentMessage::typed_custom(payload, timestamp)
+        .expect("coding-agent message payload should always serialize")
 }
