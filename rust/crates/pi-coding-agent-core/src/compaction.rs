@@ -10,9 +10,10 @@ use pi_ai::{SimpleStreamOptions, ThinkingLevel as AiThinkingLevel, complete_simp
 use pi_events::{
     AssistantContent, AssistantMessage, Context, Message, Model, StopReason, Usage, UserContent,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     time::{SystemTime, UNIX_EPOCH},
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -55,6 +56,20 @@ pub struct CompactionResult {
     pub details: Option<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionDetails {
+    pub read_files: Vec<String>,
+    pub modified_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchSummaryDetails {
+    pub read_files: Vec<String>,
+    pub modified_files: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionPreparation {
     pub first_kept_entry_id: String,
@@ -63,6 +78,8 @@ pub struct CompactionPreparation {
     pub is_split_turn: bool,
     pub tokens_before: u64,
     pub previous_summary: Option<String>,
+    pub read_files: Vec<String>,
+    pub modified_files: Vec<String>,
     pub settings: CompactionSettings,
 }
 
@@ -78,6 +95,13 @@ pub struct ContextUsageEstimate {
 pub struct CollectEntriesResult {
     pub entries: Vec<SessionEntry>,
     pub common_ancestor_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedBranchSummary {
+    pub summary: String,
+    pub read_files: Vec<String>,
+    pub modified_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +126,13 @@ struct CutPointResult {
     first_kept_entry_index: usize,
     turn_start_index: Option<usize>,
     is_split_turn: bool,
+}
+
+#[derive(Debug, Default)]
+struct FileOperations {
+    read: BTreeSet<String>,
+    written: BTreeSet<String>,
+    edited: BTreeSet<String>,
 }
 
 pub fn calculate_context_tokens(usage: &Usage) -> u64 {
@@ -176,13 +207,14 @@ pub fn prepare_compaction(
             _ => None,
         });
 
+    let previous_compaction_index = previous_compaction.as_ref().map(|(index, _, _)| *index);
     let (boundary_start, previous_summary) =
-        if let Some((index, summary, first_kept_entry_id)) = previous_compaction {
+        if let Some((index, summary, first_kept_entry_id)) = previous_compaction.as_ref() {
             let first_kept_index = path_entries
                 .iter()
                 .position(|entry| entry.id() == first_kept_entry_id)
-                .unwrap_or(index + 1);
-            (first_kept_index, Some(summary))
+                .unwrap_or(*index + 1);
+            (first_kept_index, Some(summary.clone()))
         } else {
             (0, None)
         };
@@ -233,6 +265,25 @@ pub fn prepare_compaction(
         return None;
     }
 
+    let mut file_operations = FileOperations::default();
+    if let Some(previous_compaction_index) = previous_compaction_index
+        && let Some(SessionEntry::Compaction {
+            details, from_hook, ..
+        }) = path_entries.get(previous_compaction_index)
+        && !from_hook.unwrap_or(false)
+        && let Some(details) = details
+    {
+        merge_summary_details(&mut file_operations, details);
+    }
+
+    for message in messages_to_summarize
+        .iter()
+        .chain(turn_prefix_messages.iter())
+    {
+        extract_file_operations_from_message(message, &mut file_operations);
+    }
+    let (read_files, modified_files) = compute_file_lists(&file_operations);
+
     Some(CompactionPreparation {
         first_kept_entry_id,
         messages_to_summarize,
@@ -240,6 +291,8 @@ pub fn prepare_compaction(
         is_split_turn: cut_point.is_split_turn,
         tokens_before,
         previous_summary,
+        read_files,
+        modified_files,
         settings,
     })
 }
@@ -251,7 +304,7 @@ pub async fn compact(
     headers: Option<BTreeMap<String, String>>,
     custom_instructions: Option<&str>,
 ) -> Result<CompactionResult, String> {
-    let summary = if preparation.is_split_turn && !preparation.turn_prefix_messages.is_empty() {
+    let mut summary = if preparation.is_split_turn && !preparation.turn_prefix_messages.is_empty() {
         let history_summary = if preparation.messages_to_summarize.is_empty() {
             String::from("No prior history.")
         } else {
@@ -288,11 +341,22 @@ pub async fn compact(
         .await?
     };
 
+    summary.push_str(&format_file_operations(
+        &preparation.read_files,
+        &preparation.modified_files,
+    ));
+    let details = CompactionDetails {
+        read_files: preparation.read_files.clone(),
+        modified_files: preparation.modified_files.clone(),
+    };
+
     Ok(CompactionResult {
         summary,
         first_kept_entry_id: preparation.first_kept_entry_id.clone(),
         tokens_before: preparation.tokens_before,
-        details: None,
+        details: Some(
+            serde_json::to_value(details).expect("compaction details should always serialize"),
+        ),
     })
 }
 
@@ -347,10 +411,28 @@ pub async fn generate_branch_summary(
     headers: Option<BTreeMap<String, String>>,
     options: BranchSummaryOptions,
 ) -> Result<String, String> {
+    Ok(
+        generate_branch_summary_with_details(entries, model, api_key, headers, options)
+            .await?
+            .summary,
+    )
+}
+
+pub async fn generate_branch_summary_with_details(
+    entries: &[SessionEntry],
+    model: &Model,
+    api_key: &str,
+    headers: Option<BTreeMap<String, String>>,
+    options: BranchSummaryOptions,
+) -> Result<GeneratedBranchSummary, String> {
     let token_budget = model.context_window.saturating_sub(options.reserve_tokens);
-    let messages = prepare_branch_messages(entries, token_budget);
+    let (messages, read_files, modified_files) = prepare_branch_messages(entries, token_budget);
     if messages.is_empty() {
-        return Ok(String::from("No content to summarize"));
+        return Ok(GeneratedBranchSummary {
+            summary: String::from("No content to summarize"),
+            read_files,
+            modified_files,
+        });
     }
 
     let conversation_text = serialize_conversation(&convert_to_llm(messages));
@@ -377,15 +459,108 @@ pub async fn generate_branch_summary(
     )
     .await?;
 
-    Ok(format!(
-        "{BRANCH_SUMMARY_PREAMBLE}{}",
-        assistant_text(&response)
-    ))
+    let mut summary = format!("{BRANCH_SUMMARY_PREAMBLE}{}", assistant_text(&response));
+    summary.push_str(&format_file_operations(&read_files, &modified_files));
+
+    Ok(GeneratedBranchSummary {
+        summary,
+        read_files,
+        modified_files,
+    })
 }
 
 pub fn latest_compaction_timestamp(entries: &[SessionEntry]) -> Option<u64> {
     let entry = get_latest_compaction_entry(entries)?;
     timestamp_to_millis(entry.timestamp())
+}
+
+fn merge_summary_details(file_operations: &mut FileOperations, details: &Value) {
+    let Ok(details) = serde_json::from_value::<CompactionDetails>(details.clone()) else {
+        return;
+    };
+
+    for path in details.read_files {
+        file_operations.read.insert(path);
+    }
+    for path in details.modified_files {
+        file_operations.edited.insert(path);
+    }
+}
+
+fn extract_file_operations_from_message(
+    message: &AgentMessage,
+    file_operations: &mut FileOperations,
+) {
+    let Some(Message::Assistant { content, .. }) = message.as_standard_message() else {
+        return;
+    };
+
+    for block in content {
+        let AssistantContent::ToolCall {
+            name, arguments, ..
+        } = block
+        else {
+            continue;
+        };
+
+        let Some(path) = arguments.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+
+        match name.as_str() {
+            "read" => {
+                file_operations.read.insert(path.to_owned());
+            }
+            "write" => {
+                file_operations.written.insert(path.to_owned());
+            }
+            "edit" => {
+                file_operations.edited.insert(path.to_owned());
+            }
+            _ => {}
+        }
+    }
+}
+
+fn compute_file_lists(file_operations: &FileOperations) -> (Vec<String>, Vec<String>) {
+    let modified_files = file_operations
+        .edited
+        .iter()
+        .chain(file_operations.written.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let modified_set = modified_files.iter().cloned().collect::<BTreeSet<_>>();
+    let read_files = file_operations
+        .read
+        .iter()
+        .filter(|path| !modified_set.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    (read_files, modified_files)
+}
+
+fn format_file_operations(read_files: &[String], modified_files: &[String]) -> String {
+    let mut sections = Vec::new();
+    if !read_files.is_empty() {
+        sections.push(format!(
+            "<read-files>\n{}\n</read-files>",
+            read_files.join("\n")
+        ));
+    }
+    if !modified_files.is_empty() {
+        sections.push(format!(
+            "<modified-files>\n{}\n</modified-files>",
+            modified_files.join("\n")
+        ));
+    }
+    if sections.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{}", sections.join("\n\n"))
+    }
 }
 
 fn assistant_usage(message: &AgentMessage) -> Option<&Usage> {
@@ -571,6 +746,20 @@ fn summary_message_from_entry(entry: &SessionEntry) -> Option<AgentMessage> {
     }
 }
 
+fn branch_summary_message_from_entry(entry: &SessionEntry) -> Option<AgentMessage> {
+    match entry {
+        SessionEntry::Message { message, .. }
+            if matches!(
+                message.as_standard_message(),
+                Some(Message::ToolResult { .. })
+            ) =>
+        {
+            None
+        }
+        _ => summary_message_from_entry(entry),
+    }
+}
+
 fn compaction_message_from_entry(entry: &SessionEntry) -> Option<AgentMessage> {
     match entry {
         SessionEntry::Compaction { .. } => None,
@@ -578,14 +767,30 @@ fn compaction_message_from_entry(entry: &SessionEntry) -> Option<AgentMessage> {
     }
 }
 
-fn prepare_branch_messages(entries: &[SessionEntry], token_budget: u64) -> Vec<AgentMessage> {
+fn prepare_branch_messages(
+    entries: &[SessionEntry],
+    token_budget: u64,
+) -> (Vec<AgentMessage>, Vec<String>, Vec<String>) {
     let mut messages = Vec::new();
     let mut total_tokens = 0;
+    let mut file_operations = FileOperations::default();
+
+    for entry in entries {
+        if let SessionEntry::BranchSummary {
+            details, from_hook, ..
+        } = entry
+            && !from_hook.unwrap_or(false)
+            && let Some(details) = details
+        {
+            merge_summary_details(&mut file_operations, details);
+        }
+    }
 
     for entry in entries.iter().rev() {
-        let Some(message) = summary_message_from_entry(entry) else {
+        let Some(message) = branch_summary_message_from_entry(entry) else {
             continue;
         };
+        extract_file_operations_from_message(&message, &mut file_operations);
         let tokens = estimate_tokens(&message);
         if token_budget > 0 && total_tokens + tokens > token_budget {
             if matches!(
@@ -601,7 +806,8 @@ fn prepare_branch_messages(entries: &[SessionEntry], token_budget: u64) -> Vec<A
         messages.insert(0, message);
     }
 
-    messages
+    let (read_files, modified_files) = compute_file_lists(&file_operations);
+    (messages, read_files, modified_files)
 }
 
 async fn generate_summary(

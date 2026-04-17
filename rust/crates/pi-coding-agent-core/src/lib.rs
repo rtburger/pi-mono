@@ -24,10 +24,12 @@ pub use bootstrap::{
     SessionBootstrapOptions, SessionBootstrapResult, bootstrap_session,
 };
 pub use compaction::{
-    BranchSummaryOptions, CollectEntriesResult, CompactionPreparation, CompactionResult,
-    CompactionSettings, ContextUsageEstimate, calculate_context_tokens,
-    collect_entries_for_branch_summary, compact, estimate_context_tokens, estimate_tokens,
-    generate_branch_summary, latest_compaction_timestamp, prepare_compaction, should_compact,
+    BranchSummaryDetails, BranchSummaryOptions, CollectEntriesResult, CompactionDetails,
+    CompactionPreparation, CompactionResult, CompactionSettings, ContextUsageEstimate,
+    GeneratedBranchSummary, calculate_context_tokens, collect_entries_for_branch_summary, compact,
+    estimate_context_tokens, estimate_tokens, generate_branch_summary,
+    generate_branch_summary_with_details, latest_compaction_timestamp, prepare_compaction,
+    should_compact,
 };
 pub use footer_data::{BranchChangeSubscription, FooterDataProvider, FooterDataSnapshot};
 pub use messages::{
@@ -51,9 +53,10 @@ pub use prompt_templates::{
 };
 pub use resource_types::{ResourceDiagnostic, SourceInfo};
 pub use runtime::{
-    AgentSession, AgentSessionOptions, AgentSessionRuntime, AgentSessionRuntimeError,
-    AgentSessionRuntimeRequest, CodingAgentCore, CodingAgentCoreOptions, CreateAgentSessionResult,
-    CreateAgentSessionRuntimeFactory, CreateAgentSessionRuntimeFuture, CreateCodingAgentCoreResult,
+    AgentSession, AgentSessionEvent, AgentSessionOptions, AgentSessionRuntime,
+    AgentSessionRuntimeError, AgentSessionRuntimeRequest, CodingAgentCore, CodingAgentCoreOptions,
+    CompactionReason, CreateAgentSessionResult, CreateAgentSessionRuntimeFactory,
+    CreateAgentSessionRuntimeFuture, CreateCodingAgentCoreResult, RetrySettings,
     create_agent_session, create_agent_session_runtime, create_coding_agent_core,
 };
 pub use session_manager::{
