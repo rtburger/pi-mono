@@ -1,7 +1,7 @@
-use crate::current_theme;
+use crate::{current_theme, markdown_theme};
 use pi_coding_agent_core::{CustomMessage, CustomMessageContent};
 use pi_events::UserContent;
-use pi_tui::{Component, Container, Spacer, Text};
+use pi_tui::{Box as TuiBox, Component, Container, DefaultTextStyle, Markdown, Spacer, Text};
 
 pub struct CustomMessageComponent {
     message: CustomMessage,
@@ -28,29 +28,29 @@ impl CustomMessageComponent {
     }
 
     fn rebuild(&mut self) {
+        let mut box_component =
+            TuiBox::with_bg_fn(1, 1, |text| current_theme().bg("customMessageBg", text));
         let theme = current_theme();
+        let label = theme.fg(
+            "customMessageLabel",
+            theme.bold(format!("[{}]", self.message.custom_type)),
+        );
+        box_component.add_child(Box::new(Text::new(label, 0, 0)));
+        box_component.add_child(Box::new(Spacer::new(1)));
+
+        let body = extract_text_content(&self.message.content);
+        box_component.add_child(Box::new(Markdown::with_default_text_style(
+            body,
+            0,
+            0,
+            markdown_theme(),
+            DefaultTextStyle::new()
+                .with_color(|text| current_theme().fg("customMessageText", text)),
+        )));
+
         self.container.clear();
         self.container.add_child(Box::new(Spacer::new(1)));
-        self.container.add_child(Box::new(Text::with_custom_bg_fn(
-            self.rendered_text(),
-            1,
-            1,
-            theme.background_fill("customMessageBg"),
-        )));
-    }
-
-    fn rendered_text(&self) -> String {
-        let theme = current_theme();
-        let mut text = theme.fg(
-            "customMessageLabel",
-            format!("[{}]", self.message.custom_type),
-        );
-        let body = extract_text_content(&self.message.content);
-        if !body.is_empty() {
-            text.push_str("\n\n");
-            text.push_str(&theme.fg("customMessageText", body));
-        }
-        text
+        self.container.add_child(Box::new(box_component));
     }
 }
 

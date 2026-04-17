@@ -85,11 +85,12 @@ fn skill_invocation_component_renders_collapsed_name_with_expand_hint() {
     let lines = component.render(54);
 
     assert!(lines.iter().all(|line| visible_width(line) <= 54));
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("[skill] test-skill (ctrl+o to expand)"))
-    );
+    assert!(lines.iter().any(|line| {
+        line.contains("[skill]")
+            && line.contains("test-skill")
+            && line.contains("ctrl+o")
+            && line.contains("to expand")
+    }));
     assert!(
         !lines
             .iter()
@@ -154,7 +155,7 @@ fn startup_shell_can_render_skill_invocation_component_in_transcript() {
     let lines = tui.render_for_size(64, 20);
     let skill_line = lines
         .iter()
-        .position(|line| line.contains("[skill] test-skill"))
+        .position(|line| line.contains("[skill]") && line.contains("test-skill"))
         .expect("skill invocation should render");
     let pending_line = lines
         .iter()

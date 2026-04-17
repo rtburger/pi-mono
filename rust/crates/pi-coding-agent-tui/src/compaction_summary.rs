@@ -1,12 +1,12 @@
-use crate::{KeybindingsManager, current_theme, key_text};
+use crate::{KeybindingsManager, current_theme, key_text, markdown_theme};
 use pi_coding_agent_core::CompactionSummaryMessage;
-use pi_tui::{Component, Container, Spacer, Text};
+use pi_tui::{Box as TuiBox, Component, DefaultTextStyle, Markdown, Spacer, Text};
 
 pub struct CompactionSummaryMessageComponent {
     message: CompactionSummaryMessage,
     expanded: bool,
     expand_key_text: String,
-    container: Container,
+    box_component: TuiBox,
 }
 
 impl CompactionSummaryMessageComponent {
@@ -15,7 +15,9 @@ impl CompactionSummaryMessageComponent {
             message,
             expanded: false,
             expand_key_text: key_text(keybindings, "app.tools.expand"),
-            container: Container::new(),
+            box_component: TuiBox::with_bg_fn(1, 1, |text| {
+                current_theme().bg("customMessageBg", text)
+            }),
         };
         component.rebuild();
         component
@@ -29,53 +31,53 @@ impl CompactionSummaryMessageComponent {
     }
 
     fn rebuild(&mut self) {
-        self.container.clear();
-        self.container.add_child(Box::new(Spacer::new(1)));
-        self.container.add_child(Box::new(Text::new(
-            current_theme().fg("accent", "[compaction]"),
-            1,
-            0,
-        )));
-        self.container.add_child(Box::new(Spacer::new(1)));
+        self.box_component
+            .set_bg_fn(|text| current_theme().bg("customMessageBg", text));
+        self.box_component.clear();
 
+        let theme = current_theme();
         let tokens_before = format_with_commas(self.message.tokens_before);
+        let label = theme.fg("customMessageLabel", theme.bold("[compaction]"));
+        self.box_component
+            .add_child(Box::new(Text::new(label, 0, 0)));
+        self.box_component.add_child(Box::new(Spacer::new(1)));
+
         if self.expanded {
-            self.container.add_child(Box::new(Text::new(
-                current_theme().fg(
-                    "text",
+            self.box_component
+                .add_child(Box::new(Markdown::with_default_text_style(
                     format!(
-                        "Compacted from {tokens_before} tokens\n\n{}",
+                        "**Compacted from {tokens_before} tokens**\n\n{}",
                         self.message.summary
                     ),
-                ),
-                1,
-                0,
-            )));
+                    0,
+                    0,
+                    markdown_theme(),
+                    DefaultTextStyle::new()
+                        .with_color(|text| current_theme().fg("customMessageText", text)),
+                )));
         } else {
-            self.container.add_child(Box::new(Text::new(
-                current_theme().fg(
-                    "dim",
-                    format!(
-                        "Compacted from {tokens_before} tokens ({} to expand)",
-                        self.expand_key_text
-                    ),
+            let line = format!(
+                "{}{}{}",
+                theme.fg(
+                    "customMessageText",
+                    format!("Compacted from {tokens_before} tokens ("),
                 ),
-                1,
-                0,
-            )));
+                theme.fg("dim", &self.expand_key_text),
+                theme.fg("customMessageText", " to expand)"),
+            );
+            self.box_component
+                .add_child(Box::new(Text::new(line, 0, 0)));
         }
-
-        self.container.add_child(Box::new(Spacer::new(1)));
     }
 }
 
 impl Component for CompactionSummaryMessageComponent {
     fn render(&self, width: usize) -> Vec<String> {
-        self.container.render(width)
+        self.box_component.render(width)
     }
 
     fn invalidate(&mut self) {
-        self.container.invalidate();
+        self.box_component.invalidate();
         self.rebuild();
     }
 }

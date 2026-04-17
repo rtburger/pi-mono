@@ -86,11 +86,9 @@ fn branch_summary_component_renders_collapsed_message_with_expand_hint() {
 
     assert!(lines.iter().all(|line| visible_width(line) <= 50));
     assert!(lines.iter().any(|line| line.contains("[branch]")));
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("Branch summary (ctrl+o to expand)"))
-    );
+    assert!(lines.iter().any(|line| {
+        line.contains("Branch summary (") && line.contains("ctrl+o") && line.contains("to expand)")
+    }));
 }
 
 #[test]

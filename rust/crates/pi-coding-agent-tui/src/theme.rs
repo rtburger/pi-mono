@@ -1,6 +1,7 @@
 use crate::{KeyHintStyler, StartupHeaderStyler};
 use pi_agent::ThinkingLevel;
 use pi_coding_agent_core::{ResourceDiagnostic, SourceInfo};
+use pi_tui::MarkdownTheme;
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -395,6 +396,30 @@ impl StartupHeaderStyler for ThemedKeyHintStyler {
         let theme = current_theme();
         theme.fg("dim", theme.strikethrough(text))
     }
+}
+
+pub fn markdown_theme() -> MarkdownTheme {
+    MarkdownTheme::new()
+        .with_heading(|text| {
+            let theme = current_theme();
+            theme.fg("mdHeading", theme.bold(text))
+        })
+        .with_link(|text| current_theme().fg("mdLink", text))
+        .with_link_url(|text| current_theme().fg("mdLinkUrl", text))
+        .with_code(|text| current_theme().fg("mdCode", text))
+        .with_code_block(|text| current_theme().fg("mdCodeBlock", text))
+        .with_code_block_border(|text| current_theme().fg("mdCodeBlockBorder", text))
+        .with_quote(|text| current_theme().fg("mdQuote", text))
+        .with_quote_border(|text| current_theme().fg("mdQuoteBorder", text))
+        .with_hr(|text| current_theme().fg("mdHr", text))
+        .with_list_bullet(|text| current_theme().fg("mdListBullet", text))
+        .with_bold(|text| current_theme().bold(text))
+        .with_italic(|text| current_theme().italic(text))
+        .with_underline(|text| current_theme().underline(text))
+        .with_strikethrough(|text| {
+            let theme = current_theme();
+            theme.fg("dim", theme.strikethrough(text))
+        })
 }
 
 pub fn current_theme() -> Theme {

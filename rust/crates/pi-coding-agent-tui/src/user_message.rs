@@ -1,5 +1,5 @@
-use crate::current_theme;
-use pi_tui::{Component, Container, Spacer, Text};
+use crate::{current_theme, markdown_theme};
+use pi_tui::{Component, Container, DefaultTextStyle, Markdown, Spacer};
 
 const OSC133_ZONE_START: &str = "\x1b]133;A\x07";
 const OSC133_ZONE_END: &str = "\x1b]133;B\x07";
@@ -11,14 +11,16 @@ pub struct UserMessageComponent {
 
 impl UserMessageComponent {
     pub fn new(text: impl Into<String>) -> Self {
-        let theme = current_theme();
         let mut container = Container::new();
         container.add_child(Box::new(Spacer::new(1)));
-        container.add_child(Box::new(Text::with_custom_bg_fn(
-            theme.fg("userMessageText", text.into()),
+        container.add_child(Box::new(Markdown::with_default_text_style(
+            text.into(),
             1,
             1,
-            theme.background_fill("userMessageBg"),
+            markdown_theme(),
+            DefaultTextStyle::new()
+                .with_bg_color(|text| current_theme().bg("userMessageBg", text))
+                .with_color(|text| current_theme().fg("userMessageText", text)),
         )));
         Self { container }
     }

@@ -128,6 +128,40 @@ fn assistant_message_component_renders_text_and_visible_thinking_blocks() {
 }
 
 #[test]
+fn assistant_message_component_renders_markdown_and_styles_visible_thinking() {
+    let component = AssistantMessageComponent::new(
+        Some(assistant_message(
+            vec![
+                AssistantContent::Thinking {
+                    thinking: "Need to inspect `src/lib.rs` first.".into(),
+                    thinking_signature: None,
+                    redacted: false,
+                },
+                AssistantContent::Text {
+                    text: "# Final Plan\n\n- update parser\n- add regression".into(),
+                    text_signature: None,
+                },
+            ],
+            StopReason::Stop,
+            None,
+        )),
+        false,
+        DEFAULT_HIDDEN_THINKING_LABEL,
+    );
+
+    let lines = component.render(72);
+    let joined = lines.join("\n");
+
+    assert!(lines.iter().all(|line| visible_width(line) <= 72));
+    assert!(joined.contains("Final Plan"), "lines: {lines:?}");
+    assert!(joined.contains("update parser"), "lines: {lines:?}");
+    assert!(joined.contains("add regression"), "lines: {lines:?}");
+    assert!(!joined.contains("# Final Plan"), "lines: {lines:?}");
+    assert!(joined.contains("\x1b[3m"), "lines: {lines:?}");
+    assert!(joined.contains("src/lib.rs"), "lines: {lines:?}");
+}
+
+#[test]
 fn assistant_message_component_can_hide_thinking_with_custom_label() {
     let mut component = AssistantMessageComponent::new(
         Some(assistant_message(

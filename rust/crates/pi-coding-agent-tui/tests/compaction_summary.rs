@@ -88,11 +88,11 @@ fn compaction_summary_component_renders_collapsed_message_with_expand_hint() {
 
     assert!(lines.iter().all(|line| visible_width(line) <= 56));
     assert!(lines.iter().any(|line| line.contains("[compaction]")));
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("Compacted from 12,345 tokens (ctrl+o to expand)"))
-    );
+    assert!(lines.iter().any(|line| {
+        line.contains("Compacted from 12,345 tokens (")
+            && line.contains("ctrl+o")
+            && line.contains("to expand)")
+    }));
 }
 
 #[test]

@@ -1,6 +1,6 @@
-use crate::current_theme;
+use crate::{current_theme, markdown_theme};
 use pi_events::{AssistantContent, AssistantMessage, StopReason};
-use pi_tui::{Component, Container, Spacer, Text};
+use pi_tui::{Component, Container, DefaultTextStyle, Markdown, Spacer, Text};
 
 pub const DEFAULT_HIDDEN_THINKING_LABEL: &str = "Thinking...";
 
@@ -60,13 +60,15 @@ impl AssistantMessageComponent {
             self.content_container.add_child(Box::new(Spacer::new(1)));
         }
 
+        let theme = markdown_theme();
         for (index, content) in message.content.iter().enumerate() {
             match content {
                 AssistantContent::Text { text, .. } if !text.trim().is_empty() => {
-                    self.content_container.add_child(Box::new(Text::new(
-                        current_theme().fg("text", text.trim()),
+                    self.content_container.add_child(Box::new(Markdown::new(
+                        text.trim(),
                         1,
                         0,
+                        theme.clone(),
                     )));
                 }
                 AssistantContent::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
@@ -77,17 +79,26 @@ impl AssistantMessageComponent {
                         .any(is_visible_content);
 
                     if self.hide_thinking_block {
+                        let theme = current_theme();
                         self.content_container.add_child(Box::new(Text::new(
-                            current_theme().fg("thinkingText", &self.hidden_thinking_label),
+                            theme.italic(
+                                theme.fg("thinkingText", self.hidden_thinking_label.as_str()),
+                            ),
                             1,
                             0,
                         )));
                     } else {
-                        self.content_container.add_child(Box::new(Text::new(
-                            current_theme().fg("thinkingText", thinking.trim()),
-                            1,
-                            0,
-                        )));
+                        self.content_container.add_child(Box::new(
+                            Markdown::with_default_text_style(
+                                thinking.trim(),
+                                1,
+                                0,
+                                theme.clone(),
+                                DefaultTextStyle::new()
+                                    .with_color(|text| current_theme().fg("thinkingText", text))
+                                    .with_italic(true),
+                            ),
+                        ));
                     }
 
                     if has_visible_content_after {
@@ -112,7 +123,7 @@ impl AssistantMessageComponent {
                     };
                     self.content_container.add_child(Box::new(Spacer::new(1)));
                     self.content_container.add_child(Box::new(Text::new(
-                        current_theme().fg("warning", abort_message),
+                        current_theme().fg("error", abort_message),
                         1,
                         0,
                     )));

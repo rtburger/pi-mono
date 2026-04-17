@@ -97,6 +97,20 @@ fn user_message_component_wraps_rendered_output_in_osc133_prompt_markers() {
 }
 
 #[test]
+fn user_message_component_renders_markdown_inside_the_message_bubble() {
+    let component = UserMessageComponent::new("## Checklist\n\n- first item\n- second item");
+
+    let lines = component.render(60);
+    let joined = lines.join("\n");
+
+    assert!(lines.iter().all(|line| visible_width(line) <= 60));
+    assert!(joined.contains("Checklist"), "lines: {lines:?}");
+    assert!(joined.contains("first item"), "lines: {lines:?}");
+    assert!(joined.contains("second item"), "lines: {lines:?}");
+    assert!(!joined.contains("## Checklist"), "lines: {lines:?}");
+}
+
+#[test]
 fn startup_shell_can_render_user_message_component_in_transcript() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let mut shell = StartupShellComponent::new(
@@ -171,7 +185,7 @@ fn parsed_skill_block_and_trailing_user_message_can_render_as_separate_transcrip
     let lines = tui.render_for_size(64, 20);
     let skill_line = lines
         .iter()
-        .position(|line| line.contains("[skill] test-skill"))
+        .position(|line| line.contains("[skill]") && line.contains("test-skill"))
         .expect("skill invocation should render");
     let user_line = lines
         .iter()
