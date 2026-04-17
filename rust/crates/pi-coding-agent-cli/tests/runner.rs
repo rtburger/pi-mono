@@ -843,6 +843,46 @@ async fn run_command_rejects_interactive_mode_for_now() {
 }
 
 #[tokio::test]
+async fn run_command_help_lists_tool_selection_and_user_bash_support() {
+    let result = run_command(RunCommandOptions {
+        args: vec![String::from("--help")],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: Arc::new(EnvAuthSource::new()),
+        built_in_models: Vec::new(),
+        models_json_path: None,
+        agent_dir: None,
+        cwd: unique_temp_dir("runner-help"),
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+    assert!(result.stderr.is_empty(), "stderr: {}", result.stderr);
+    assert!(result.stdout.contains("--no-tools"), "stdout: {}", result.stdout);
+    assert!(
+        result.stdout.contains("--tools <tools>"),
+        "stdout: {}",
+        result.stdout
+    );
+    assert!(
+        result.stdout
+            .contains("available tools: read, bash, edit, write, grep, find, ls"),
+        "stdout: {}",
+        result.stdout
+    );
+    assert!(
+        result
+            .stdout
+            .contains("interactive bash via !<command> and !!<command>"),
+        "stdout: {}",
+        result.stdout
+    );
+}
+
+#[tokio::test]
 async fn run_command_allows_resume_session_picker_outside_interactive_mode() {
     let terminal = ScriptedTerminal::new(vec![(
         Duration::from_millis(20),
