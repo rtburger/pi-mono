@@ -77,6 +77,10 @@ pub enum CompactionReason {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentSessionEvent {
     Agent(AgentEvent),
+    QueueUpdate {
+        steering: Vec<String>,
+        follow_up: Vec<String>,
+    },
     CompactionStart {
         reason: CompactionReason,
     },
@@ -224,6 +228,12 @@ struct SessionAutomationState {
     retry_cancel_tx: Option<watch::Sender<bool>>,
 }
 
+#[derive(Debug, Default, Clone)]
+struct SessionQueueState {
+    steering: Vec<String>,
+    follow_up: Vec<String>,
+}
+
 impl Default for SessionAutomationState {
     fn default() -> Self {
         Self {
@@ -244,6 +254,7 @@ struct AgentSessionInner {
     session_event_listeners: Arc<Mutex<BTreeMap<usize, SessionEventListener>>>,
     next_session_listener_id: AtomicUsize,
     automation: Arc<Mutex<SessionAutomationState>>,
+    queue_state: Arc<Mutex<SessionQueueState>>,
     _agent_subscription: Arc<SessionPersistenceSubscription>,
 }
 
@@ -297,22 +308,26 @@ impl AgentSession {
 
         let session_event_listeners = Arc::new(Mutex::new(BTreeMap::new()));
         let automation = Arc::new(Mutex::new(SessionAutomationState::default()));
+        let queue_state = Arc::new(Mutex::new(SessionQueueState::default()));
         let unsubscribe = core.agent().subscribe({
             let core = core.clone();
             let session_manager = session_manager.clone();
             let session_event_listeners = session_event_listeners.clone();
             let automation = automation.clone();
+            let queue_state = queue_state.clone();
             move |event, _signal| {
                 let core = core.clone();
                 let session_manager = session_manager.clone();
                 let session_event_listeners = session_event_listeners.clone();
                 let automation = automation.clone();
+                let queue_state = queue_state.clone();
                 Box::pin(async move {
                     handle_agent_session_event(
                         core,
                         session_manager,
                         session_event_listeners,
                         automation,
+                        queue_state,
                         event,
                     )
                     .await;
@@ -327,6 +342,7 @@ impl AgentSession {
                 session_event_listeners,
                 next_session_listener_id: AtomicUsize::new(1),
                 automation,
+                queue_state,
                 _agent_subscription: Arc::new(SessionPersistenceSubscription::new(unsubscribe)),
             }),
         })
@@ -381,6 +397,39 @@ impl AgentSession {
             .insert(id, Arc::new(listener));
         let listeners = self.inner.session_event_listeners.clone();
         Box::new(move || listeners.lock().unwrap().remove(&id).is_some())
+    }
+
+    pub fn steer(&self, message: Message) {
+        enqueue_session_queue_message(
+            &self.inner.queue_state,
+            &self.inner.session_event_listeners,
+            &message,
+            "steering",
+        );
+        self.agent().steer(message);
+    }
+
+    pub fn follow_up(&self, message: Message) {
+        enqueue_session_queue_message(
+            &self.inner.queue_state,
+            &self.inner.session_event_listeners,
+            &message,
+            "follow_up",
+        );
+        self.agent().follow_up(message);
+    }
+
+    pub fn pending_message_count(&self) -> usize {
+        let queue_state = self.inner.queue_state.lock().unwrap();
+        queue_state.steering.len() + queue_state.follow_up.len()
+    }
+
+    pub fn pending_steering_messages(&self) -> Vec<String> {
+        self.inner.queue_state.lock().unwrap().steering.clone()
+    }
+
+    pub fn pending_follow_up_messages(&self) -> Vec<String> {
+        self.inner.queue_state.lock().unwrap().follow_up.clone()
     }
 
     pub fn retry_settings(&self) -> RetrySettings {
@@ -618,15 +667,17 @@ async fn handle_agent_session_event(
     session_manager: Option<Arc<Mutex<SessionManager>>>,
     listeners: Arc<Mutex<BTreeMap<usize, SessionEventListener>>>,
     automation: Arc<Mutex<SessionAutomationState>>,
+    queue_state: Arc<Mutex<SessionQueueState>>,
     event: AgentEvent,
 ) {
-    emit_session_event(&listeners, AgentSessionEvent::Agent(event.clone()));
-
     if let AgentEvent::MessageStart { message } = &event
         && matches!(message.as_standard_message(), Some(Message::User { .. }))
     {
         automation.lock().unwrap().overflow_recovery_attempted = false;
+        dequeue_session_queue_message(&queue_state, &listeners, message);
     }
+
+    emit_session_event(&listeners, AgentSessionEvent::Agent(event.clone()));
 
     if let AgentEvent::MessageEnd { message } = &event {
         persist_session_message(session_manager.as_ref(), message);
@@ -704,6 +755,66 @@ fn emit_session_event(
         .collect::<Vec<_>>();
     for callback in callbacks {
         callback(event.clone());
+    }
+}
+
+fn queue_update_event(queue_state: &SessionQueueState) -> AgentSessionEvent {
+    AgentSessionEvent::QueueUpdate {
+        steering: queue_state.steering.clone(),
+        follow_up: queue_state.follow_up.clone(),
+    }
+}
+
+fn enqueue_session_queue_message(
+    queue_state: &Arc<Mutex<SessionQueueState>>,
+    listeners: &Arc<Mutex<BTreeMap<usize, SessionEventListener>>>,
+    message: &Message,
+    kind: &str,
+) {
+    let Some(text) = extract_user_text(message) else {
+        return;
+    };
+
+    let event = {
+        let mut queue_state = queue_state.lock().unwrap();
+        if kind == "follow_up" {
+            queue_state.follow_up.push(text);
+        } else {
+            queue_state.steering.push(text);
+        }
+        queue_update_event(&queue_state)
+    };
+    emit_session_event(listeners, event);
+}
+
+fn dequeue_session_queue_message(
+    queue_state: &Arc<Mutex<SessionQueueState>>,
+    listeners: &Arc<Mutex<BTreeMap<usize, SessionEventListener>>>,
+    message: &AgentMessage,
+) {
+    let Some(text) = extract_user_message_text(message) else {
+        return;
+    };
+
+    let event = {
+        let mut queue_state = queue_state.lock().unwrap();
+        let removed = if let Some(index) =
+            queue_state.steering.iter().position(|item| item == &text)
+        {
+            queue_state.steering.remove(index);
+            true
+        } else if let Some(index) = queue_state.follow_up.iter().position(|item| item == &text) {
+            queue_state.follow_up.remove(index);
+            true
+        } else {
+            false
+        };
+
+        removed.then(|| queue_update_event(&queue_state))
+    };
+
+    if let Some(event) = event {
+        emit_session_event(listeners, event);
     }
 }
 
@@ -1696,7 +1807,11 @@ fn resolve_runtime_path(base: &Path, path: &str) -> PathBuf {
 }
 
 fn extract_user_message_text(message: &AgentMessage) -> Option<String> {
-    let Message::User { content, .. } = message.as_standard_message()? else {
+    extract_user_text(message.as_standard_message()?)
+}
+
+fn extract_user_text(message: &Message) -> Option<String> {
+    let Message::User { content, .. } = message else {
         return None;
     };
     let text = content

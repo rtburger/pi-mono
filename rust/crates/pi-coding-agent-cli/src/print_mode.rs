@@ -1,6 +1,6 @@
 use crate::args::PrintOutputMode;
 use pi_agent::{AgentEvent, AgentMessage, AgentToolResult, AgentUnsubscribe};
-use pi_coding_agent_core::CodingAgentCore;
+use pi_coding_agent_core::{AgentSession, AgentSessionEvent, CompactionReason};
 use pi_events::{AssistantContent, Message, StopReason, UserContent};
 use serde_json::{Value, json};
 use std::{
@@ -35,7 +35,7 @@ pub struct PrintModeRunResult {
 }
 
 pub async fn run_print_mode(
-    core: &CodingAgentCore,
+    session: &AgentSession,
     options: PrintModeOptions,
 ) -> PrintModeRunResult {
     let mut stdout = String::new();
@@ -45,19 +45,24 @@ pub async fn run_print_mode(
     let json_lines = Arc::new(Mutex::new(Vec::<String>::new()));
 
     if options.mode == PrintOutputMode::Json {
+        if let Some(session_manager) = session.session_manager() {
+            let header = session_manager.lock().unwrap().get_header().clone();
+            json_lines
+                .lock()
+                .unwrap()
+                .push(session_header_to_json_line(&header));
+        }
+
         let lines = json_lines.clone();
-        let unsubscribe = core.agent().subscribe(move |event, _signal| {
-            let lines = lines.clone();
-            async move {
-                let line = serde_json::to_string(&agent_event_to_json(&event))
-                    .expect("agent event serialization must succeed");
-                lines.lock().unwrap().push(line);
-            }
+        let unsubscribe = session.subscribe(move |event| {
+            let line = serde_json::to_string(&agent_session_event_to_json(&event))
+                .expect("session event serialization must succeed");
+            lines.lock().unwrap().push(line);
         });
         subscription = Some(unsubscribe);
     }
 
-    let run_result = run_prompts(core, &options).await;
+    let run_result = run_prompts(session, &options).await;
 
     if let Some(unsubscribe) = subscription {
         let _ = unsubscribe();
@@ -70,7 +75,7 @@ pub async fn run_print_mode(
     match run_result {
         Ok(()) => {
             if options.mode == PrintOutputMode::Text {
-                let state = core.state();
+                let state = session.state();
                 if let Some(last_message) = state
                     .messages
                     .last()
@@ -113,15 +118,16 @@ pub async fn run_print_mode(
     }
 }
 
-async fn run_prompts(core: &CodingAgentCore, options: &PrintModeOptions) -> Result<(), String> {
+async fn run_prompts(session: &AgentSession, options: &PrintModeOptions) -> Result<(), String> {
     if let Some(initial_message) = options.initial_message.as_ref() {
-        prompt_initial_message(core, initial_message, options.initial_images.as_deref())
+        prompt_initial_message(session, initial_message, options.initial_images.as_deref())
             .await
             .map_err(|error| error.to_string())?;
     }
 
     for message in &options.messages {
-        core.prompt_text(message)
+        session
+            .prompt_text(message)
             .await
             .map_err(|error| error.to_string())?;
     }
@@ -130,12 +136,12 @@ async fn run_prompts(core: &CodingAgentCore, options: &PrintModeOptions) -> Resu
 }
 
 async fn prompt_initial_message(
-    core: &CodingAgentCore,
+    session: &AgentSession,
     initial_message: &str,
     initial_images: Option<&[UserContent]>,
 ) -> Result<(), pi_coding_agent_core::CodingAgentCoreError> {
     let Some(initial_images) = initial_images else {
-        return core.prompt_text(initial_message).await;
+        return session.prompt_text(initial_message).await;
     };
 
     let mut content = Vec::with_capacity(initial_images.len() + 1);
@@ -144,11 +150,66 @@ async fn prompt_initial_message(
     });
     content.extend(initial_images.iter().cloned());
 
-    core.prompt_message(Message::User {
-        content,
-        timestamp: now_ms(),
-    })
-    .await
+    session
+        .prompt_message(Message::User {
+            content,
+            timestamp: now_ms(),
+        })
+        .await
+}
+
+fn agent_session_event_to_json(event: &AgentSessionEvent) -> Value {
+    match event {
+        AgentSessionEvent::Agent(event) => agent_event_to_json(event),
+        AgentSessionEvent::QueueUpdate {
+            steering,
+            follow_up,
+        } => json!({
+            "type": "queue_update",
+            "steering": steering,
+            "followUp": follow_up,
+        }),
+        AgentSessionEvent::CompactionStart { reason } => json!({
+            "type": "compaction_start",
+            "reason": compaction_reason_to_json(reason),
+        }),
+        AgentSessionEvent::CompactionEnd {
+            reason,
+            result,
+            aborted,
+            will_retry,
+            error_message,
+        } => json!({
+            "type": "compaction_end",
+            "reason": compaction_reason_to_json(reason),
+            "result": result.as_ref().map(compaction_result_to_json),
+            "aborted": aborted,
+            "willRetry": will_retry,
+            "errorMessage": error_message,
+        }),
+        AgentSessionEvent::AutoRetryStart {
+            attempt,
+            max_attempts,
+            delay_ms,
+            error_message,
+        } => json!({
+            "type": "auto_retry_start",
+            "attempt": attempt,
+            "maxAttempts": max_attempts,
+            "delayMs": delay_ms,
+            "errorMessage": error_message,
+        }),
+        AgentSessionEvent::AutoRetryEnd {
+            success,
+            attempt,
+            final_error,
+        } => json!({
+            "type": "auto_retry_end",
+            "success": success,
+            "attempt": attempt,
+            "finalError": final_error,
+        }),
+    }
 }
 
 fn agent_event_to_json(event: &AgentEvent) -> Value {
@@ -177,7 +238,7 @@ fn agent_event_to_json(event: &AgentEvent) -> Value {
         } => json!({
             "type": "message_update",
             "message": agent_message_to_json(message),
-            "assistantEvent": assistant_event,
+            "assistantMessageEvent": assistant_event,
         }),
         AgentEvent::MessageEnd { message } => json!({
             "type": "message_end",
@@ -238,6 +299,35 @@ fn agent_tool_result_to_json(result: &AgentToolResult) -> Value {
         "content": result.content,
         "details": result.details,
     })
+}
+
+fn compaction_result_to_json(result: &pi_coding_agent_core::CompactionResult) -> Value {
+    json!({
+        "summary": result.summary,
+        "firstKeptEntryId": result.first_kept_entry_id,
+        "tokensBefore": result.tokens_before,
+        "details": result.details,
+    })
+}
+
+fn compaction_reason_to_json(reason: &CompactionReason) -> &'static str {
+    match reason {
+        CompactionReason::Manual => "manual",
+        CompactionReason::Threshold => "threshold",
+        CompactionReason::Overflow => "overflow",
+    }
+}
+
+fn session_header_to_json_line(header: &pi_coding_agent_core::SessionHeader) -> String {
+    serde_json::to_string(&json!({
+        "type": "session",
+        "version": header.version,
+        "id": header.id,
+        "timestamp": header.timestamp,
+        "cwd": header.cwd,
+        "parentSession": header.parent_session,
+    }))
+    .expect("session header serialization must succeed")
 }
 
 fn default_request_error(stop_reason: &StopReason) -> &'static str {

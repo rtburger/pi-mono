@@ -4,8 +4,8 @@ use pi_ai::{
 };
 use pi_coding_agent_cli::{PrintModeOptions, PrintOutputMode, run_print_mode};
 use pi_coding_agent_core::{
-    CodingAgentCore, CodingAgentCoreOptions, MemoryAuthStorage, SessionBootstrapOptions,
-    create_coding_agent_core,
+    AgentSession, AgentSessionOptions, CodingAgentCoreOptions, MemoryAuthStorage, RetrySettings,
+    SessionBootstrapOptions, SessionManager, create_agent_session,
 };
 use pi_events::{StopReason, UserContent};
 use serde_json::Value;
@@ -13,7 +13,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -27,12 +27,12 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     path
 }
 
-fn create_core(
+fn create_session(
     provider: &str,
     model_id: &str,
     responses: Vec<FauxResponse>,
     cwd: Option<PathBuf>,
-) -> (CodingAgentCore, pi_ai::FauxRegistration) {
+) -> (AgentSession, pi_ai::FauxRegistration) {
     let faux = register_faux_provider(RegisterFauxProviderOptions {
         provider: provider.into(),
         models: vec![FauxModelDefinition {
@@ -49,24 +49,31 @@ fn create_core(
         "test-token",
     )]));
 
-    let created = create_coding_agent_core(CodingAgentCoreOptions {
-        auth_source: auth,
-        built_in_models: vec![model],
-        models_json_path: None,
-        cwd,
-        tools: None,
-        system_prompt: String::new(),
-        bootstrap: SessionBootstrapOptions::default(),
-        stream_options: StreamOptions::default(),
+    let cwd = cwd.unwrap_or_else(|| unique_temp_dir("print-mode-session"));
+    let session_manager = Arc::new(Mutex::new(SessionManager::in_memory(
+        cwd.to_string_lossy().as_ref(),
+    )));
+    let created = create_agent_session(AgentSessionOptions {
+        core: CodingAgentCoreOptions {
+            auth_source: auth,
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(cwd),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        },
+        session_manager: Some(session_manager),
     })
     .unwrap();
 
-    (created.core, faux)
+    (created.session, faux)
 }
 
 #[tokio::test]
 async fn print_mode_writes_final_text_blocks_with_newlines() {
-    let (core, faux) = create_core(
+    let (session, faux) = create_session(
         "print-mode-faux",
         "print-mode-faux-1",
         vec![FauxResponse {
@@ -81,7 +88,7 @@ async fn print_mode_writes_final_text_blocks_with_newlines() {
     );
 
     let result = run_print_mode(
-        &core,
+        &session,
         PrintModeOptions {
             mode: PrintOutputMode::Text,
             initial_message: Some(String::from("Say hello")),
@@ -100,7 +107,7 @@ async fn print_mode_writes_final_text_blocks_with_newlines() {
 #[tokio::test]
 async fn print_mode_serializes_agent_events_in_json_mode() {
     let temp_dir = unique_temp_dir("json-mode");
-    let (core, faux) = create_core(
+    let (session, faux) = create_session(
         "json-mode-faux",
         "json-mode-faux-1",
         vec![
@@ -128,7 +135,7 @@ async fn print_mode_serializes_agent_events_in_json_mode() {
     );
 
     let result = run_print_mode(
-        &core,
+        &session,
         PrintModeOptions {
             mode: PrintOutputMode::Json,
             messages: vec![String::from("create file")],
@@ -149,7 +156,8 @@ async fn print_mode_serializes_agent_events_in_json_mode() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
-    let event_types = events
+    assert_eq!(events[0]["type"].as_str(), Some("session"));
+    let event_types = events[1..]
         .iter()
         .map(|event| event["type"].as_str().unwrap())
         .collect::<Vec<_>>();
@@ -158,6 +166,13 @@ async fn print_mode_serializes_agent_events_in_json_mode() {
     assert!(event_types.contains(&"tool_execution_start"));
     assert!(event_types.contains(&"tool_execution_end"));
     assert_eq!(event_types.last().copied(), Some("agent_end"));
+
+    let message_update = events
+        .iter()
+        .find(|event| event["type"] == "message_update")
+        .unwrap();
+    assert!(message_update.get("assistantMessageEvent").is_some());
+    assert!(message_update.get("assistantEvent").is_none());
 
     let tool_end = events
         .iter()
@@ -177,7 +192,7 @@ async fn print_mode_serializes_agent_events_in_json_mode() {
 
 #[tokio::test]
 async fn print_mode_returns_non_zero_for_assistant_errors() {
-    let (core, faux) = create_core(
+    let (session, faux) = create_session(
         "error-mode-faux",
         "error-mode-faux-1",
         vec![FauxResponse {
@@ -189,7 +204,7 @@ async fn print_mode_returns_non_zero_for_assistant_errors() {
     );
 
     let result = run_print_mode(
-        &core,
+        &session,
         PrintModeOptions {
             mode: PrintOutputMode::Text,
             initial_message: Some(String::from("Hi")),
@@ -201,6 +216,81 @@ async fn print_mode_returns_non_zero_for_assistant_errors() {
     assert_eq!(result.exit_code, 1);
     assert!(result.stdout.is_empty());
     assert_eq!(result.stderr, "provider failure\n");
+
+    faux.unregister();
+}
+
+#[tokio::test]
+async fn print_mode_json_includes_retry_events() {
+    let (session, faux) = create_session(
+        "retry-mode-faux",
+        "retry-mode-faux-1",
+        vec![
+            FauxResponse {
+                content: Vec::new(),
+                stop_reason: StopReason::Error,
+                error_message: Some(String::from("503 overloaded")),
+            },
+            FauxResponse::text("recovered"),
+        ],
+        None,
+    );
+    session.set_retry_settings(RetrySettings {
+        enabled: true,
+        max_retries: 1,
+        base_delay_ms: 1,
+    });
+
+    let result = run_print_mode(
+        &session,
+        PrintModeOptions {
+            mode: PrintOutputMode::Json,
+            initial_message: Some(String::from("retry once")),
+            ..PrintModeOptions::default()
+        },
+    )
+    .await;
+
+    assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+    let events = result
+        .stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let event_types = events
+        .iter()
+        .map(|event| event["type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(event_types[0], "session");
+    assert!(
+        event_types.contains(&"auto_retry_start"),
+        "events: {event_types:?}"
+    );
+    assert!(
+        event_types.contains(&"auto_retry_end"),
+        "events: {event_types:?}"
+    );
+
+    let retry_start = events
+        .iter()
+        .find(|event| event["type"] == "auto_retry_start")
+        .unwrap();
+    assert_eq!(retry_start["maxAttempts"].as_u64(), Some(1));
+    assert_eq!(retry_start["delayMs"].as_u64(), Some(1));
+
+    let retry_end = events
+        .iter()
+        .find(|event| event["type"] == "auto_retry_end")
+        .unwrap();
+    assert_eq!(retry_end["success"].as_bool(), Some(true));
+
+    let message_update = events
+        .iter()
+        .find(|event| event["type"] == "message_update")
+        .unwrap();
+    assert!(message_update.get("assistantMessageEvent").is_some());
+    assert!(message_update.get("assistantEvent").is_none());
 
     faux.unregister();
 }

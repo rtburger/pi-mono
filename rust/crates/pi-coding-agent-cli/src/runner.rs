@@ -5,7 +5,7 @@ mod rpc_extensions;
 
 use crate::{
     AppMode, Args, Diagnostic, DiagnosticKind, ListModels, OverlayAuthSource, PrintModeOptions,
-    PrintOutputMode, ProcessFileOptions,
+    ProcessFileOptions,
     auth::{
         OAuthProviderSummary, list_persisted_oauth_providers, oauth_provider_name,
         oauth_provider_summaries, remove_persisted_oauth_provider, run_terminal_oauth_login,
@@ -31,16 +31,16 @@ use pi_ai::{
 #[cfg(test)]
 use pi_coding_agent_core::create_coding_agent_core;
 use pi_coding_agent_core::{
-    AgentSession, AgentSessionOptions, AuthSource, BashExecutionMessage, BootstrapDiagnosticLevel,
-    CodingAgentCore, CodingAgentCoreError, CodingAgentCoreOptions, CompactionResult,
-    CompactionSettings, ContextUsageEstimate, CustomMessage, CustomMessageContent,
-    ExistingSessionSelection, FooterDataProvider, ModelRegistry, NewSessionOptions, ScopedModel,
-    SessionBootstrapOptions, SessionEntry, SessionHeader, SessionInfo, SessionManager,
-    bash_execution_to_text, build_default_pi_system_prompt, calculate_context_tokens, compact,
-    create_agent_session, create_bash_execution_message, estimate_context_tokens,
-    find_exact_model_reference_match, get_default_session_dir, parse_thinking_level,
-    prepare_compaction, resolve_cli_model, resolve_model_scope, restore_model_from_session,
-    should_compact,
+    AgentSession, AgentSessionEvent, AgentSessionOptions, AuthSource, BashExecutionMessage,
+    BootstrapDiagnosticLevel, CodingAgentCore, CodingAgentCoreError, CodingAgentCoreOptions,
+    CompactionResult, CompactionSettings, ContextUsageEstimate, CustomMessage,
+    CustomMessageContent, ExistingSessionSelection, FooterDataProvider, ModelRegistry,
+    NewSessionOptions, ScopedModel, SessionBootstrapOptions, SessionEntry, SessionHeader,
+    SessionInfo, SessionManager, bash_execution_to_text, build_default_pi_system_prompt,
+    calculate_context_tokens, compact, create_agent_session, create_bash_execution_message,
+    estimate_context_tokens, find_exact_model_reference_match, get_default_session_dir,
+    parse_thinking_level, prepare_compaction, resolve_cli_model, resolve_model_scope,
+    restore_model_from_session, should_compact,
 };
 #[cfg(test)]
 use pi_coding_agent_tui::PlainKeyHintStyler;
@@ -797,19 +797,6 @@ async fn select_oauth_provider(
             .map_err(|error| error.to_string())?;
         sleep(Duration::from_millis(16)).await;
     }
-}
-
-fn session_header_json_line(header: &SessionHeader) -> String {
-    serde_json::to_string(&serde_json::json!({
-        "type": "session",
-        "version": header.version,
-        "id": header.id,
-        "timestamp": header.timestamp,
-        "cwd": header.cwd,
-        "parentSession": header.parent_session,
-    }))
-    .expect("session header serialization should succeed")
-        + "\n"
 }
 
 #[derive(Clone)]
@@ -3962,14 +3949,15 @@ async fn run_command_with_terminal_factory(
         }
     };
 
-    let _session = created.session;
-    let core = _session.core();
+    let session = created.session;
+    let core = session.core();
 
     core.set_auto_resize_images(runtime_settings.settings.images.auto_resize_images);
     core.set_block_images(runtime_settings.settings.images.block_images);
     core.set_thinking_budgets(map_thinking_budgets(
         &runtime_settings.settings.thinking_budgets,
     ));
+    session.set_compaction_settings(runtime_compaction_settings(&runtime_settings));
 
     stderr.push_str(&render_bootstrap_diagnostics(&created.diagnostics));
     if created
@@ -3984,16 +3972,8 @@ async fn run_command_with_terminal_factory(
         };
     }
 
-    let json_session_header = if print_mode == PrintOutputMode::Json {
-        session_support
-            .as_ref()
-            .map(|session_support| session_header_json_line(&session_support.header))
-    } else {
-        None
-    };
-
     let run_result = run_print_mode(
-        &core,
+        &session,
         PrintModeOptions {
             mode: print_mode,
             messages,
@@ -4002,10 +3982,6 @@ async fn run_command_with_terminal_factory(
         },
     )
     .await;
-
-    if let Some(header) = json_session_header {
-        stdout.push_str(&header);
-    }
     stdout.push_str(&run_result.stdout);
     stderr.push_str(&run_result.stderr);
 
@@ -4030,7 +4006,7 @@ struct RpcPreparedOptions {
 }
 
 struct RpcState {
-    _session: AgentSession,
+    session: AgentSession,
     core: CodingAgentCore,
     session_manager: Option<Arc<Mutex<SessionManager>>>,
     cwd: PathBuf,
@@ -4039,7 +4015,6 @@ struct RpcState {
     resources: LoadedCliResources,
     extension_host: Option<RpcExtensionHost>,
     auto_compaction_enabled: bool,
-    auto_retry_enabled: bool,
     is_compacting: Arc<AtomicBool>,
     event_unsubscribe: Option<AgentUnsubscribe>,
     bash_abort_tx: Option<tokio::sync::watch::Sender<bool>>,
@@ -4047,6 +4022,7 @@ struct RpcState {
 
 #[derive(Clone)]
 struct RpcSnapshot {
+    session: AgentSession,
     core: CodingAgentCore,
     session_manager: Option<Arc<Mutex<SessionManager>>>,
     cwd: PathBuf,
@@ -4091,6 +4067,7 @@ impl RpcShared {
     fn snapshot(&self) -> RpcSnapshot {
         let state = self.state.lock().expect("rpc state mutex poisoned");
         RpcSnapshot {
+            session: state.session.clone(),
             core: state.core.clone(),
             session_manager: state.session_manager.clone(),
             cwd: state.cwd.clone(),
@@ -4101,6 +4078,14 @@ impl RpcShared {
             auto_compaction_enabled: state.auto_compaction_enabled,
             is_compacting: state.is_compacting.clone(),
         }
+    }
+
+    fn current_session(&self) -> AgentSession {
+        self.state
+            .lock()
+            .expect("rpc state mutex poisoned")
+            .session
+            .clone()
     }
 
     fn current_core(&self) -> CodingAgentCore {
@@ -4553,6 +4538,10 @@ async fn build_rpc_state(
     core.set_thinking_budgets(map_thinking_budgets(
         &runtime_settings.settings.thinking_budgets,
     ));
+    session.set_compaction_settings(runtime_compaction_settings(&runtime_settings));
+    let mut retry_settings = session.retry_settings();
+    retry_settings.enabled = true;
+    session.set_retry_settings(retry_settings);
 
     let bootstrap_output = render_bootstrap_diagnostics(&created.diagnostics);
     if created
@@ -4690,7 +4679,7 @@ async fn build_rpc_state(
 
     Ok((
         RpcState {
-            _session: session,
+            session,
             core,
             session_manager,
             cwd: cwd.to_path_buf(),
@@ -4699,7 +4688,6 @@ async fn build_rpc_state(
             resources,
             extension_host,
             auto_compaction_enabled: runtime_settings.settings.compaction.enabled,
-            auto_retry_enabled: true,
             is_compacting: Arc::new(AtomicBool::new(false)),
             event_unsubscribe: None,
             bash_abort_tx: None,
@@ -4710,18 +4698,16 @@ async fn build_rpc_state(
 
 fn attach_rpc_event_subscription(state: &mut RpcState, stdout_emitter: TextEmitter) {
     let extension_host = state.extension_host.clone();
-    let unsubscribe = state.core.agent().subscribe(move |event, _signal| {
-        let stdout_emitter = stdout_emitter.clone();
-        let extension_host = extension_host.clone();
-        Box::pin(async move {
-            let event_json = rpc_agent_event_to_json(&event);
-            let line =
-                serde_json::to_string(&event_json).expect("rpc event serialization must succeed");
-            stdout_emitter(format!("{line}\n"));
-            if let Some(extension_host) = extension_host {
+    let unsubscribe = state.session.subscribe(move |event| {
+        let event_json = rpc_session_event_to_json(&event);
+        let line =
+            serde_json::to_string(&event_json).expect("rpc event serialization must succeed");
+        stdout_emitter(format!("{line}\n"));
+        if let Some(extension_host) = extension_host.clone() {
+            tokio::spawn(async move {
                 let _ = extension_host.emit_event(event_json).await;
-            }
-        })
+            });
+        }
     });
     state.event_unsubscribe = Some(unsubscribe);
 }
@@ -4799,15 +4785,21 @@ async fn handle_rpc_input_line(
             let prepared_message = preprocess_prompt_text(&message, &snapshot.resources);
             if snapshot.core.state().is_streaming {
                 if streaming_behavior.as_deref() == Some("steer") {
-                    queue_rpc_message(&snapshot.core, "steer", prepared_message, images);
+                    queue_rpc_message(&snapshot.session, "steer", prepared_message, images);
                     shared.emit_response(id.as_deref(), "prompt", None);
                     return;
                 }
                 if streaming_behavior.as_deref() == Some("followUp") {
-                    queue_rpc_message(&snapshot.core, "follow_up", prepared_message, images);
+                    queue_rpc_message(&snapshot.session, "follow_up", prepared_message, images);
                     shared.emit_response(id.as_deref(), "prompt", None);
                     return;
                 }
+                shared.emit_error(
+                    id.as_deref(),
+                    "prompt",
+                    "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+                );
+                return;
             }
 
             let task = spawn_rpc_prompt_task(shared.clone(), id.clone(), prepared_message, images);
@@ -4844,7 +4836,7 @@ async fn handle_rpc_input_line(
                 return;
             }
             queue_rpc_message(
-                &shared.current_core(),
+                &snapshot.session,
                 "steer",
                 preprocess_prompt_text(&message, &snapshot.resources),
                 images,
@@ -4879,7 +4871,7 @@ async fn handle_rpc_input_line(
                 return;
             }
             queue_rpc_message(
-                &shared.current_core(),
+                &snapshot.session,
                 "follow_up",
                 preprocess_prompt_text(&message, &snapshot.resources),
                 images,
@@ -5129,7 +5121,7 @@ async fn handle_rpc_input_line(
         }
         "compact" => {
             let snapshot = shared.snapshot();
-            let Some(session_manager) = snapshot.session_manager.as_ref() else {
+            if snapshot.session_manager.is_none() {
                 shared.emit_error(
                     id.as_deref(),
                     "compact",
@@ -5150,23 +5142,18 @@ async fn handle_rpc_input_line(
                 return;
             }
             let custom_instructions = optional_string_field(command, "customInstructions");
-            let settings = runtime_compaction_settings(&snapshot.runtime_settings);
-            let result = run_interactive_compaction(
-                &snapshot.core,
-                session_manager,
-                &settings,
-                custom_instructions.as_deref(),
-            )
-            .await;
+            let result = snapshot
+                .session
+                .compact(custom_instructions.as_deref())
+                .await;
             snapshot.is_compacting.store(false, Ordering::Relaxed);
             match result {
-                Ok(Some(result)) => shared.emit_response(
+                Ok(result) => shared.emit_response(
                     id.as_deref(),
                     "compact",
                     Some(compaction_result_to_json(&result)),
                 ),
-                Ok(None) => shared.emit_error(id.as_deref(), "compact", "Nothing to compact"),
-                Err(error) => shared.emit_error(id.as_deref(), "compact", error),
+                Err(error) => shared.emit_error(id.as_deref(), "compact", error.to_string()),
             }
         }
         "set_auto_compaction" => {
@@ -5174,11 +5161,13 @@ async fn handle_rpc_input_line(
                 .get("enabled")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            {
+            let settings = {
                 let mut state = shared.state.lock().expect("rpc state mutex poisoned");
                 state.auto_compaction_enabled = enabled;
                 state.runtime_settings.settings.compaction.enabled = enabled;
-            }
+                runtime_compaction_settings(&state.runtime_settings)
+            };
+            shared.current_session().set_compaction_settings(settings);
             shared.emit_response(id.as_deref(), "set_auto_compaction", None);
         }
         "set_auto_retry" => {
@@ -5186,14 +5175,17 @@ async fn handle_rpc_input_line(
                 .get("enabled")
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
-            shared
-                .state
-                .lock()
-                .expect("rpc state mutex poisoned")
-                .auto_retry_enabled = enabled;
+            let session = {
+                let state = shared.state.lock().expect("rpc state mutex poisoned");
+                state.session.clone()
+            };
+            let mut retry_settings = session.retry_settings();
+            retry_settings.enabled = enabled;
+            session.set_retry_settings(retry_settings);
             shared.emit_response(id.as_deref(), "set_auto_retry", None);
         }
         "abort_retry" => {
+            shared.current_session().abort_retry();
             shared.emit_response(id.as_deref(), "abort_retry", None);
         }
         "bash" => {
@@ -5603,12 +5595,12 @@ fn build_rpc_user_message(text: String, images: Vec<UserContent>) -> Message {
     }
 }
 
-fn queue_rpc_message(core: &CodingAgentCore, kind: &str, text: String, images: Vec<UserContent>) {
+fn queue_rpc_message(session: &AgentSession, kind: &str, text: String, images: Vec<UserContent>) {
     let message = build_rpc_user_message(text, images);
     if kind == "follow_up" {
-        core.agent().follow_up(message);
+        session.follow_up(message);
     } else {
-        core.agent().steer(message);
+        session.steer(message);
     }
 }
 
@@ -5619,13 +5611,15 @@ fn spawn_rpc_prompt_task(
     images: Vec<UserContent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let core = shared.current_core();
+        let session = shared.current_session();
         let result = if images.is_empty() {
-            core.prompt_text(message)
+            session
+                .prompt_text(message)
                 .await
                 .map_err(|error| error.to_string())
         } else {
-            core.prompt_message(build_rpc_user_message(message, images))
+            session
+                .prompt_message(build_rpc_user_message(message, images))
                 .await
                 .map_err(|error| error.to_string())
         };
@@ -5918,7 +5912,7 @@ fn rpc_session_state_json(snapshot: &RpcSnapshot) -> Value {
         "sessionName": current_session_name(snapshot.session_manager.as_ref()),
         "autoCompactionEnabled": snapshot.auto_compaction_enabled,
         "messageCount": state.messages.len(),
-        "pendingMessageCount": if snapshot.core.agent().has_queued_messages() { 1 } else { 0 },
+        "pendingMessageCount": snapshot.session.pending_message_count(),
     })
 }
 
@@ -6012,6 +6006,14 @@ fn compaction_result_to_json(result: &CompactionResult) -> Value {
     })
 }
 
+fn compaction_reason_json(reason: &pi_coding_agent_core::CompactionReason) -> &'static str {
+    match reason {
+        pi_coding_agent_core::CompactionReason::Manual => "manual",
+        pi_coding_agent_core::CompactionReason::Threshold => "threshold",
+        pi_coding_agent_core::CompactionReason::Overflow => "overflow",
+    }
+}
+
 fn agent_tool_result_to_rpc_bash_json(result: &pi_agent::AgentToolResult) -> Value {
     let output = result
         .content
@@ -6034,6 +6036,60 @@ fn agent_tool_result_to_rpc_bash_json(result: &pi_agent::AgentToolResult) -> Val
         "truncated": full_output_path.is_some(),
         "fullOutputPath": full_output_path,
     })
+}
+
+fn rpc_session_event_to_json(event: &AgentSessionEvent) -> Value {
+    match event {
+        AgentSessionEvent::Agent(event) => rpc_agent_event_to_json(event),
+        AgentSessionEvent::QueueUpdate {
+            steering,
+            follow_up,
+        } => json!({
+            "type": "queue_update",
+            "steering": steering,
+            "followUp": follow_up,
+        }),
+        AgentSessionEvent::CompactionStart { reason } => json!({
+            "type": "compaction_start",
+            "reason": compaction_reason_json(reason),
+        }),
+        AgentSessionEvent::CompactionEnd {
+            reason,
+            result,
+            aborted,
+            will_retry,
+            error_message,
+        } => json!({
+            "type": "compaction_end",
+            "reason": compaction_reason_json(reason),
+            "result": result.as_ref().map(compaction_result_to_json),
+            "aborted": aborted,
+            "willRetry": will_retry,
+            "errorMessage": error_message,
+        }),
+        AgentSessionEvent::AutoRetryStart {
+            attempt,
+            max_attempts,
+            delay_ms,
+            error_message,
+        } => json!({
+            "type": "auto_retry_start",
+            "attempt": attempt,
+            "maxAttempts": max_attempts,
+            "delayMs": delay_ms,
+            "errorMessage": error_message,
+        }),
+        AgentSessionEvent::AutoRetryEnd {
+            success,
+            attempt,
+            final_error,
+        } => json!({
+            "type": "auto_retry_end",
+            "success": success,
+            "attempt": attempt,
+            "finalError": final_error,
+        }),
+    }
 }
 
 fn rpc_agent_event_to_json(event: &pi_agent::AgentEvent) -> Value {
@@ -6063,7 +6119,7 @@ fn rpc_agent_event_to_json(event: &pi_agent::AgentEvent) -> Value {
         } => json!({
             "type": "message_update",
             "message": rpc_agent_message_to_json(message),
-            "assistantEvent": assistant_event,
+            "assistantMessageEvent": assistant_event,
         }),
         pi_agent::AgentEvent::MessageEnd { message } => json!({
             "type": "message_end",
