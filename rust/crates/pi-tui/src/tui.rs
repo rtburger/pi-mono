@@ -1,13 +1,13 @@
 use crate::{
-    CellDimensions, Terminal, TuiError, extract_segments, get_capabilities, is_image_line,
-    is_key_release, matches_key, set_cell_dimensions, slice_by_column, slice_with_width,
-    visible_width,
+    extract_segments, get_capabilities, is_image_line, is_key_release, matches_key,
+    set_cell_dimensions, slice_by_column, slice_with_width, visible_width, CellDimensions,
+    Terminal, TuiError,
 };
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
     },
 };
 
@@ -82,7 +82,7 @@ pub struct OverlayHandle {
 
 #[derive(Clone)]
 pub struct RenderHandle {
-    pending_terminal_events: Arc<Mutex<VecDeque<TerminalEvent>>>,
+    pending_terminal_events: Arc<Mutex<PendingTerminalEvents>>,
 }
 
 impl RenderHandle {
@@ -90,7 +90,7 @@ impl RenderHandle {
         self.pending_terminal_events
             .lock()
             .expect("pending terminal events mutex poisoned")
-            .push_back(TerminalEvent::Render);
+            .request_redraw();
     }
 }
 
@@ -244,10 +244,42 @@ struct InputListenerEntry {
     listener: Box<InputListener>,
 }
 
+#[derive(Default)]
+struct PendingTerminalEvents {
+    queue: VecDeque<TerminalEvent>,
+    redraw_requested: bool,
+}
+
+impl PendingTerminalEvents {
+    fn push_input(&mut self, data: String) {
+        self.queue.push_back(TerminalEvent::Input(data));
+    }
+
+    fn request_redraw(&mut self) {
+        if self.redraw_requested {
+            return;
+        }
+        self.redraw_requested = true;
+        self.queue.push_back(TerminalEvent::Redraw);
+    }
+
+    fn pop_front(&mut self) -> Option<TerminalEvent> {
+        let event = self.queue.pop_front()?;
+        if matches!(event, TerminalEvent::Redraw) {
+            self.redraw_requested = false;
+        }
+        Some(event)
+    }
+
+    fn clear(&mut self) {
+        self.queue.clear();
+        self.redraw_requested = false;
+    }
+}
+
 enum TerminalEvent {
     Input(String),
-    Resize,
-    Render,
+    Redraw,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -343,7 +375,7 @@ pub struct Tui<T: Terminal> {
     root: Container,
     overlays: Vec<OverlayEntry>,
     input_listeners: Vec<InputListenerEntry>,
-    pending_terminal_events: Arc<Mutex<VecDeque<TerminalEvent>>>,
+    pending_terminal_events: Arc<Mutex<PendingTerminalEvents>>,
     on_debug: Option<Box<dyn FnMut() + Send>>,
     focus_order_counter: u64,
     focused_target: Option<FocusTarget>,
@@ -367,7 +399,7 @@ impl<T: Terminal> Tui<T> {
             root: Container::new(),
             overlays: Vec::new(),
             input_listeners: Vec::new(),
-            pending_terminal_events: Arc::new(Mutex::new(VecDeque::new())),
+            pending_terminal_events: Arc::new(Mutex::new(PendingTerminalEvents::default())),
             on_debug: None,
             focus_order_counter: 0,
             focused_target: None,
@@ -482,6 +514,8 @@ impl<T: Terminal> Tui<T> {
         if auto_focus {
             self.set_focus_target(Some(FocusTarget::Overlay(id)));
         }
+        self.hide_cursor_if_started();
+        self.request_render_if_started(false);
         id
     }
 
@@ -508,6 +542,10 @@ impl<T: Terminal> Tui<T> {
                 .or(entry.pre_focus);
             self.set_focus_target(restore);
         }
+        if self.overlays.is_empty() {
+            self.hide_cursor_if_started();
+        }
+        self.request_render_if_started(false);
         true
     }
 
@@ -525,6 +563,10 @@ impl<T: Terminal> Tui<T> {
                 .or(entry.pre_focus);
             self.set_focus_target(restore);
         }
+        if self.overlays.is_empty() {
+            self.hide_cursor_if_started();
+        }
+        self.request_render_if_started(false);
         true
     }
 
@@ -546,6 +588,7 @@ impl<T: Terminal> Tui<T> {
                     .or(self.overlays[index].pre_focus);
                 self.set_focus_target(restore);
             }
+            self.request_render_if_started(false);
             return true;
         }
 
@@ -554,6 +597,7 @@ impl<T: Terminal> Tui<T> {
             self.overlays[index].focus_order = self.focus_order_counter;
             self.set_focus_target(Some(FocusTarget::Overlay(id)));
         }
+        self.request_render_if_started(false);
         true
     }
 
@@ -566,6 +610,7 @@ impl<T: Terminal> Tui<T> {
             entry.focus_order = self.focus_order_counter;
         }
         self.set_focus_target(Some(FocusTarget::Overlay(id)));
+        self.request_render_if_started(false);
         true
     }
 
@@ -578,6 +623,7 @@ impl<T: Terminal> Tui<T> {
             .map(FocusTarget::Overlay)
             .or_else(|| self.overlay_pre_focus(id));
         self.set_focus_target(restore);
+        self.request_render_if_started(false);
         true
     }
 
@@ -664,7 +710,7 @@ impl<T: Terminal> Tui<T> {
             };
             match event {
                 TerminalEvent::Input(data) => self.handle_input(&data)?,
-                TerminalEvent::Resize | TerminalEvent::Render => {
+                TerminalEvent::Redraw => {
                     if self.started {
                         self.render_now()?;
                     }
@@ -791,13 +837,13 @@ impl<T: Terminal> Tui<T> {
                 pending_input
                     .lock()
                     .expect("pending terminal events mutex poisoned")
-                    .push_back(TerminalEvent::Input(data));
+                    .push_input(data);
             }),
             Box::new(move || {
                 pending_resize
                     .lock()
                     .expect("pending terminal events mutex poisoned")
-                    .push_back(TerminalEvent::Resize);
+                    .request_redraw();
             }),
         )?;
         self.terminal.hide_cursor()?;
@@ -839,6 +885,18 @@ impl<T: Terminal> Tui<T> {
             .expect("pending terminal events mutex poisoned")
             .clear();
         Ok(())
+    }
+
+    fn hide_cursor_if_started(&mut self) {
+        if self.started {
+            let _ = self.terminal.hide_cursor();
+        }
+    }
+
+    fn request_render_if_started(&mut self, force: bool) {
+        if self.started {
+            let _ = self.request_render(force);
+        }
     }
 
     fn render_now(&mut self) -> Result<(), TuiError> {

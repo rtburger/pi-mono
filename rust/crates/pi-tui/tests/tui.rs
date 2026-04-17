@@ -1,13 +1,13 @@
 use pi_tui::{
-    CURSOR_MARKER, Component, Container, InputListenerResult, OverlayAnchor, OverlayMargin,
-    OverlayOptions, SizeValue, Terminal, Tui, TuiError, get_cell_dimensions, set_cell_dimensions,
-    visible_width,
+    get_cell_dimensions, set_cell_dimensions, visible_width, Component, Container,
+    InputListenerResult, OverlayAnchor, OverlayMargin, OverlayOptions, SizeValue, Terminal, Tui,
+    TuiError, CURSOR_MARKER,
 };
 use std::{
     cell::Cell,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -1007,11 +1007,9 @@ fn terminal_resize_callbacks_trigger_rerender_when_drained() {
 
     let writes_after = inspector.writes();
     assert!(writes_after.len() > writes_before);
-    assert!(
-        writes_after
-            .last()
-            .is_some_and(|write| { write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3J") })
-    );
+    assert!(writes_after
+        .last()
+        .is_some_and(|write| { write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3J") }));
     tui.stop().expect("stop should succeed");
 }
 
@@ -1028,16 +1026,12 @@ fn start_and_request_render_write_a_full_frame_to_terminal() {
     tui.stop().expect("stop should succeed");
 
     let writes = inspector.writes();
-    assert!(
-        writes
-            .iter()
-            .any(|write| write.starts_with("\x1b[?2026hhello"))
-    );
-    assert!(
-        writes
-            .iter()
-            .any(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3Jhello"))
-    );
+    assert!(writes
+        .iter()
+        .any(|write| write.starts_with("\x1b[?2026hhello")));
+    assert!(writes
+        .iter()
+        .any(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3Jhello")));
     assert_eq!(inspector.started(), 1);
     assert_eq!(inspector.stopped(), 1);
     assert!(!inspector.cursor_hidden());
@@ -1094,11 +1088,77 @@ fn render_handle_queues_rerender_until_terminal_events_are_drained() {
         .expect("queued render request should drain successfully");
     let writes_after = inspector.writes();
     assert!(writes_after.len() > writes_before);
-    assert!(
-        writes_after
-            .last()
-            .is_some_and(|write| write.contains("there"))
+    assert!(writes_after
+        .last()
+        .is_some_and(|write| write.contains("there")));
+
+    tui.stop().expect("stop should succeed");
+}
+
+#[test]
+fn render_handle_coalesces_multiple_pending_redraw_requests() {
+    let terminal = MockTerminal::new(20, 5);
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    let (component, lines) = DynamicComponent::new(["hello", "world"]);
+    tui.add_child(Box::new(component));
+    let render_handle = tui.render_handle();
+
+    tui.start().expect("start should succeed");
+    inspector.clear_writes();
+
+    *lines.lock().expect("dynamic lines mutex poisoned") =
+        vec!["hello".to_owned(), "there".to_owned()];
+    render_handle.request_render();
+    render_handle.request_render();
+    render_handle.request_render();
+    tui.drain_terminal_events()
+        .expect("queued render requests should drain successfully");
+
+    let writes = inspector.writes();
+    assert_eq!(writes.len(), 1);
+    assert!(writes[0].starts_with("\x1b[?2026h"));
+    assert!(writes[0].contains("there"));
+
+    tui.stop().expect("stop should succeed");
+}
+
+#[test]
+fn showing_and_hiding_overlay_after_start_requests_rerender() {
+    let terminal = MockTerminal::new(20, 6);
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    tui.add_child(Box::new(StaticComponent::new(["base"])));
+
+    tui.start().expect("start should succeed");
+    inspector.clear_writes();
+
+    tui.show_overlay(
+        Box::new(StaticComponent::new(["overlay"])),
+        OverlayOptions {
+            anchor: OverlayAnchor::TopLeft,
+            width: Some(7.into()),
+            ..OverlayOptions::default()
+        },
     );
+
+    let overlay_writes = inspector.writes();
+    let overlay_write = overlay_writes
+        .last()
+        .expect("showing an overlay should trigger a rerender");
+    assert!(overlay_write.starts_with("\x1b[?2026h"));
+    assert!(overlay_write.contains("overlay"));
+
+    inspector.clear_writes();
+    assert!(tui.hide_overlay());
+
+    let hide_writes = inspector.writes();
+    let hide_write = hide_writes
+        .last()
+        .expect("hiding an overlay should trigger a rerender");
+    assert!(hide_write.starts_with("\x1b[?2026h"));
+    assert!(hide_write.contains("base"));
+    assert!(!hide_write.contains("overlay"));
 
     tui.stop().expect("stop should succeed");
 }
@@ -1126,12 +1186,10 @@ fn clear_on_shrink_triggers_full_redraw_and_tracks_count() {
         .expect("shrink render should succeed");
 
     assert_eq!(tui.full_redraws(), 2);
-    assert!(
-        inspector
-            .writes()
-            .last()
-            .is_some_and(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3JLine 0"))
-    );
+    assert!(inspector
+        .writes()
+        .last()
+        .is_some_and(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3JLine 0")));
 
     tui.stop().expect("stop should succeed");
 }
@@ -1154,12 +1212,10 @@ fn viewport_reset_after_shrink_allows_append_without_another_full_redraw() {
         .expect("viewport-reset render should succeed");
 
     assert_eq!(tui.full_redraws(), 2);
-    assert!(
-        inspector
-            .writes()
-            .last()
-            .is_some_and(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3JLine 0"))
-    );
+    assert!(inspector
+        .writes()
+        .last()
+        .is_some_and(|write| write.starts_with("\x1b[?2026h\x1b[2J\x1b[H\x1b[3JLine 0")));
 
     inspector.clear_writes();
     *lines.lock().expect("dynamic lines mutex poisoned") = vec![
