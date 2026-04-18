@@ -33,14 +33,16 @@ use pi_ai::{
 use pi_coding_agent_core::create_coding_agent_core;
 use pi_coding_agent_core::{
     AgentSession, AgentSessionEvent, AgentSessionOptions, AuthSource, BootstrapDiagnosticLevel,
-    CodingAgentCore, CodingAgentCoreError, CodingAgentCoreOptions, CompactionResult,
-    CompactionSettings, ContextUsageEstimate, CustomMessage, CustomMessageContent,
-    ExistingSessionSelection, FooterDataProvider, ModelRegistry, NewSessionOptions, ScopedModel,
-    SessionBootstrapOptions, SessionEntry, SessionHeader, SessionInfo, SessionManager,
+    BranchSummaryDetails, BranchSummaryOptions, CodingAgentCore, CodingAgentCoreError,
+    CodingAgentCoreOptions, CompactionResult, CompactionSettings, ContextUsageEstimate,
+    CustomMessage, CustomMessageContent, ExistingSessionSelection, FooterDataProvider,
+    ModelRegistry, NewSessionOptions, ScopedModel, SessionBootstrapOptions, SessionEntry,
+    SessionHeader, SessionInfo, SessionManager, TreeNavigationSummary, apply_tree_navigation,
     build_default_pi_system_prompt, calculate_context_tokens, compact, create_agent_session,
     create_bash_execution_message, estimate_context_tokens, find_exact_model_reference_match,
-    get_default_session_dir, parse_thinking_level, prepare_compaction, resolve_cli_model,
-    resolve_model_scope, restore_model_from_session, should_compact,
+    generate_branch_summary_with_details, get_default_session_dir, parse_thinking_level,
+    prepare_compaction, prepare_tree_navigation, resolve_cli_model, resolve_model_scope,
+    restore_model_from_session, should_compact,
 };
 #[cfg(test)]
 use pi_coding_agent_tui::PlainKeyHintStyler;
@@ -928,9 +930,7 @@ async fn run_interactive_oauth_login_dialog(
     let mut tui = Tui::new(terminal);
     let render_handle = tui.render_handle();
     let events = Arc::new(Mutex::new(VecDeque::<OAuthLoginDialogEvent>::new()));
-    let prompt_responder = Arc::new(Mutex::new(None::<
-        oneshot::Sender<Result<String, String>>,
-    >));
+    let prompt_responder = Arc::new(Mutex::new(None::<oneshot::Sender<Result<String, String>>>));
     let cancel_requested = Arc::new(AtomicBool::new(false));
 
     let mut dialog = LoginDialogComponent::new(keybindings, provider_name.clone());
@@ -1035,21 +1035,19 @@ async fn run_interactive_oauth_login_dialog(
                         Arc::clone(&manual_events),
                         manual_render_handle.clone(),
                         Arc::clone(&manual_cancel_requested),
-                        String::from(
-                            "Paste redirect URL below, or complete login in browser:",
-                        ),
+                        String::from("Paste redirect URL below, or complete login in browser:"),
                         None,
                     )
                 });
             }
 
             let result = match provider.login(callbacks).await {
-                Ok(credentials) => persist_oauth_credentials(&auth_path, &provider_id, &credentials)
-                    .map(|_| Some(provider_name.clone())),
+                Ok(credentials) => {
+                    persist_oauth_credentials(&auth_path, &provider_id, &credentials)
+                        .map(|_| Some(provider_name.clone()))
+                }
                 Err(error) if error == "Login cancelled" => Ok(None),
-                Err(error) => Err(format!(
-                    "Failed to login to {provider_name}: {error}"
-                )),
+                Err(error) => Err(format!("Failed to login to {provider_name}: {error}")),
             };
 
             push_oauth_login_dialog_event(
@@ -2484,23 +2482,25 @@ async fn resolve_interactive_transition(
                 }
             };
 
-            let initial_status_message = if selected_entry == current_selection {
-                String::from("Already at this point")
+            let (prefill_input, initial_status_message) = if selected_entry == current_selection {
+                (None, String::from("Already at this point"))
             } else {
-                if selected_entry == ROOT_TREE_ENTRY_ID {
-                    manager.reset_leaf();
-                } else {
-                    manager
-                        .branch(&selected_entry)
-                        .map_err(|error| error.to_string())?;
-                }
-                String::from("Navigated to selected point")
+                let target_id =
+                    (selected_entry != ROOT_TREE_ENTRY_ID).then_some(selected_entry.as_str());
+                let preparation = prepare_tree_navigation(&manager, target_id)
+                    .map_err(|error| error.to_string())?;
+                let navigation = apply_tree_navigation(&mut manager, &preparation, None, None)
+                    .map_err(|error| error.to_string())?;
+                (
+                    navigation.editor_text,
+                    String::from("Navigated to selected point"),
+                )
             };
 
             Ok(InteractiveTransitionPlan {
                 cwd: PathBuf::from(manager.get_cwd()),
                 manager: Some(manager),
-                prefill_input: None,
+                prefill_input,
                 initial_status_message: Some(initial_status_message),
                 bootstrap_defaults: None,
                 scoped_models,
@@ -6511,14 +6511,37 @@ async fn handle_extension_host_app_request(
             let Some(session_manager) = snapshot.session_manager.as_ref() else {
                 return Err(String::from("Session tree navigation is unavailable"));
             };
-            switch_interactive_tree_branch(
+            let options = request.get("options").and_then(Value::as_object);
+            let summarize = options
+                .and_then(|options| options.get("summarize"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let custom_instructions =
+                options.and_then(|options| optional_string_field(options, "customInstructions"));
+            let replace_instructions = options
+                .and_then(|options| options.get("replaceInstructions"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let label = options
+                .and_then(|options| optional_string_field(options, "label"))
+                .filter(|label| !label.trim().is_empty());
+            let result = switch_interactive_tree_branch_with_options(
                 &snapshot.core,
                 snapshot.core.model_registry().as_ref(),
                 session_manager,
+                &snapshot.runtime_settings,
                 &target_id,
-            )?;
+                summarize,
+                custom_instructions.as_deref(),
+                replace_instructions,
+                label.as_deref(),
+            )
+            .await?;
             sync_rpc_extension_state(&shared).await;
-            Ok(json!({ "cancelled": false }))
+            Ok(json!({
+                "cancelled": false,
+                "editorText": result.editor_text,
+            }))
         }
         "reload" => {
             let snapshot = shared.snapshot();
@@ -8618,29 +8641,17 @@ fn extract_custom_message_text(content: &CustomMessageContent) -> String {
     }
 }
 
-fn switch_interactive_tree_branch(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InteractiveTreeSwitchResult {
+    message: String,
+    editor_text: Option<String>,
+}
+
+fn apply_interactive_session_context(
     core: &CodingAgentCore,
     model_registry: &ModelRegistry,
-    session_manager: &Arc<Mutex<SessionManager>>,
-    branch_ref: &str,
-) -> Result<String, String> {
-    let (session_context, leaf_id) = {
-        let mut session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
-        if branch_ref.eq_ignore_ascii_case("root") {
-            session_manager.reset_leaf();
-        } else {
-            session_manager
-                .branch(branch_ref)
-                .map_err(|error| error.to_string())?;
-        }
-        (
-            session_manager.build_session_context(),
-            session_manager.get_leaf_id().map(str::to_owned),
-        )
-    };
-
+    session_context: pi_coding_agent_core::SessionContext,
+) -> Option<String> {
     let current_state = core.state();
     let restore_result = session_context.model.as_ref().map(|saved_model| {
         restore_model_from_session(
@@ -8666,12 +8677,158 @@ fn switch_interactive_tree_branch(
         state.thinking_level = next_thinking_level;
     });
 
+    restore_result.and_then(|result| result.fallback_message)
+}
+
+fn switch_interactive_tree_branch(
+    core: &CodingAgentCore,
+    model_registry: &ModelRegistry,
+    session_manager: &Arc<Mutex<SessionManager>>,
+    branch_ref: &str,
+) -> Result<InteractiveTreeSwitchResult, String> {
+    let target_id = (!branch_ref.eq_ignore_ascii_case("root")).then_some(branch_ref);
+    let is_noop = {
+        let session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        match (target_id, session_manager.get_leaf_id()) {
+            (None, None) => true,
+            (Some(target_id), Some(leaf_id)) => target_id == leaf_id,
+            _ => false,
+        }
+    };
+    if is_noop {
+        return Ok(InteractiveTreeSwitchResult {
+            message: String::from("Already at this point"),
+            editor_text: None,
+        });
+    }
+
+    let (session_context, leaf_id, editor_text) = {
+        let mut session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        let preparation = prepare_tree_navigation(&session_manager, target_id)
+            .map_err(|error| error.to_string())?;
+        let navigation = apply_tree_navigation(&mut session_manager, &preparation, None, None)
+            .map_err(|error| error.to_string())?;
+        (
+            session_manager.build_session_context(),
+            session_manager.get_leaf_id().map(str::to_owned),
+            navigation.editor_text,
+        )
+    };
+
+    let fallback_message = apply_interactive_session_context(core, model_registry, session_context);
+
     let mut message = format!("Switched to {}", leaf_id.as_deref().unwrap_or("root"));
-    if let Some(fallback_message) = restore_result.and_then(|result| result.fallback_message) {
+    if let Some(fallback_message) = fallback_message {
         message.push_str(". ");
         message.push_str(&fallback_message);
     }
-    Ok(message)
+    Ok(InteractiveTreeSwitchResult {
+        message,
+        editor_text,
+    })
+}
+
+async fn switch_interactive_tree_branch_with_options(
+    core: &CodingAgentCore,
+    model_registry: &ModelRegistry,
+    session_manager: &Arc<Mutex<SessionManager>>,
+    runtime_settings: &LoadedRuntimeSettings,
+    branch_ref: &str,
+    summarize: bool,
+    custom_instructions: Option<&str>,
+    replace_instructions: bool,
+    label: Option<&str>,
+) -> Result<InteractiveTreeSwitchResult, String> {
+    let target_id = (!branch_ref.eq_ignore_ascii_case("root")).then_some(branch_ref);
+    let is_noop = {
+        let session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        match (target_id, session_manager.get_leaf_id()) {
+            (None, None) => true,
+            (Some(target_id), Some(leaf_id)) => target_id == leaf_id,
+            _ => false,
+        }
+    };
+    if is_noop {
+        return Ok(InteractiveTreeSwitchResult {
+            message: String::from("Already at this point"),
+            editor_text: None,
+        });
+    }
+
+    let preparation = {
+        let session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        prepare_tree_navigation(&session_manager, target_id).map_err(|error| error.to_string())?
+    };
+
+    let summary = if summarize && !preparation.entries_to_summarize.is_empty() {
+        let model = core.state().model;
+        let auth = model_registry
+            .get_api_key_and_headers_async(&model)
+            .await
+            .map_err(|error| error.to_string())?;
+        let api_key = auth
+            .api_key
+            .ok_or_else(|| format!("No API key found for {}.", model.provider))?;
+        let generated = generate_branch_summary_with_details(
+            &preparation.entries_to_summarize,
+            &model,
+            &api_key,
+            auth.headers,
+            BranchSummaryOptions {
+                reserve_tokens: runtime_settings.settings.branch_summary.reserve_tokens,
+                custom_instructions: custom_instructions.map(ToOwned::to_owned),
+                replace_instructions,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Some(TreeNavigationSummary {
+            summary: generated.summary,
+            details: Some(
+                serde_json::to_value(BranchSummaryDetails {
+                    read_files: generated.read_files,
+                    modified_files: generated.modified_files,
+                })
+                .expect("branch summary details should serialize"),
+            ),
+            from_hook: None,
+        })
+    } else {
+        None
+    };
+
+    let (session_context, leaf_id, editor_text) = {
+        let mut session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        let navigation = apply_tree_navigation(&mut session_manager, &preparation, summary, label)
+            .map_err(|error| error.to_string())?;
+        (
+            session_manager.build_session_context(),
+            session_manager.get_leaf_id().map(str::to_owned),
+            navigation.editor_text,
+        )
+    };
+
+    let fallback_message = apply_interactive_session_context(core, model_registry, session_context);
+
+    let mut message = format!("Switched to {}", leaf_id.as_deref().unwrap_or("root"));
+    if let Some(fallback_message) = fallback_message {
+        message.push_str(". ");
+        message.push_str(&fallback_message);
+    }
+    Ok(InteractiveTreeSwitchResult {
+        message,
+        editor_text,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9828,9 +9985,13 @@ fn handle_interactive_slash_command(
         }
 
         match switch_interactive_tree_branch(core, model_registry, session_manager, target) {
-            Ok(message) => {
+            Ok(result) => {
+                if let Some(editor_text) = result.editor_text {
+                    shell.set_input_value(editor_text.clone());
+                    shell.set_input_cursor(editor_text.len());
+                }
                 update_interactive_footer_state(footer_state_handle, core, Some(session_manager));
-                status_handle.set_message(message);
+                status_handle.set_message(result.message);
             }
             Err(error) => status_handle.set_message(format!("Error: {error}")),
         }
@@ -13263,7 +13424,7 @@ mod tests {
                 timestamp: 1,
             })
             .unwrap();
-        manager
+        let assistant_root_id = manager
             .append_message(Message::Assistant {
                 content: vec![AssistantContent::Text {
                     text: String::from("assistant root"),
@@ -13279,7 +13440,7 @@ mod tests {
                 timestamp: 2,
             })
             .unwrap();
-        let primary_user_id = manager
+        let _primary_user_id = manager
             .append_message(Message::User {
                 content: vec![UserContent::Text {
                     text: String::from("primary branch"),
@@ -13324,7 +13485,8 @@ mod tests {
         .expect("expected tree transition plan");
 
         let manager = plan.manager.expect("expected session manager");
-        assert_eq!(manager.get_leaf_id(), Some(primary_user_id.as_str()));
+        assert_eq!(manager.get_leaf_id(), Some(assistant_root_id.as_str()));
+        assert_eq!(plan.prefill_input.as_deref(), Some("primary branch"));
         assert_eq!(
             plan.initial_status_message.as_deref(),
             Some("Navigated to selected point")
@@ -13440,6 +13602,8 @@ mod tests {
             &transition_request,
         ));
 
+        assert_eq!(shell.input_value(), "primary branch");
+
         let state = core.state();
         let user_messages = state
             .messages
@@ -13449,8 +13613,9 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        assert!(user_messages.iter().any(|message| message == "root"));
         assert!(
-            user_messages
+            !user_messages
                 .iter()
                 .any(|message| message == "primary branch")
         );

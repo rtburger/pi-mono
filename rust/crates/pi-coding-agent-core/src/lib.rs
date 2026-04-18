@@ -15,6 +15,7 @@ pub mod session_manager;
 pub mod skill_block;
 pub mod skills;
 pub mod system_prompt;
+pub mod tree_navigation;
 
 pub use auth::{
     AuthApiKeyFuture, AuthFileSource, AuthSource, ChainedAuthSource, MemoryAuthStorage,
@@ -79,6 +80,10 @@ pub use system_prompt::{
     build_default_pi_system_prompt, build_system_prompt, discover_append_system_prompt_file,
     discover_system_prompt_file, load_project_context_files, load_system_prompt_resources,
     resolve_prompt_input,
+};
+pub use tree_navigation::{
+    TreeNavigationPreparation, TreeNavigationResult, TreeNavigationSummary, apply_tree_navigation,
+    prepare_tree_navigation,
 };
 
 #[derive(Debug, thiserror::Error)]
