@@ -39,6 +39,91 @@ fn identity_theme_selection_text_style() -> SharedThemeSelectionTextStyle {
     Arc::new(|text, _| text.to_owned())
 }
 
+/// Interface-style image theme matching the TypeScript `ImageTheme` shape.
+#[derive(Clone)]
+pub struct ImageThemeSpec {
+    pub fallback_color: SharedThemeTextStyle,
+}
+
+impl ImageThemeSpec {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for ImageThemeSpec {
+    fn default() -> Self {
+        Self {
+            fallback_color: identity_theme_text_style(),
+        }
+    }
+}
+
+impl From<ImageThemeSpec> for image::ImageTheme {
+    fn from(spec: ImageThemeSpec) -> Self {
+        let ImageThemeSpec { fallback_color } = spec;
+        image::ImageTheme::new().with_fallback_color(move |text| fallback_color(text))
+    }
+}
+
+impl From<&ImageThemeSpec> for image::ImageTheme {
+    fn from(spec: &ImageThemeSpec) -> Self {
+        spec.clone().into()
+    }
+}
+
+/// Interface-style default markdown text style matching the TypeScript `DefaultTextStyle` shape.
+#[derive(Clone, Default)]
+pub struct DefaultTextStyleSpec {
+    pub color: Option<SharedThemeTextStyle>,
+    pub bg_color: Option<SharedThemeTextStyle>,
+    pub bold: bool,
+    pub italic: bool,
+    pub strikethrough: bool,
+    pub underline: bool,
+}
+
+impl DefaultTextStyleSpec {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl From<DefaultTextStyleSpec> for markdown::DefaultTextStyle {
+    fn from(spec: DefaultTextStyleSpec) -> Self {
+        let DefaultTextStyleSpec {
+            color,
+            bg_color,
+            bold,
+            italic,
+            strikethrough,
+            underline,
+        } = spec;
+
+        let mut style = markdown::DefaultTextStyle::new()
+            .with_bold(bold)
+            .with_italic(italic)
+            .with_strikethrough(strikethrough)
+            .with_underline(underline);
+
+        if let Some(color) = color {
+            style = style.with_color(move |text| color(text));
+        }
+
+        if let Some(bg_color) = bg_color {
+            style = style.with_bg_color(move |text| bg_color(text));
+        }
+
+        style
+    }
+}
+
+impl From<&DefaultTextStyleSpec> for markdown::DefaultTextStyle {
+    fn from(spec: &DefaultTextStyleSpec) -> Self {
+        spec.clone().into()
+    }
+}
+
 /// Interface-style select list theme matching the TypeScript `SelectListTheme` shape.
 #[derive(Clone)]
 pub struct SelectListThemeSpec {

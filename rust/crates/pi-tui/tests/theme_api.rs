@@ -1,8 +1,9 @@
 use pi_tui::{
-    AutocompleteProvider, CombinedAutocompleteProvider, Component, DefaultTextStyle, Editor,
-    EditorTheme, EditorThemeSpec, Markdown, MarkdownTheme, MarkdownThemeSpec, SelectItem,
-    SelectList, SelectListTheme, SelectListThemeSpec, SettingItem, SettingsList, SettingsListTheme,
-    SettingsListThemeSpec, SlashCommand,
+    AutocompleteProvider, CombinedAutocompleteProvider, Component, DefaultTextStyle,
+    DefaultTextStyleSpec, Editor, EditorTheme, EditorThemeSpec, ImageTheme, ImageThemeSpec,
+    Markdown, MarkdownTheme, MarkdownThemeSpec, SelectItem, SelectList, SelectListTheme,
+    SelectListThemeSpec, SettingItem, SettingsList, SettingsListTheme, SettingsListThemeSpec,
+    SlashCommand,
 };
 use std::sync::Arc;
 
@@ -62,6 +63,7 @@ fn theme_builders_are_cloneable_and_reusable() {
     let default_text_style = DefaultTextStyle::new()
         .with_color(|text| format!("<fg:{text}>"))
         .with_underline(true);
+    let image_theme = ImageTheme::new().with_fallback_color(|text| format!("<fallback:{text}>"));
 
     let first_markdown = Markdown::with_default_text_style(
         "# Title",
@@ -73,6 +75,10 @@ fn theme_builders_are_cloneable_and_reusable() {
     let second_markdown =
         Markdown::with_default_text_style("# Title", 0, 0, markdown_theme, default_text_style);
     assert_eq!(first_markdown.render(40), second_markdown.render(40));
+    assert_eq!(
+        image_theme.clone().fallback_color("[Image: cat.png]"),
+        image_theme.fallback_color("[Image: cat.png]")
+    );
 
     let select_theme = SelectListTheme::new()
         .with_selected_prefix(|text| format!("<prefix:{text}>"))
@@ -132,6 +138,26 @@ fn theme_specs_convert_to_equivalent_concrete_themes() {
     let default_text_style = DefaultTextStyle::new()
         .with_color(|text| format!("<fg:{text}>"))
         .with_underline(true);
+    let default_text_spec = DefaultTextStyleSpec {
+        color: Some(Arc::new(|text| format!("<fg:{text}>"))),
+        bg_color: Some(Arc::new(|text| format!("<bg:{text}>"))),
+        bold: true,
+        italic: true,
+        strikethrough: true,
+        underline: true,
+    };
+    let default_text_builder = DefaultTextStyle::new()
+        .with_color(|text| format!("<fg:{text}>"))
+        .with_bg_color(|text| format!("<bg:{text}>"))
+        .with_bold(true)
+        .with_italic(true)
+        .with_strikethrough(true)
+        .with_underline(true);
+    let default_text_theme = MarkdownTheme::new()
+        .with_bold(|text| format!("<bold:{text}>"))
+        .with_italic(|text| format!("<italic:{text}>"))
+        .with_strikethrough(|text| format!("<strike:{text}>"))
+        .with_underline(|text| format!("<underline:{text}>"));
     let markdown_text = "# Title\n\n[site](https://example.com)\n\n```rust\nfn main() {}\n```";
     let first_markdown = Markdown::with_default_text_style(
         markdown_text,
@@ -162,6 +188,22 @@ fn theme_specs_convert_to_equivalent_concrete_themes() {
         .with_description(|text| format!("<desc:{text}>"))
         .with_scroll_info(|text| format!("<scroll:{text}>"))
         .with_no_match(|text| format!("<no-match:{text}>"));
+    let first_default_text = Markdown::with_default_text_style(
+        "plain",
+        1,
+        1,
+        default_text_theme.clone(),
+        DefaultTextStyle::from(&default_text_spec),
+    );
+    let second_default_text = Markdown::with_default_text_style(
+        "plain",
+        1,
+        1,
+        default_text_theme,
+        default_text_builder,
+    );
+    assert_eq!(first_default_text.render(12), second_default_text.render(12));
+
     let first_select = SelectList::new(
         themed_select_items(),
         5,
@@ -190,6 +232,15 @@ fn theme_specs_convert_to_equivalent_concrete_themes() {
     );
     let second_settings = SettingsList::new(themed_settings_items(), 5, settings_builder);
     assert_eq!(first_settings.render(80), second_settings.render(80));
+
+    let image_spec = ImageThemeSpec {
+        fallback_color: Arc::new(|text| format!("<fallback:{text}>")),
+    };
+    let image_builder = ImageTheme::new().with_fallback_color(|text| format!("<fallback:{text}>"));
+    assert_eq!(
+        ImageTheme::from(&image_spec).fallback_color("[Image: demo.png]"),
+        image_builder.fallback_color("[Image: demo.png]")
+    );
 
     let editor_spec = EditorThemeSpec {
         border_color: Arc::new(|text| format!("<border:{text}>")),

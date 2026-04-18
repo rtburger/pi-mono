@@ -2,22 +2,29 @@ use crate::{
     Component, ImageDimensions, ImageRenderOptions, get_capabilities, get_image_dimensions,
     image_fallback, render_image, truncate_to_width,
 };
-use std::cell::{Cell, RefCell};
-
-pub struct ImageTheme {
-    fallback_color: Box<ImageFallbackColorFn>,
-}
+use std::{
+    cell::{Cell, RefCell},
+    sync::Arc,
+};
 
 type ImageFallbackColorFn = dyn Fn(&str) -> String + Send + Sync + 'static;
 
+#[derive(Clone)]
+pub struct ImageTheme {
+    fallback_color: Arc<ImageFallbackColorFn>,
+}
+
 impl ImageTheme {
-    pub fn new<F>(fallback_color: F) -> Self
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_fallback_color<F>(mut self, fallback_color: F) -> Self
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        Self {
-            fallback_color: Box::new(fallback_color),
-        }
+        self.fallback_color = Arc::new(fallback_color);
+        self
     }
 
     pub fn fallback_color(&self, text: &str) -> String {
@@ -27,7 +34,9 @@ impl ImageTheme {
 
 impl Default for ImageTheme {
     fn default() -> Self {
-        Self::new(str::to_owned)
+        Self {
+            fallback_color: Arc::new(str::to_owned),
+        }
     }
 }
 

@@ -94,7 +94,7 @@ fn image_renders_fallback_text_when_terminal_has_no_image_support() {
     let image = Image::with_dimensions(
         "Zm9v",
         "image/png",
-        ImageTheme::new(|text| format!("<{text}>")),
+        ImageTheme::new().with_fallback_color(|text| format!("<{text}>")),
         ImageOptions {
             filename: Some(String::from("cat.png")),
             ..ImageOptions::default()

@@ -5,8 +5,9 @@ use pi_tui::{
 };
 use std::{
     cell::Cell,
+    ffi::OsString,
     sync::{
-        Arc, Mutex,
+        Arc, LazyLock, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -94,6 +95,51 @@ impl Component for DynamicComponent {
     }
 
     fn invalidate(&mut self) {}
+}
+
+static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+struct EnvVarGuard {
+    _lock: MutexGuard<'static, ()>,
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: Option<&str>) -> Self {
+        let lock = ENV_LOCK.lock().expect("env mutex poisoned");
+        let previous = std::env::var_os(key);
+        match value {
+            Some(value) => {
+                // SAFETY: tests serialize environment mutation through ENV_LOCK.
+                unsafe { std::env::set_var(key, value) }
+            }
+            None => {
+                // SAFETY: tests serialize environment mutation through ENV_LOCK.
+                unsafe { std::env::remove_var(key) }
+            }
+        }
+        Self {
+            _lock: lock,
+            key,
+            previous,
+        }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => {
+                // SAFETY: tests serialize environment mutation through ENV_LOCK.
+                unsafe { std::env::set_var(self.key, value) }
+            }
+            None => {
+                // SAFETY: tests serialize environment mutation through ENV_LOCK.
+                unsafe { std::env::remove_var(self.key) }
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1016,6 +1062,32 @@ fn terminal_resize_callbacks_trigger_rerender_when_drained() {
 }
 
 #[test]
+fn termux_height_changes_stay_on_the_differential_path() {
+    let _guard = EnvVarGuard::set("TERMUX_VERSION", Some("1"));
+    let terminal = MockTerminal::new(20, 5);
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    tui.add_child(Box::new(StaticComponent::new(
+        (0..8).map(|index| format!("Line {index}")),
+    )));
+
+    tui.start().expect("start should succeed");
+    let redraws_before = tui.full_redraws();
+    inspector.clear_writes();
+
+    inspector.resize(20, 8);
+    tui.drain_terminal_events()
+        .expect("queued termux resize should drain successfully");
+
+    assert_eq!(tui.full_redraws(), redraws_before);
+    let writes = inspector.writes().join("");
+    assert!(!writes.contains("\x1b[2J"));
+    assert!(!writes.contains("\x1b[3J"));
+
+    tui.stop().expect("stop should succeed");
+}
+
+#[test]
 fn start_and_request_render_write_a_full_frame_to_terminal() {
     let terminal = MockTerminal::new(20, 5);
     let inspector = terminal.clone();
@@ -1041,6 +1113,23 @@ fn start_and_request_render_write_a_full_frame_to_terminal() {
     assert_eq!(inspector.started(), 1);
     assert_eq!(inspector.stopped(), 1);
     assert!(!inspector.cursor_hidden());
+}
+
+#[test]
+fn rendered_lines_append_segment_resets_to_prevent_style_leaks() {
+    let terminal = MockTerminal::new(20, 5);
+    let inspector = terminal.clone();
+    let mut tui = Tui::new(terminal);
+    tui.add_child(Box::new(StaticComponent::new(["\x1b[3mItalic", "Plain"])));
+
+    tui.start().expect("start should succeed");
+
+    let writes = inspector.writes().join("");
+    assert!(writes.contains(
+        "\x1b[3mItalic\x1b[0m\x1b]8;;\x07\r\nPlain\x1b[0m\x1b]8;;\x07"
+    ));
+
+    tui.stop().expect("stop should succeed");
 }
 
 #[test]
