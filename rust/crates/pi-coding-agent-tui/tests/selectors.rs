@@ -498,7 +498,10 @@ fn login_dialog_preserves_auth_url_when_prompting_for_manual_input() {
     dialog.show_progress("Exchanging authorization code for tokens...");
 
     let rendered = dialog.render(80).join("\n");
-    assert!(rendered.contains("https://example.com/login"), "output: {rendered}");
+    assert!(
+        rendered.contains("https://example.com/login"),
+        "output: {rendered}"
+    );
     assert!(
         rendered.contains("Complete login in your browser."),
         "output: {rendered}"
