@@ -22,7 +22,7 @@ use crate::{
     run_print_mode,
     session_picker::SessionPickerComponent,
     to_print_output_mode,
-    tree_picker::{TreePickerComponent, TreePickerItem},
+    tree_picker::TreePickerItem,
 };
 use pi_agent::{AgentUnsubscribe, BeforeToolCallResult, ThinkingLevel};
 use pi_ai::{
@@ -47,17 +47,20 @@ use pi_coding_agent_core::{
 #[cfg(test)]
 use pi_coding_agent_tui::PlainKeyHintStyler;
 use pi_coding_agent_tui::{
-    CustomMessageComponent, DEFAULT_APP_KEYBINDINGS, ExternalEditorCommandRunner,
-    ExternalEditorHost, FooterStateHandle, InteractiveCoreBinding, KeybindingsManager,
-    LoginDialogComponent, StartupShellComponent, StatusHandle, SystemClipboardImageSource,
-    ThemedKeyHintStyler, init_theme, key_hint, key_text, set_registered_themes,
+    CustomMessageComponent, DEFAULT_APP_KEYBINDINGS, DeliveryMode, DoubleEscapeAction,
+    ExternalEditorCommandRunner, ExternalEditorHost, FooterStateHandle, InteractiveCoreBinding,
+    KeybindingsManager, LoginDialogComponent, OAuthProviderItem, OAuthSelectorComponent,
+    OAuthSelectorMode, SettingsChange, SettingsConfig, SettingsSelectorComponent,
+    StartupShellComponent, StatusHandle, SystemClipboardImageSource, ThemedKeyHintStyler,
+    TreeFilterMode, TreeSelectorComponent, get_available_themes, init_theme, key_hint, key_text,
+    set_registered_themes, set_theme,
 };
 use pi_config::{LoadedRuntimeSettings, ThinkingBudgetsSettings, load_runtime_settings};
 use pi_events::{AssistantContent, Message, Model, UserContent};
 use pi_tui::{
     AutocompleteItem, CombinedAutocompleteProvider, Component, Input, ProcessTerminal,
-    RenderHandle, SlashCommand, Terminal, Tui, TuiError, fuzzy_filter, matches_key,
-    truncate_to_width,
+    RenderHandle, SlashCommand, Terminal, Tui, TuiError, fuzzy_filter, get_capabilities,
+    matches_key, truncate_to_width,
 };
 use std::{
     borrow::Cow,
@@ -90,6 +93,7 @@ const NO_MODELS_ENV_HINT: &str = "  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_AP
 const API_KEY_MODEL_REQUIREMENT: &str =
     "--api-key requires a model to be specified via --model, --provider/--model, or --models";
 const FINALIZED_SYSTEM_PROMPT_PREFIX: &str = "\0pi-final-system-prompt\n";
+#[allow(dead_code)]
 const ROOT_TREE_ENTRY_ID: &str = "root";
 const DEFAULT_SHARE_VIEWER_URL: &str = "https://pi.dev/session/";
 
@@ -248,10 +252,24 @@ struct ForkMessageCandidate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SettingsPickerSelection {
     auto_compact: bool,
+    show_images: bool,
     auto_resize_images: bool,
     block_images: bool,
+    enable_skill_commands: bool,
+    steering_mode: DeliveryMode,
+    follow_up_mode: DeliveryMode,
+    transport: Transport,
+    thinking_level: ThinkingLevel,
+    current_theme: String,
+    hide_thinking_block: bool,
+    collapse_changelog: bool,
+    double_escape_action: DoubleEscapeAction,
+    tree_filter_mode: TreeFilterMode,
+    show_hardware_cursor: bool,
     editor_padding_x: usize,
     autocomplete_max_visible: usize,
+    quiet_startup: bool,
+    clear_on_shrink: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -506,14 +524,29 @@ enum TreePickerOutcome {
     Cancelled,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TreePickerResult {
+    selected_entry_id: Option<String>,
+    label_changes: Vec<(String, Option<String>)>,
+}
+
 async fn select_tree_entry(
     tui: &mut Tui<LiveInteractiveTerminal>,
     keybindings: &KeybindingsManager,
-    items: Vec<TreePickerItem>,
+    tree: Vec<pi_coding_agent_core::SessionTreeNode>,
+    current_leaf_id: Option<String>,
     initial_selected_id: Option<&str>,
-) -> Result<Option<String>, String> {
+    initial_filter_mode: TreeFilterMode,
+) -> Result<TreePickerResult, String> {
     let outcome = Arc::new(Mutex::new(None::<TreePickerOutcome>));
-    let mut picker = TreePickerComponent::new(keybindings, items, initial_selected_id);
+    let label_changes = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+    let mut picker = TreeSelectorComponent::new(
+        keybindings,
+        tree,
+        current_leaf_id,
+        initial_selected_id.map(str::to_owned),
+        initial_filter_mode,
+    );
 
     let outcome_for_select = Arc::clone(&outcome);
     picker.set_on_select(move |entry_id| {
@@ -530,6 +563,14 @@ async fn select_tree_entry(
             .expect("tree picker outcome mutex poisoned") = Some(TreePickerOutcome::Cancelled);
     });
 
+    let label_changes_for_picker = Arc::clone(&label_changes);
+    picker.set_on_label_change(move |change| {
+        label_changes_for_picker
+            .lock()
+            .expect("tree picker label changes mutex poisoned")
+            .push(change);
+    });
+
     let picker_id = tui.add_child(Box::new(picker));
     let _ = tui.set_focus_child(picker_id);
     tui.start().map_err(|error| error.to_string())?;
@@ -541,9 +582,15 @@ async fn select_tree_entry(
             .take()
         {
             tui.clear();
-            return Ok(match outcome {
-                TreePickerOutcome::Selected(entry_id) => Some(entry_id),
-                TreePickerOutcome::Cancelled => None,
+            return Ok(TreePickerResult {
+                selected_entry_id: match outcome {
+                    TreePickerOutcome::Selected(entry_id) => Some(entry_id),
+                    TreePickerOutcome::Cancelled => None,
+                },
+                label_changes: label_changes
+                    .lock()
+                    .expect("tree picker label changes mutex poisoned")
+                    .clone(),
             });
         }
 
@@ -565,6 +612,7 @@ enum OAuthPickerOutcome {
     Cancelled,
 }
 
+#[allow(dead_code)]
 struct OAuthPickerComponent {
     keybindings: KeybindingsManager,
     mode: OAuthPickerMode,
@@ -575,6 +623,7 @@ struct OAuthPickerComponent {
     viewport_size: Cell<Option<(usize, usize)>>,
 }
 
+#[allow(dead_code)]
 impl OAuthPickerComponent {
     fn new(
         keybindings: &KeybindingsManager,
@@ -765,7 +814,21 @@ async fn select_oauth_provider(
     entries: Vec<OAuthPickerEntry>,
 ) -> Result<Option<String>, String> {
     let outcome = Arc::new(Mutex::new(None::<OAuthPickerOutcome>));
-    let mut picker = OAuthPickerComponent::new(keybindings, mode, entries);
+    let mut picker = OAuthSelectorComponent::new(
+        keybindings,
+        match mode {
+            OAuthPickerMode::Login => OAuthSelectorMode::Login,
+            OAuthPickerMode::Logout => OAuthSelectorMode::Logout,
+        },
+        entries
+            .into_iter()
+            .map(|entry| OAuthProviderItem {
+                id: entry.id,
+                name: entry.name,
+                logged_in: matches!(mode, OAuthPickerMode::Logout),
+            })
+            .collect(),
+    );
 
     let outcome_for_select = Arc::clone(&outcome);
     picker.set_on_select(move |provider_id| {
@@ -2452,42 +2515,45 @@ async fn resolve_interactive_transition(
                 });
             }
 
-            let current_selection = manager
-                .get_leaf_id()
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| String::from(ROOT_TREE_ENTRY_ID));
-            let items = build_tree_picker_items(&manager);
+            let current_selection = manager.get_leaf_id().map(ToOwned::to_owned);
             let keybindings = create_keybindings_manager(agent_dir);
             let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
             let mut tui = Tui::new(terminal);
-            let selected_entry = match select_tree_entry(
+            let tree_result = select_tree_entry(
                 &mut tui,
                 &keybindings,
-                items,
-                Some(current_selection.as_str()),
+                manager.get_tree(),
+                current_selection.clone(),
+                current_selection.as_deref(),
+                tree_filter_mode_from_runtime_setting(&runtime_settings.settings.tree_filter_mode),
             )
-            .await?
-            {
-                Some(entry_id) => entry_id,
-                None => {
-                    return Ok(InteractiveTransitionPlan {
-                        cwd: PathBuf::from(manager.get_cwd()),
-                        manager: Some(manager),
-                        prefill_input: None,
-                        initial_status_message: None,
-                        bootstrap_defaults: None,
-                        scoped_models,
-                        runtime_settings,
-                    });
-                }
+            .await?;
+
+            for (entry_id, label) in &tree_result.label_changes {
+                manager
+                    .append_label_change(entry_id, label.clone())
+                    .map_err(|error| error.to_string())?;
+            }
+
+            let Some(selected_entry) = tree_result.selected_entry_id else {
+                return Ok(InteractiveTransitionPlan {
+                    cwd: PathBuf::from(manager.get_cwd()),
+                    manager: Some(manager),
+                    prefill_input: None,
+                    initial_status_message: None,
+                    bootstrap_defaults: None,
+                    scoped_models,
+                    runtime_settings,
+                });
             };
 
-            let (prefill_input, initial_status_message) = if selected_entry == current_selection {
+            let (prefill_input, initial_status_message) = if current_selection
+                .as_deref()
+                .is_some_and(|current_selection| current_selection == selected_entry.as_str())
+            {
                 (None, String::from("Already at this point"))
             } else {
-                let target_id =
-                    (selected_entry != ROOT_TREE_ENTRY_ID).then_some(selected_entry.as_str());
-                let preparation = prepare_tree_navigation(&manager, target_id)
+                let preparation = prepare_tree_navigation(&manager, Some(selected_entry.as_str()))
                     .map_err(|error| error.to_string())?;
                 let navigation = apply_tree_navigation(&mut manager, &preparation, None, None)
                     .map_err(|error| error.to_string())?;
@@ -2517,6 +2583,8 @@ async fn resolve_interactive_transition(
                 &mut tui,
                 &keybindings,
                 &session_context.runtime_settings,
+                &session_context.model,
+                session_context.thinking_level,
                 agent_dir.is_some(),
             )
             .await?;
@@ -2528,13 +2596,17 @@ async fn resolve_interactive_transition(
                     &session_context.runtime_settings,
                     &selection,
                 )?;
-                load_runtime_settings(&current_cwd, agent_dir)
+                let persisted = load_runtime_settings(&current_cwd, agent_dir);
+                apply_settings_selection(&persisted, &selection)
             } else {
                 apply_settings_selection(&session_context.runtime_settings, &selection)
             };
 
-            let changed =
-                selection != settings_selection_from_loaded(&session_context.runtime_settings);
+            let changed = selection
+                != settings_selection_from_loaded(
+                    &session_context.runtime_settings,
+                    session_context.thinking_level,
+                );
             let initial_status_message = Some(if changed {
                 if agent_dir.is_some() {
                     String::from("Updated settings")
@@ -2558,7 +2630,7 @@ async fn resolve_interactive_transition(
                 initial_status_message,
                 bootstrap_defaults: Some(BootstrapDefaults::from_model(
                     &session_context.model,
-                    session_context.thinking_level,
+                    selection.thinking_level,
                 )),
                 scoped_models: session_context.scoped_models,
                 runtime_settings,
@@ -2837,13 +2909,36 @@ async fn resolve_interactive_transition(
     }
 }
 
-fn settings_selection_from_loaded(loaded: &LoadedRuntimeSettings) -> SettingsPickerSelection {
+fn settings_selection_from_loaded(
+    loaded: &LoadedRuntimeSettings,
+    thinking_level: ThinkingLevel,
+) -> SettingsPickerSelection {
     SettingsPickerSelection {
         auto_compact: loaded.settings.compaction.enabled,
+        show_images: loaded.settings.terminal.show_images,
         auto_resize_images: loaded.settings.images.auto_resize_images,
         block_images: loaded.settings.images.block_images,
+        enable_skill_commands: loaded.settings.enable_skill_commands,
+        steering_mode: delivery_mode_from_runtime_setting(&loaded.settings.steering_mode),
+        follow_up_mode: delivery_mode_from_runtime_setting(&loaded.settings.follow_up_mode),
+        transport: loaded.settings.transport,
+        thinking_level,
+        current_theme: loaded
+            .settings
+            .theme
+            .clone()
+            .unwrap_or_else(|| String::from("dark")),
+        hide_thinking_block: loaded.settings.hide_thinking_block,
+        collapse_changelog: loaded.settings.collapse_changelog,
+        double_escape_action: double_escape_action_from_runtime_setting(
+            &loaded.settings.double_escape_action,
+        ),
+        tree_filter_mode: tree_filter_mode_from_runtime_setting(&loaded.settings.tree_filter_mode),
+        show_hardware_cursor: loaded.settings.show_hardware_cursor,
         editor_padding_x: loaded.settings.editor_padding_x,
         autocomplete_max_visible: loaded.settings.autocomplete_max_visible,
+        quiet_startup: loaded.settings.quiet_startup,
+        clear_on_shrink: loaded.settings.terminal.clear_on_shrink,
     }
 }
 
@@ -2853,10 +2948,25 @@ fn apply_settings_selection(
 ) -> LoadedRuntimeSettings {
     let mut next = loaded.clone();
     next.settings.compaction.enabled = selection.auto_compact;
+    next.settings.terminal.show_images = selection.show_images;
     next.settings.images.auto_resize_images = selection.auto_resize_images;
     next.settings.images.block_images = selection.block_images;
+    next.settings.enable_skill_commands = selection.enable_skill_commands;
+    next.settings.steering_mode = delivery_mode_to_runtime_setting(selection.steering_mode);
+    next.settings.follow_up_mode = delivery_mode_to_runtime_setting(selection.follow_up_mode);
+    next.settings.transport = selection.transport;
+    next.settings.theme = Some(selection.current_theme.clone());
+    next.settings.hide_thinking_block = selection.hide_thinking_block;
+    next.settings.collapse_changelog = selection.collapse_changelog;
+    next.settings.double_escape_action =
+        double_escape_action_to_runtime_setting(selection.double_escape_action).to_owned();
+    next.settings.tree_filter_mode =
+        tree_filter_mode_to_runtime_setting(selection.tree_filter_mode).to_owned();
+    next.settings.show_hardware_cursor = selection.show_hardware_cursor;
     next.settings.editor_padding_x = selection.editor_padding_x;
     next.settings.autocomplete_max_visible = selection.autocomplete_max_visible;
+    next.settings.quiet_startup = selection.quiet_startup;
+    next.settings.terminal.clear_on_shrink = selection.clear_on_shrink;
     next
 }
 
@@ -2865,8 +2975,8 @@ fn persist_runtime_settings_changes(
     loaded: &LoadedRuntimeSettings,
     selection: &SettingsPickerSelection,
 ) -> Result<(), String> {
-    let previous = settings_selection_from_loaded(loaded);
-    if previous == *selection {
+    let previous = settings_selection_from_loaded(loaded, selection.thinking_level);
+    if !persistent_settings_changed(&previous, selection) {
         return Ok(());
     }
 
@@ -2874,11 +2984,54 @@ fn persist_runtime_settings_changes(
         if selection.auto_compact != previous.auto_compact {
             set_nested_bool(config, "compaction", "enabled", selection.auto_compact);
         }
+        if selection.show_images != previous.show_images {
+            set_nested_bool(config, "terminal", "showImages", selection.show_images);
+        }
         if selection.auto_resize_images != previous.auto_resize_images {
             set_nested_bool(config, "images", "autoResize", selection.auto_resize_images);
         }
         if selection.block_images != previous.block_images {
             set_nested_bool(config, "images", "blockImages", selection.block_images);
+        }
+        if selection.enable_skill_commands != previous.enable_skill_commands {
+            set_bool(
+                config,
+                "enableSkillCommands",
+                selection.enable_skill_commands,
+            );
+        }
+        if selection.transport != previous.transport {
+            set_string(
+                config,
+                "transport",
+                transport_to_runtime_setting(selection.transport),
+            );
+        }
+        if selection.current_theme != previous.current_theme {
+            set_string(config, "theme", selection.current_theme.clone());
+        }
+        if selection.hide_thinking_block != previous.hide_thinking_block {
+            set_bool(config, "hideThinkingBlock", selection.hide_thinking_block);
+        }
+        if selection.collapse_changelog != previous.collapse_changelog {
+            set_bool(config, "collapseChangelog", selection.collapse_changelog);
+        }
+        if selection.double_escape_action != previous.double_escape_action {
+            set_string(
+                config,
+                "doubleEscapeAction",
+                double_escape_action_to_runtime_setting(selection.double_escape_action),
+            );
+        }
+        if selection.tree_filter_mode != previous.tree_filter_mode {
+            set_string(
+                config,
+                "treeFilterMode",
+                tree_filter_mode_to_runtime_setting(selection.tree_filter_mode),
+            );
+        }
+        if selection.show_hardware_cursor != previous.show_hardware_cursor {
+            set_bool(config, "showHardwareCursor", selection.show_hardware_cursor);
         }
         if selection.editor_padding_x != previous.editor_padding_x {
             set_usize(config, "editorPaddingX", selection.editor_padding_x);
@@ -2890,7 +3043,123 @@ fn persist_runtime_settings_changes(
                 selection.autocomplete_max_visible,
             );
         }
+        if selection.quiet_startup != previous.quiet_startup {
+            set_bool(config, "quietStartup", selection.quiet_startup);
+        }
+        if selection.clear_on_shrink != previous.clear_on_shrink {
+            set_nested_bool(
+                config,
+                "terminal",
+                "clearOnShrink",
+                selection.clear_on_shrink,
+            );
+        }
     })
+}
+
+fn persistent_settings_changed(
+    previous: &SettingsPickerSelection,
+    next: &SettingsPickerSelection,
+) -> bool {
+    previous.auto_compact != next.auto_compact
+        || previous.show_images != next.show_images
+        || previous.auto_resize_images != next.auto_resize_images
+        || previous.block_images != next.block_images
+        || previous.enable_skill_commands != next.enable_skill_commands
+        || previous.transport != next.transport
+        || previous.current_theme != next.current_theme
+        || previous.hide_thinking_block != next.hide_thinking_block
+        || previous.collapse_changelog != next.collapse_changelog
+        || previous.double_escape_action != next.double_escape_action
+        || previous.tree_filter_mode != next.tree_filter_mode
+        || previous.show_hardware_cursor != next.show_hardware_cursor
+        || previous.editor_padding_x != next.editor_padding_x
+        || previous.autocomplete_max_visible != next.autocomplete_max_visible
+        || previous.quiet_startup != next.quiet_startup
+        || previous.clear_on_shrink != next.clear_on_shrink
+}
+
+fn delivery_mode_from_runtime_setting(value: &str) -> DeliveryMode {
+    match value {
+        "all" => DeliveryMode::All,
+        _ => DeliveryMode::OneAtATime,
+    }
+}
+
+fn delivery_mode_to_runtime_setting(mode: DeliveryMode) -> String {
+    match mode {
+        DeliveryMode::All => String::from("all"),
+        DeliveryMode::OneAtATime => String::from("one-at-a-time"),
+    }
+}
+
+fn double_escape_action_from_runtime_setting(value: &str) -> DoubleEscapeAction {
+    match value {
+        "fork" => DoubleEscapeAction::Fork,
+        "none" => DoubleEscapeAction::None,
+        _ => DoubleEscapeAction::Tree,
+    }
+}
+
+fn double_escape_action_to_runtime_setting(action: DoubleEscapeAction) -> &'static str {
+    match action {
+        DoubleEscapeAction::Fork => "fork",
+        DoubleEscapeAction::Tree => "tree",
+        DoubleEscapeAction::None => "none",
+    }
+}
+
+fn tree_filter_mode_from_runtime_setting(value: &str) -> TreeFilterMode {
+    match value {
+        "no-tools" => TreeFilterMode::NoTools,
+        "user-only" => TreeFilterMode::UserOnly,
+        "labeled-only" => TreeFilterMode::LabeledOnly,
+        "all" => TreeFilterMode::All,
+        _ => TreeFilterMode::Default,
+    }
+}
+
+fn tree_filter_mode_to_runtime_setting(mode: TreeFilterMode) -> &'static str {
+    match mode {
+        TreeFilterMode::Default => "default",
+        TreeFilterMode::NoTools => "no-tools",
+        TreeFilterMode::UserOnly => "user-only",
+        TreeFilterMode::LabeledOnly => "labeled-only",
+        TreeFilterMode::All => "all",
+    }
+}
+
+fn transport_to_runtime_setting(transport: Transport) -> &'static str {
+    match transport {
+        Transport::Sse => "sse",
+        Transport::WebSocket => "websocket",
+        Transport::Auto => "auto",
+    }
+}
+
+fn available_thinking_levels_for_model(model: &Model) -> Vec<ThinkingLevel> {
+    if !model.reasoning {
+        return vec![ThinkingLevel::Off];
+    }
+
+    if supports_xhigh(model) {
+        vec![
+            ThinkingLevel::Off,
+            ThinkingLevel::Minimal,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::XHigh,
+        ]
+    } else {
+        vec![
+            ThinkingLevel::Off,
+            ThinkingLevel::Minimal,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+        ]
+    }
 }
 
 fn persist_enabled_models_setting(
@@ -2952,6 +3221,14 @@ fn set_nested_bool(
     value: bool,
 ) {
     ensure_json_object(config, parent_key).insert(child_key.to_owned(), Value::Bool(value));
+}
+
+fn set_bool(config: &mut serde_json::Map<String, Value>, key: &str, value: bool) {
+    config.insert(key.to_owned(), Value::Bool(value));
+}
+
+fn set_string(config: &mut serde_json::Map<String, Value>, key: &str, value: impl Into<String>) {
+    config.insert(key.to_owned(), Value::String(value.into()));
 }
 
 fn set_usize(config: &mut serde_json::Map<String, Value>, key: &str, value: usize) {
@@ -3049,6 +3326,7 @@ enum SettingsPickerOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum SettingsPickerItem {
     AutoCompact,
     AutoResizeImages,
@@ -3057,6 +3335,7 @@ enum SettingsPickerItem {
     AutocompleteMaxVisible,
 }
 
+#[allow(dead_code)]
 struct SettingsPickerComponent {
     keybindings: KeybindingsManager,
     selection: SettingsPickerSelection,
@@ -3065,6 +3344,7 @@ struct SettingsPickerComponent {
     viewport_size: Cell<Option<(usize, usize)>>,
 }
 
+#[allow(dead_code)]
 impl SettingsPickerComponent {
     const ITEMS: [SettingsPickerItem; 5] = [
         SettingsPickerItem::AutoCompact,
@@ -3306,21 +3586,109 @@ async fn select_settings(
     tui: &mut Tui<LiveInteractiveTerminal>,
     keybindings: &KeybindingsManager,
     runtime_settings: &LoadedRuntimeSettings,
+    current_model: &Model,
+    thinking_level: ThinkingLevel,
     _can_persist: bool,
 ) -> Result<SettingsPickerSelection, String> {
+    let selection = Arc::new(Mutex::new(settings_selection_from_loaded(
+        runtime_settings,
+        thinking_level,
+    )));
     let outcome = Arc::new(Mutex::new(None::<SettingsPickerOutcome>));
-    let mut picker = SettingsPickerComponent::new(
+    let mut picker = SettingsSelectorComponent::new(
         keybindings,
-        settings_selection_from_loaded(runtime_settings),
+        SettingsConfig {
+            supports_images: get_capabilities().images.is_some(),
+            auto_compact: runtime_settings.settings.compaction.enabled,
+            show_images: runtime_settings.settings.terminal.show_images,
+            auto_resize_images: runtime_settings.settings.images.auto_resize_images,
+            block_images: runtime_settings.settings.images.block_images,
+            enable_skill_commands: runtime_settings.settings.enable_skill_commands,
+            steering_mode: delivery_mode_from_runtime_setting(
+                &runtime_settings.settings.steering_mode,
+            ),
+            follow_up_mode: delivery_mode_from_runtime_setting(
+                &runtime_settings.settings.follow_up_mode,
+            ),
+            transport: runtime_settings.settings.transport,
+            thinking_level,
+            available_thinking_levels: available_thinking_levels_for_model(current_model),
+            current_theme: runtime_settings
+                .settings
+                .theme
+                .clone()
+                .unwrap_or_else(|| String::from("dark")),
+            available_themes: get_available_themes(),
+            hide_thinking_block: runtime_settings.settings.hide_thinking_block,
+            collapse_changelog: runtime_settings.settings.collapse_changelog,
+            double_escape_action: double_escape_action_from_runtime_setting(
+                &runtime_settings.settings.double_escape_action,
+            ),
+            tree_filter_mode: tree_filter_mode_from_runtime_setting(
+                &runtime_settings.settings.tree_filter_mode,
+            ),
+            show_hardware_cursor: runtime_settings.settings.show_hardware_cursor,
+            editor_padding_x: runtime_settings.settings.editor_padding_x,
+            autocomplete_max_visible: runtime_settings.settings.autocomplete_max_visible,
+            quiet_startup: runtime_settings.settings.quiet_startup,
+            clear_on_shrink: runtime_settings.settings.terminal.clear_on_shrink,
+        },
     );
 
-    let outcome_for_close = Arc::clone(&outcome);
-    picker.set_on_close(move |selection| {
-        *outcome_for_close
-            .lock()
-            .expect("settings picker outcome mutex poisoned") =
-            Some(SettingsPickerOutcome::Closed(selection));
+    {
+        let selection = Arc::clone(&selection);
+        picker.set_on_change(move |change| {
+            let mut selection = selection
+                .lock()
+                .expect("settings picker selection mutex poisoned");
+            match change {
+                SettingsChange::AutoCompact(value) => selection.auto_compact = value,
+                SettingsChange::ShowImages(value) => selection.show_images = value,
+                SettingsChange::AutoResizeImages(value) => selection.auto_resize_images = value,
+                SettingsChange::BlockImages(value) => selection.block_images = value,
+                SettingsChange::EnableSkillCommands(value) => {
+                    selection.enable_skill_commands = value
+                }
+                SettingsChange::SteeringMode(value) => selection.steering_mode = value,
+                SettingsChange::FollowUpMode(value) => selection.follow_up_mode = value,
+                SettingsChange::Transport(value) => selection.transport = value,
+                SettingsChange::ThinkingLevel(value) => selection.thinking_level = value,
+                SettingsChange::Theme(value) => {
+                    selection.current_theme = value.clone();
+                    let _ = set_theme(&value);
+                }
+                SettingsChange::HideThinkingBlock(value) => selection.hide_thinking_block = value,
+                SettingsChange::CollapseChangelog(value) => selection.collapse_changelog = value,
+                SettingsChange::DoubleEscapeAction(value) => selection.double_escape_action = value,
+                SettingsChange::TreeFilterMode(value) => selection.tree_filter_mode = value,
+                SettingsChange::ShowHardwareCursor(value) => selection.show_hardware_cursor = value,
+                SettingsChange::EditorPaddingX(value) => selection.editor_padding_x = value,
+                SettingsChange::AutocompleteMaxVisible(value) => {
+                    selection.autocomplete_max_visible = value
+                }
+                SettingsChange::QuietStartup(value) => selection.quiet_startup = value,
+                SettingsChange::ClearOnShrink(value) => selection.clear_on_shrink = value,
+            }
+        });
+    }
+    picker.set_on_theme_preview(|theme_name| {
+        let _ = set_theme(&theme_name);
     });
+    {
+        let outcome = Arc::clone(&outcome);
+        let selection = Arc::clone(&selection);
+        picker.set_on_cancel(move || {
+            *outcome
+                .lock()
+                .expect("settings picker outcome mutex poisoned") =
+                Some(SettingsPickerOutcome::Closed(
+                    selection
+                        .lock()
+                        .expect("settings picker selection mutex poisoned")
+                        .clone(),
+                ));
+        });
+    }
 
     let picker_id = tui.add_child(Box::new(picker));
     let _ = tui.set_focus_child(picker_id);
@@ -3342,6 +3710,7 @@ async fn select_settings(
     }
 }
 
+#[allow(dead_code)]
 fn on_off_label(enabled: bool) -> String {
     if enabled {
         String::from("on")
@@ -3350,6 +3719,7 @@ fn on_off_label(enabled: bool) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn cycle_usize_value(current: usize, values: &[usize], delta: isize) -> usize {
     let Some(index) = values.iter().position(|value| *value == current) else {
         return values.first().copied().unwrap_or(current);
@@ -8351,6 +8721,13 @@ fn is_advertised_hotkey(keybinding: &str) -> bool {
             | "app.tree.unfoldOrDown"
             | "app.tree.editLabel"
             | "app.tree.toggleLabelTimestamp"
+            | "app.tree.filterDefault"
+            | "app.tree.filterNoTools"
+            | "app.tree.filterUserOnly"
+            | "app.tree.filterLabeledOnly"
+            | "app.tree.filterAll"
+            | "app.tree.filterCycleForward"
+            | "app.tree.filterCycleBackward"
     )
 }
 
@@ -8452,6 +8829,7 @@ fn render_changelog_text() -> Result<String, String> {
     Ok(selected.join("\n\n").trim().to_owned())
 }
 
+#[allow(dead_code)]
 fn build_tree_picker_items(session_manager: &SessionManager) -> Vec<TreePickerItem> {
     let current_leaf = session_manager.get_leaf_id();
     let mut items = vec![TreePickerItem {
@@ -8472,6 +8850,7 @@ fn build_tree_picker_items(session_manager: &SessionManager) -> Vec<TreePickerIt
     items
 }
 
+#[allow(dead_code)]
 fn collect_tree_picker_items(
     items: &mut Vec<TreePickerItem>,
     node: &pi_coding_agent_core::SessionTreeNode,
@@ -8545,6 +8924,7 @@ fn collect_tree_picker_items(
     }
 }
 
+#[allow(dead_code)]
 fn describe_session_tree_entry(entry: &SessionEntry) -> Option<String> {
     let description = match entry {
         SessionEntry::Message { id, message, .. } => match message.as_standard_message() {
@@ -8600,6 +8980,7 @@ fn describe_session_tree_entry(entry: &SessionEntry) -> Option<String> {
     Some(description)
 }
 
+#[allow(dead_code)]
 fn truncate_text_for_tree(text: &str, max: usize) -> String {
     let sanitized = sanitize_display_text(text);
     if sanitized.chars().count() <= max {
@@ -8625,6 +9006,7 @@ fn extract_assistant_text(content: &[AssistantContent]) -> String {
         .to_owned()
 }
 
+#[allow(dead_code)]
 fn extract_custom_message_text(content: &CustomMessageContent) -> String {
     match content {
         CustomMessageContent::Text(text) => text.trim().to_owned(),
@@ -13424,7 +13806,7 @@ mod tests {
                 timestamp: 1,
             })
             .unwrap();
-        let assistant_root_id = manager
+        let _assistant_root_id = manager
             .append_message(Message::Assistant {
                 content: vec![AssistantContent::Text {
                     text: String::from("assistant root"),
@@ -13485,8 +13867,8 @@ mod tests {
         .expect("expected tree transition plan");
 
         let manager = plan.manager.expect("expected session manager");
-        assert_eq!(manager.get_leaf_id(), Some(assistant_root_id.as_str()));
-        assert_eq!(plan.prefill_input.as_deref(), Some("primary branch"));
+        assert_eq!(manager.get_leaf_id(), None);
+        assert_eq!(plan.prefill_input.as_deref(), Some("root"));
         assert_eq!(
             plan.initial_status_message.as_deref(),
             Some("Navigated to selected point")

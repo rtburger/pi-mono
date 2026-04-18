@@ -140,6 +140,34 @@ pub static DEFAULT_APP_KEYBINDINGS: LazyLock<Vec<(String, KeybindingDefinition)>
                 definition(&["shift+t"], "Toggle tree label timestamps"),
             ),
             (
+                "app.tree.filterDefault".to_owned(),
+                definition(&["ctrl+d"], "Switch tree filter to default"),
+            ),
+            (
+                "app.tree.filterNoTools".to_owned(),
+                definition(&["ctrl+t"], "Toggle tree no-tools filter"),
+            ),
+            (
+                "app.tree.filterUserOnly".to_owned(),
+                definition(&["ctrl+u"], "Toggle tree user-only filter"),
+            ),
+            (
+                "app.tree.filterLabeledOnly".to_owned(),
+                definition(&["ctrl+l"], "Toggle tree labeled-only filter"),
+            ),
+            (
+                "app.tree.filterAll".to_owned(),
+                definition(&["ctrl+a"], "Toggle tree all filter"),
+            ),
+            (
+                "app.tree.filterCycleForward".to_owned(),
+                definition(&["ctrl+o"], "Cycle tree filter forward"),
+            ),
+            (
+                "app.tree.filterCycleBackward".to_owned(),
+                definition(&["shift+ctrl+o"], "Cycle tree filter backward"),
+            ),
+            (
                 "app.session.togglePath".to_owned(),
                 definition(&["ctrl+p"], "Toggle session path display"),
             ),

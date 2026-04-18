@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use pi_coding_agent_tui::{KeybindingsManager, ThemedKeyHintStyler, key_hint};
 use pi_tui::{Component, Input, fuzzy_filter, matches_key, truncate_to_width};
 use std::{borrow::Cow, cell::Cell, ops::Deref};

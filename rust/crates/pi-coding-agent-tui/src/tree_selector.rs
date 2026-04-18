@@ -1,6 +1,6 @@
 use crate::selector_common::{
-    CancelCallback, SelectCallback, matches_binding, max_visible, render_hint_line,
-    sanitize_display_text, visible_window,
+    ActionCallback, CancelCallback, SelectCallback, cycle_index, matches_binding, max_visible,
+    render_hint_line, sanitize_display_text, visible_window,
 };
 use crate::{KeybindingsManager, current_theme};
 use pi_agent::AgentMessage;
@@ -27,9 +27,15 @@ pub enum TreeFilterMode {
 struct FlatTreeNode {
     entry: SessionEntry,
     label: Option<String>,
+    label_timestamp: Option<String>,
     ancestor_continues: Vec<bool>,
     is_last: bool,
     search_text: String,
+}
+
+struct LabelEditState {
+    entry_id: String,
+    input: Input,
 }
 
 pub struct TreeSelectorComponent {
@@ -43,6 +49,9 @@ pub struct TreeSelectorComponent {
     active_path_ids: BTreeSet<String>,
     on_select: Option<SelectCallback<String>>,
     on_cancel: Option<CancelCallback>,
+    on_label_change: Option<ActionCallback<(String, Option<String>)>>,
+    label_edit: Option<LabelEditState>,
+    show_label_timestamps: bool,
     viewport_size: Cell<Option<(usize, usize)>>,
 }
 
@@ -55,7 +64,7 @@ impl TreeSelectorComponent {
         initial_filter_mode: TreeFilterMode,
     ) -> Self {
         let mut flat_nodes = Vec::new();
-        flatten_tree(&tree, &mut flat_nodes, &[]);
+        flatten_tree(&tree, current_leaf_id.as_deref(), &mut flat_nodes, &[]);
         let active_path_ids = build_active_path_ids(&flat_nodes, current_leaf_id.as_deref());
 
         let mut selector = Self {
@@ -69,9 +78,13 @@ impl TreeSelectorComponent {
             active_path_ids,
             on_select: None,
             on_cancel: None,
+            on_label_change: None,
+            label_edit: None,
+            show_label_timestamps: false,
             viewport_size: Cell::new(None),
         };
         selector.refresh();
+        let initial_selected_id = initial_selected_id.or_else(|| selector.current_leaf_id.clone());
         if let Some(initial_selected_id) = initial_selected_id {
             if let Some(index) = selector
                 .filtered_nodes
@@ -96,6 +109,13 @@ impl TreeSelectorComponent {
         F: FnMut() + Send + 'static,
     {
         self.on_cancel = Some(Box::new(on_cancel));
+    }
+
+    pub fn set_on_label_change<F>(&mut self, on_label_change: F)
+    where
+        F: FnMut((String, Option<String>)) + Send + 'static,
+    {
+        self.on_label_change = Some(Box::new(on_label_change));
     }
 
     pub fn set_filter_mode(&mut self, filter_mode: TreeFilterMode) {
@@ -146,14 +166,18 @@ impl TreeSelectorComponent {
             .min(self.filtered_nodes.len().saturating_sub(1));
     }
 
-    fn status_suffix(&self) -> &'static str {
-        match self.filter_mode {
-            TreeFilterMode::Default => "[default]",
-            TreeFilterMode::NoTools => "[no-tools]",
-            TreeFilterMode::UserOnly => "[user]",
-            TreeFilterMode::LabeledOnly => "[labeled]",
-            TreeFilterMode::All => "[all]",
+    fn status_suffix(&self) -> String {
+        let mut suffix = match self.filter_mode {
+            TreeFilterMode::Default => String::from("[default]"),
+            TreeFilterMode::NoTools => String::from("[no-tools]"),
+            TreeFilterMode::UserOnly => String::from("[user]"),
+            TreeFilterMode::LabeledOnly => String::from("[labeled]"),
+            TreeFilterMode::All => String::from("[all]"),
+        };
+        if self.show_label_timestamps {
+            suffix.push_str(" [+label time]");
         }
+        suffix
     }
 
     fn render_tree_lines(&self, width: usize) -> Vec<String> {
@@ -163,7 +187,15 @@ impl TreeSelectorComponent {
             } else {
                 "No matching entries"
             };
-            return vec![truncate_to_width(message, width, "...", false)];
+            return vec![
+                truncate_to_width(message, width, "...", false),
+                truncate_to_width(
+                    &format!("  (0/0) {}", self.status_suffix()),
+                    width,
+                    "...",
+                    false,
+                ),
+            ];
         }
 
         let theme = current_theme();
@@ -203,11 +235,22 @@ impl TreeSelectorComponent {
                 .as_deref()
                 .map(|label| format!("{} ", theme.fg("warning", format!("[{label}]"))))
                 .unwrap_or_default();
+            let label_timestamp = if self.show_label_timestamps {
+                node.label_timestamp
+                    .as_deref()
+                    .map(|timestamp| {
+                        format!("{} ", theme.fg("muted", format_label_timestamp(timestamp)))
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
             let content = format!(
-                "{}{}{}{}",
+                "{}{}{}{}{}",
                 theme.fg("dim", prefix),
                 path_marker,
                 label,
+                label_timestamp,
                 entry_display_text(&node.entry),
             );
             let mut line = format!("{cursor}{content}{current_marker}");
@@ -230,6 +273,101 @@ impl TreeSelectorComponent {
         ));
         lines
     }
+
+    fn render_label_editor(&self, width: usize) -> Vec<String> {
+        let Some(label_edit) = self.label_edit.as_ref() else {
+            return Vec::new();
+        };
+
+        let mut lines = Vec::new();
+        lines.push(truncate_to_width(
+            "Label (empty to remove)",
+            width,
+            "...",
+            false,
+        ));
+        lines.extend(label_edit.input.render(width));
+        lines.push(render_hint_line(
+            &self.keybindings,
+            width,
+            &[
+                ("tui.select.confirm", "save"),
+                ("tui.select.cancel", "cancel"),
+            ],
+        ));
+        lines
+    }
+
+    fn toggle_filter(&mut self, target: TreeFilterMode) {
+        self.filter_mode = if self.filter_mode == target {
+            TreeFilterMode::Default
+        } else {
+            target
+        };
+        self.refresh();
+    }
+
+    fn cycle_filter(&mut self, forward: bool) {
+        const MODES: [TreeFilterMode; 5] = [
+            TreeFilterMode::Default,
+            TreeFilterMode::NoTools,
+            TreeFilterMode::UserOnly,
+            TreeFilterMode::LabeledOnly,
+            TreeFilterMode::All,
+        ];
+        let current_index = MODES
+            .iter()
+            .position(|mode| *mode == self.filter_mode)
+            .unwrap_or(0);
+        let next_index = if forward {
+            (current_index + 1) % MODES.len()
+        } else if current_index == 0 {
+            MODES.len() - 1
+        } else {
+            current_index - 1
+        };
+        self.filter_mode = MODES[next_index];
+        self.refresh();
+    }
+
+    fn open_label_editor(&mut self) {
+        let Some(node) = self.filtered_nodes.get(self.selected_index) else {
+            return;
+        };
+        let mut input = Input::with_keybindings(self.keybindings.deref().clone());
+        if let Some(label) = node.label.as_deref() {
+            input.set_value(label);
+        }
+        self.label_edit = Some(LabelEditState {
+            entry_id: node.entry.id().to_owned(),
+            input,
+        });
+    }
+
+    fn close_label_editor(&mut self) {
+        self.label_edit = None;
+    }
+
+    fn apply_label_change(&mut self, entry_id: &str, label: Option<String>) {
+        for node in &mut self.flat_nodes {
+            if node.entry.id() == entry_id {
+                node.label = label.clone();
+                if label.is_none() {
+                    node.label_timestamp = None;
+                }
+                node.search_text = searchable_text(
+                    &node.entry,
+                    node.label.as_deref(),
+                    node.label_timestamp.as_deref(),
+                );
+                break;
+            }
+        }
+        self.refresh();
+        if let Some(on_label_change) = &mut self.on_label_change {
+            on_label_change((entry_id.to_owned(), label));
+        }
+    }
 }
 
 impl Component for TreeSelectorComponent {
@@ -241,26 +379,61 @@ impl Component for TreeSelectorComponent {
         let mut lines = Vec::new();
         lines.push("─".repeat(width));
         lines.push(truncate_to_width("Session tree", width, "...", false));
-        lines.extend(self.search_input.render(width));
-        lines.extend(self.render_tree_lines(width));
-        lines.push(render_hint_line(
-            &self.keybindings,
-            width,
-            &[
-                ("tui.select.confirm", "select"),
-                ("tui.select.cancel", "cancel"),
-                ("tui.select.down", "navigate"),
-            ],
-        ));
+        if self.label_edit.is_some() {
+            lines.extend(self.render_label_editor(width));
+        } else {
+            lines.extend(self.search_input.render(width));
+            lines.extend(self.render_tree_lines(width));
+            lines.push(render_hint_line(
+                &self.keybindings,
+                width,
+                &[
+                    ("tui.select.confirm", "select"),
+                    ("tui.select.cancel", "cancel"),
+                    ("tui.select.down", "navigate"),
+                ],
+            ));
+        }
         lines.push("─".repeat(width));
         lines
     }
 
     fn invalidate(&mut self) {
         self.search_input.invalidate();
+        if let Some(label_edit) = &mut self.label_edit {
+            label_edit.input.invalidate();
+        }
     }
 
     fn handle_input(&mut self, data: &str) {
+        if self.label_edit.is_some() {
+            if matches_binding(&self.keybindings, data, "tui.select.cancel") {
+                self.close_label_editor();
+                return;
+            }
+
+            if matches_binding(&self.keybindings, data, "tui.select.confirm") {
+                let (entry_id, value) = {
+                    let label_edit = self
+                        .label_edit
+                        .as_ref()
+                        .expect("label editor should be present");
+                    (
+                        label_edit.entry_id.clone(),
+                        label_edit.input.get_value().trim().to_owned(),
+                    )
+                };
+                self.close_label_editor();
+                self.apply_label_change(&entry_id, (!value.is_empty()).then_some(value));
+                return;
+            }
+
+            if let Some(label_edit) = &mut self.label_edit {
+                label_edit.input.handle_input(data);
+            }
+            return;
+        }
+
         if matches_binding(&self.keybindings, data, "tui.select.cancel") {
             if self.search_input.get_value().is_empty() {
                 if let Some(on_cancel) = &mut self.on_cancel {
@@ -273,20 +446,60 @@ impl Component for TreeSelectorComponent {
             return;
         }
 
+        if matches_binding(&self.keybindings, data, "app.tree.filterDefault") {
+            self.filter_mode = TreeFilterMode::Default;
+            self.refresh();
+            return;
+        }
+
+        if matches_binding(&self.keybindings, data, "app.tree.filterNoTools") {
+            self.toggle_filter(TreeFilterMode::NoTools);
+            return;
+        }
+
+        if matches_binding(&self.keybindings, data, "app.tree.filterUserOnly") {
+            self.toggle_filter(TreeFilterMode::UserOnly);
+            return;
+        }
+
+        if matches_binding(&self.keybindings, data, "app.tree.filterLabeledOnly") {
+            self.toggle_filter(TreeFilterMode::LabeledOnly);
+            return;
+        }
+
+        if matches_binding(&self.keybindings, data, "app.tree.filterAll") {
+            self.toggle_filter(TreeFilterMode::All);
+            return;
+        }
+
+        if matches_binding(&self.keybindings, data, "app.tree.filterCycleForward") {
+            self.cycle_filter(true);
+            return;
+        }
+
+        if matches_binding(&self.keybindings, data, "app.tree.filterCycleBackward") {
+            self.cycle_filter(false);
+            return;
+        }
+
+        if matches_binding(&self.keybindings, data, "app.tree.editLabel") {
+            self.open_label_editor();
+            return;
+        }
+
+        if matches_binding(&self.keybindings, data, "app.tree.toggleLabelTimestamp") {
+            self.show_label_timestamps = !self.show_label_timestamps;
+            return;
+        }
+
         if matches_binding(&self.keybindings, data, "tui.select.up") {
-            if self.filtered_nodes.is_empty() {
-                return;
-            }
-            self.selected_index = self.selected_index.saturating_sub(1);
+            self.selected_index =
+                cycle_index(self.selected_index, self.filtered_nodes.len(), false);
             return;
         }
 
         if matches_binding(&self.keybindings, data, "tui.select.down") {
-            if self.filtered_nodes.is_empty() {
-                return;
-            }
-            self.selected_index =
-                (self.selected_index + 1).min(self.filtered_nodes.len().saturating_sub(1));
+            self.selected_index = cycle_index(self.selected_index, self.filtered_nodes.len(), true);
             return;
         }
 
@@ -317,29 +530,59 @@ impl Component for TreeSelectorComponent {
     }
 
     fn set_focused(&mut self, focused: bool) {
-        self.search_input.set_focused(focused);
+        if let Some(label_edit) = &mut self.label_edit {
+            label_edit.input.set_focused(focused);
+        } else {
+            self.search_input.set_focused(focused);
+        }
     }
 
     fn set_viewport_size(&self, width: usize, height: usize) {
         self.viewport_size.set(Some((width, height)));
+        self.search_input.set_viewport_size(width, 1);
     }
 }
 
-fn flatten_tree(nodes: &[SessionTreeNode], target: &mut Vec<FlatTreeNode>, ancestors: &[bool]) {
-    for (index, node) in nodes.iter().enumerate() {
-        let is_last = index + 1 == nodes.len();
+fn flatten_tree(
+    nodes: &[SessionTreeNode],
+    current_leaf_id: Option<&str>,
+    target: &mut Vec<FlatTreeNode>,
+    ancestors: &[bool],
+) {
+    let mut ordered = nodes.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|node| !subtree_contains_leaf(node, current_leaf_id));
+
+    for (index, node) in ordered.iter().enumerate() {
+        let is_last = index + 1 == ordered.len();
         target.push(FlatTreeNode {
             entry: node.entry.clone(),
             label: node.label.clone(),
+            label_timestamp: node.label_timestamp.clone(),
             ancestor_continues: ancestors.to_vec(),
             is_last,
-            search_text: searchable_text(node),
+            search_text: searchable_text(
+                &node.entry,
+                node.label.as_deref(),
+                node.label_timestamp.as_deref(),
+            ),
         });
 
         let mut child_ancestors = ancestors.to_vec();
         child_ancestors.push(!is_last);
-        flatten_tree(&node.children, target, &child_ancestors);
+        flatten_tree(&node.children, current_leaf_id, target, &child_ancestors);
     }
+}
+
+fn subtree_contains_leaf(node: &SessionTreeNode, current_leaf_id: Option<&str>) -> bool {
+    let Some(current_leaf_id) = current_leaf_id else {
+        return false;
+    };
+    if node.entry.id() == current_leaf_id {
+        return true;
+    }
+    node.children
+        .iter()
+        .any(|child| subtree_contains_leaf(child, Some(current_leaf_id)))
 }
 
 fn build_active_path_ids(
@@ -363,15 +606,19 @@ fn build_active_path_ids(
     active
 }
 
-fn searchable_text(node: &SessionTreeNode) -> String {
+fn searchable_text(
+    entry: &SessionEntry,
+    label: Option<&str>,
+    label_timestamp: Option<&str>,
+) -> String {
     let mut parts = Vec::new();
-    if let Some(label) = node.label.as_deref() {
+    if let Some(label) = label {
         parts.push(label.to_owned());
     }
-    if let Some(timestamp) = node.label_timestamp.as_deref() {
-        parts.push(timestamp.to_owned());
+    if let Some(label_timestamp) = label_timestamp {
+        parts.push(label_timestamp.to_owned());
     }
-    parts.push(entry_plain_text(&node.entry));
+    parts.push(entry_plain_text(entry));
     parts.join(" ")
 }
 
@@ -536,4 +783,22 @@ fn tree_prefix(node: &FlatTreeNode) -> String {
     }
     prefix.push_str(if node.is_last { "└─ " } else { "├─ " });
     prefix
+}
+
+fn format_label_timestamp(timestamp: &str) -> String {
+    let Ok(parsed) = chrono_like_parse(timestamp) else {
+        return sanitize_display_text(timestamp);
+    };
+    parsed
+}
+
+fn chrono_like_parse(timestamp: &str) -> Result<String, ()> {
+    let timestamp = timestamp.trim();
+    if timestamp.len() >= 16 {
+        let time = &timestamp[11..16.min(timestamp.len())];
+        if timestamp.len() >= 10 {
+            return Ok(format!("{}", time));
+        }
+    }
+    Err(())
 }

@@ -20,18 +20,33 @@ use std::{
 const KEY_DOWN: &str = "\x1b[B";
 const KEY_ENTER: &str = "\n";
 const KEY_ESCAPE: &str = "\x1b";
+const KEY_UP: &str = "\x1b[A";
 const CTRL_D: &str = "\x04";
 const CTRL_S: &str = "\x13";
+const CTRL_T: &str = "\x14";
 
 fn selector_test_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("selector test lock poisoned")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn keybindings() -> KeybindingsManager {
     KeybindingsManager::new(BTreeMap::new(), None)
+}
+
+fn keybindings_with(overrides: &[(&str, &[&str])]) -> KeybindingsManager {
+    let config = overrides
+        .iter()
+        .map(|(binding, keys)| {
+            (
+                (*binding).to_owned(),
+                keys.iter().map(|key| (*key).into()).collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    KeybindingsManager::new(config, None)
 }
 
 fn init_default_theme() {
@@ -363,6 +378,135 @@ fn tree_selector_filters_and_selects_entry() {
     selector.handle_input(KEY_ENTER);
 
     assert_eq!(*selected.lock().unwrap(), Some(String::from("tool-1")));
+}
+
+#[test]
+fn tree_selector_prioritizes_active_branch_and_supports_filter_shortcuts() {
+    let _guard = selector_test_guard();
+    init_default_theme();
+    let keybindings = keybindings();
+    let selected = Arc::new(Mutex::new(None::<String>));
+    let mut selector = TreeSelectorComponent::new(
+        &keybindings,
+        vec![SessionTreeNode {
+            entry: user_entry("root-user", None, "root"),
+            children: vec![SessionTreeNode {
+                entry: SessionEntry::Message {
+                    id: String::from("root-assistant"),
+                    parent_id: Some(String::from("root-user")),
+                    timestamp: String::from("2024-01-01T00:00:01Z"),
+                    message: AgentMessage::from(Message::Assistant {
+                        content: Vec::new(),
+                        api: String::from("faux:test"),
+                        provider: String::from("faux"),
+                        model: String::from("model"),
+                        response_id: None,
+                        usage: Default::default(),
+                        stop_reason: pi_events::StopReason::ToolUse,
+                        error_message: None,
+                        timestamp: 2,
+                    }),
+                },
+                children: vec![
+                    SessionTreeNode {
+                        entry: user_entry("primary", Some("root-assistant"), "primary branch"),
+                        children: Vec::new(),
+                        label: None,
+                        label_timestamp: None,
+                    },
+                    SessionTreeNode {
+                        entry: user_entry("active", Some("root-assistant"), "active branch"),
+                        children: Vec::new(),
+                        label: None,
+                        label_timestamp: None,
+                    },
+                ],
+                label: None,
+                label_timestamp: None,
+            }],
+            label: None,
+            label_timestamp: None,
+        }],
+        Some(String::from("active")),
+        None,
+        TreeFilterMode::All,
+    );
+    {
+        let selected = Arc::clone(&selected);
+        selector.set_on_select(move |entry_id| *selected.lock().unwrap() = Some(entry_id));
+    }
+
+    selector.handle_input(KEY_UP);
+    selector.handle_input(KEY_ENTER);
+
+    assert_eq!(
+        *selected.lock().unwrap(),
+        Some(String::from("root-assistant"))
+    );
+
+    let mut selector = TreeSelectorComponent::new(
+        &keybindings,
+        vec![SessionTreeNode {
+            entry: user_entry("user-1", None, "check logs"),
+            children: vec![SessionTreeNode {
+                entry: tool_entry("tool-1", Some("user-1"), "read"),
+                children: Vec::new(),
+                label: None,
+                label_timestamp: None,
+            }],
+            label: None,
+            label_timestamp: None,
+        }],
+        Some(String::from("tool-1")),
+        None,
+        TreeFilterMode::All,
+    );
+
+    assert!(selector.render(80).join("\n").contains("tool read ok"));
+    selector.handle_input(CTRL_T);
+    assert!(!selector.render(80).join("\n").contains("tool read ok"));
+}
+
+#[test]
+fn tree_selector_edits_labels_with_configurable_keybinding() {
+    let _guard = selector_test_guard();
+    init_default_theme();
+    let keybindings = keybindings_with(&[("app.tree.editLabel", &["ctrl+r"])]);
+    let changes = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+    let mut selector = TreeSelectorComponent::new(
+        &keybindings,
+        vec![SessionTreeNode {
+            entry: user_entry("user-1", None, "check logs"),
+            children: Vec::new(),
+            label: None,
+            label_timestamp: None,
+        }],
+        Some(String::from("user-1")),
+        None,
+        TreeFilterMode::All,
+    );
+    {
+        let changes = Arc::clone(&changes);
+        selector.set_on_label_change(move |change| changes.lock().unwrap().push(change));
+    }
+
+    selector.handle_input("\x12");
+    selector.handle_input("i");
+    selector.handle_input("m");
+    selector.handle_input("p");
+    selector.handle_input("o");
+    selector.handle_input("r");
+    selector.handle_input("t");
+    selector.handle_input("a");
+    selector.handle_input("n");
+    selector.handle_input("t");
+    selector.handle_input(KEY_ENTER);
+
+    assert_eq!(
+        changes.lock().unwrap().as_slice(),
+        &[(String::from("user-1"), Some(String::from("important")))]
+    );
+    assert!(selector.render(80).join("\n").contains("[important]"));
 }
 
 #[test]
