@@ -27,6 +27,7 @@ pub struct LoadedSystemPromptResources {
 pub struct BuildSystemPromptOptions {
     pub custom_prompt: Option<String>,
     pub selected_tools: Vec<String>,
+    pub selected_tools_explicit: bool,
     pub tool_snippets: BTreeMap<String, String>,
     pub prompt_guidelines: Vec<String>,
     pub append_system_prompt: Option<String>,
@@ -77,6 +78,7 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions) -> String {
     let BuildSystemPromptOptions {
         custom_prompt,
         selected_tools,
+        selected_tools_explicit,
         tool_snippets,
         prompt_guidelines,
         append_system_prompt,
@@ -96,7 +98,7 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions) -> String {
         .filter(|value| !value.is_empty())
         .map(|value| format!("\n\n{value}"))
         .unwrap_or_default();
-    let selected_tools = if selected_tools.is_empty() {
+    let selected_tools = if !selected_tools_explicit && selected_tools.is_empty() {
         DEFAULT_SELECTED_TOOLS
             .into_iter()
             .map(str::to_owned)

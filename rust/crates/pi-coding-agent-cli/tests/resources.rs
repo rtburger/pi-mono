@@ -10,9 +10,14 @@ use pi_events::{
 use std::{
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
+
+static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Default)]
 struct RecordedRequest {
@@ -64,7 +69,8 @@ fn unique_name(prefix: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("{prefix}-{unique}")
+    let counter = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{unique}-{counter}")
 }
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
@@ -178,6 +184,53 @@ async fn run_command_print_mode_expands_prompt_templates_and_applies_tool_select
         .collect::<Vec<_>>();
     assert_eq!(tool_names, vec!["read", "grep"]);
     assert_eq!(last_user_text(&context), "Review src/lib.rs carefully\n");
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
+async fn run_command_print_mode_preserves_explicit_no_tools_selection() {
+    let provider = unique_name("no-tools-provider");
+    let model_id = unique_name("no-tools-model");
+    let (api, recorded) = register_recording_provider("done");
+    let built_in_model = model(&api, &provider, &model_id);
+    let cwd = unique_temp_dir("resources-no-tools");
+
+    let result = run_command(RunCommandOptions {
+        args: vec![
+            String::from("-p"),
+            String::from("--provider"),
+            provider.clone(),
+            String::from("--model"),
+            model_id.clone(),
+            String::from("--no-tools"),
+            String::from("hello"),
+        ],
+        stdin_is_tty: true,
+        stdin_content: None,
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            provider.as_str(),
+            "token",
+        )])),
+        built_in_models: vec![built_in_model],
+        models_json_path: None,
+        agent_dir: Some(cwd.join("agent")),
+        cwd: cwd.clone(),
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+    let request = recorded.lock().unwrap().clone();
+    let context = request.context.expect("expected recorded context");
+    assert!(context.tools.is_empty(), "tools: {:?}", context.tools);
+    let system_prompt = context.system_prompt.expect("expected system prompt");
+    assert!(
+        system_prompt.contains("Available tools:\n(none)"),
+        "system prompt: {system_prompt}"
+    );
 
     unregister_provider(&api);
 }

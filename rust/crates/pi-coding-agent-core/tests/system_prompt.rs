@@ -120,6 +120,27 @@ fn build_system_prompt_renders_default_prompt_context_and_footer() {
 }
 
 #[test]
+fn build_system_prompt_preserves_explicit_no_tools_selection() {
+    let prompt = build_system_prompt(BuildSystemPromptOptions {
+        selected_tools: Vec::new(),
+        selected_tools_explicit: true,
+        tool_snippets: BTreeMap::from([(String::from("read"), String::from("Read file contents"))]),
+        cwd: Some(PathBuf::from("/work/tree")),
+        date: Some(String::from("2026-04-15")),
+        ..BuildSystemPromptOptions::default()
+    });
+
+    assert!(
+        prompt.contains("Available tools:\n(none)"),
+        "prompt: {prompt}"
+    );
+    assert!(
+        !prompt.contains("- read: Read file contents"),
+        "prompt: {prompt}"
+    );
+}
+
+#[test]
 fn build_default_pi_system_prompt_applies_cli_override_and_discovered_append() {
     let temp_dir = unique_temp_dir("default-wrapper");
     let agent_dir = temp_dir.join("agent");

@@ -13,7 +13,7 @@ use pi_coding_agent_core::{
 };
 use pi_coding_agent_tools::{
     create_bash_tool, create_edit_tool, create_find_tool, create_grep_tool, create_ls_tool,
-    create_read_tool, create_read_tool_with_auto_resize_flag, create_write_tool,
+    create_read_tool_with_auto_resize_flag, create_write_tool,
 };
 use pi_coding_agent_tui::{LoadThemesOptions, Theme, load_themes};
 use std::{
@@ -517,11 +517,10 @@ pub fn build_selected_tools(
     let tools = names
         .iter()
         .filter_map(|name| match name.as_str() {
-            "read" => Some(if auto_resize_images {
-                create_read_tool(cwd.to_path_buf())
-            } else {
-                create_read_tool_with_auto_resize_flag(cwd.to_path_buf(), read_auto_resize.clone())
-            }),
+            "read" => Some(create_read_tool_with_auto_resize_flag(
+                cwd.to_path_buf(),
+                read_auto_resize.clone(),
+            )),
             "bash" => Some(create_bash_tool(cwd.to_path_buf())),
             "edit" => Some(create_edit_tool(cwd.to_path_buf())),
             "write" => Some(create_write_tool(cwd.to_path_buf())),
@@ -573,6 +572,7 @@ pub fn build_runtime_system_prompt(
     build_system_prompt(BuildSystemPromptOptions {
         custom_prompt,
         selected_tools: selected_tools.to_vec(),
+        selected_tools_explicit: true,
         tool_snippets: tool_snippets(),
         append_system_prompt,
         cwd: Some(cwd.to_path_buf()),
