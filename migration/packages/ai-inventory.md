@@ -30,6 +30,16 @@ The Rust workspace now also owns the catalog maintenance path:
 - formatter/validator CLI: `rust/crates/pi-ai/src/bin/pi-ai-catalog.rs`
 - default catalog target: `rust/crates/pi-ai/src/models.catalog.json`
 - coverage tests: `rust/crates/pi-ai/tests/models.rs` and `rust/crates/pi-ai/tests/catalog_cli.rs`
+- manual sync policy: `migration/packages/model-catalog-sync.md`
+
+## Compatibility references
+
+Rust catalog maintenance may consult these TypeScript files for migrated providers:
+
+- `packages/ai/scripts/generate-models.ts`
+- `packages/ai/src/models.generated.ts`
+
+Those files are compatibility references only. Rust does not import them, execute them, or regenerate `rust/crates/pi-ai/src/models.catalog.json` from them.
 
 ## Ownership statement
 
