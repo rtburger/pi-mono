@@ -1982,9 +1982,7 @@ fn parse_chunk_usage(raw_usage: &OpenAiCompletionsRawUsage) -> Usage {
         output,
         cache_read: cache_read_tokens,
         cache_write: cache_write_tokens,
-        total_tokens: raw_usage
-            .total_tokens
-            .unwrap_or(input + output + cache_read_tokens + cache_write_tokens),
+        total_tokens: input + output + cache_read_tokens + cache_write_tokens,
         ..Usage::default()
     }
 }

@@ -16,6 +16,9 @@ use std::env;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const OPENAI_RESPONSES_ALLOWED_TOOL_CALL_PROVIDERS: &[&str] =
+    &["openai", "openai-codex", "opencode"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OpenAiResponsesServiceTier {
@@ -1759,7 +1762,7 @@ impl AiProvider for OpenAiResponsesProvider {
             let params = build_openai_responses_request_params(
                 &model,
                 &context,
-                &["openai", "openai-codex"],
+                OPENAI_RESPONSES_ALLOWED_TOOL_CALL_PROVIDERS,
                 OpenAiResponsesConvertOptions::default(),
                 OpenAiResponsesParamsOptions {
                     max_output_tokens: options.max_tokens,

@@ -34,7 +34,7 @@ use tokio_tungstenite::{
 };
 
 const OPENAI_CODEX_AUTH_CLAIM: &str = "https://api.openai.com/auth";
-const CODEX_ALLOWED_TOOL_CALL_PROVIDERS: &[&str] = &["openai", "openai-codex"];
+const CODEX_ALLOWED_TOOL_CALL_PROVIDERS: &[&str] = &["openai", "openai-codex", "opencode"];
 const DEFAULT_TEXT_VERBOSITY: &str = "medium";
 const IN_MEMORY_CACHE_RETENTION: &str = "in-memory";
 const OPENAI_BETA_RESPONSES_WEBSOCKETS: &str = "responses_websockets=2026-02-06";
