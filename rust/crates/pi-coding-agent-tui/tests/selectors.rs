@@ -482,3 +482,33 @@ fn login_dialog_submits_prompt_value() {
     assert_eq!(*submitted.lock().unwrap(), Some(String::from("abc")));
     assert!(dialog.render(80).join("\n").contains("Login to Anthropic"));
 }
+
+#[test]
+fn login_dialog_preserves_auth_url_when_prompting_for_manual_input() {
+    let _guard = selector_test_guard();
+    init_default_theme();
+    let keybindings = keybindings();
+    let mut dialog = LoginDialogComponent::new(&keybindings, "Anthropic");
+
+    dialog.show_auth(
+        "https://example.com/login",
+        Some("Complete login in your browser."),
+    );
+    dialog.show_manual_input("Paste redirect URL below, or complete login in browser:");
+    dialog.show_progress("Exchanging authorization code for tokens...");
+
+    let rendered = dialog.render(80).join("\n");
+    assert!(rendered.contains("https://example.com/login"), "output: {rendered}");
+    assert!(
+        rendered.contains("Complete login in your browser."),
+        "output: {rendered}"
+    );
+    assert!(
+        rendered.contains("Paste redirect URL below, or complete login in browser:"),
+        "output: {rendered}"
+    );
+    assert!(
+        rendered.contains("Exchanging authorization code for tokens..."),
+        "output: {rendered}"
+    );
+}

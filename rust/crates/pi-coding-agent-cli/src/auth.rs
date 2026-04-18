@@ -255,7 +255,7 @@ fn print_terminal_line(line: &str) {
     let _ = io::stdout().flush();
 }
 
-fn best_effort_open_browser(url: &str) -> io::Result<()> {
+pub(crate) fn best_effort_open_browser(url: &str) -> io::Result<()> {
     if cfg!(target_os = "macos") {
         let _ = std::process::Command::new("open").arg(url).spawn();
         return Ok(());

@@ -4,26 +4,19 @@ use pi_tui::{Component, Input, truncate_to_width};
 use std::{cell::Cell, ops::Deref};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum LoginDialogMode {
-    Idle,
-    Auth {
-        url: String,
-        instructions: Option<String>,
-    },
-    Prompt {
-        message: String,
-        placeholder: Option<String>,
-    },
-    Waiting {
-        message: String,
-    },
+struct LoginDialogPrompt {
+    message: String,
+    placeholder: Option<String>,
 }
 
 pub struct LoginDialogComponent {
     keybindings: KeybindingsManager,
     provider_name: String,
     input: Input,
-    mode: LoginDialogMode,
+    auth_url: Option<String>,
+    auth_instructions: Option<String>,
+    prompt: Option<LoginDialogPrompt>,
+    waiting_message: Option<String>,
     progress_lines: Vec<String>,
     on_submit: Option<SelectCallback<String>>,
     on_cancel: Option<CancelCallback>,
@@ -36,7 +29,10 @@ impl LoginDialogComponent {
             keybindings: keybindings.clone(),
             provider_name: provider_name.into(),
             input: Input::with_keybindings(keybindings.deref().clone()),
-            mode: LoginDialogMode::Idle,
+            auth_url: None,
+            auth_instructions: None,
+            prompt: None,
+            waiting_message: None,
             progress_lines: Vec::new(),
             on_submit: None,
             on_cancel: None,
@@ -59,18 +55,17 @@ impl LoginDialogComponent {
     }
 
     pub fn show_auth(&mut self, url: impl Into<String>, instructions: Option<&str>) {
-        self.mode = LoginDialogMode::Auth {
-            url: url.into(),
-            instructions: instructions.map(str::to_owned),
-        };
+        self.auth_url = Some(url.into());
+        self.auth_instructions = instructions.map(str::to_owned);
     }
 
     pub fn show_prompt(&mut self, message: impl Into<String>, placeholder: Option<&str>) {
         self.input.clear();
-        self.mode = LoginDialogMode::Prompt {
+        self.waiting_message = None;
+        self.prompt = Some(LoginDialogPrompt {
             message: message.into(),
             placeholder: placeholder.map(str::to_owned),
-        };
+        });
     }
 
     pub fn show_manual_input(&mut self, prompt: impl Into<String>) {
@@ -78,9 +73,8 @@ impl LoginDialogComponent {
     }
 
     pub fn show_waiting(&mut self, message: impl Into<String>) {
-        self.mode = LoginDialogMode::Waiting {
-            message: message.into(),
-        };
+        self.prompt = None;
+        self.waiting_message = Some(message.into());
     }
 
     pub fn show_progress(&mut self, message: impl Into<String>) {
@@ -90,43 +84,52 @@ impl LoginDialogComponent {
     fn render_body(&self, width: usize) -> Vec<String> {
         let mut lines = Vec::new();
 
-        match &self.mode {
-            LoginDialogMode::Idle => {
+        if self.auth_url.is_none()
+            && self.prompt.is_none()
+            && self.waiting_message.is_none()
+            && self.progress_lines.is_empty()
+        {
+            lines.push(truncate_to_width(
+                "Waiting for OAuth instructions",
+                width,
+                "...",
+                false,
+            ));
+            return lines;
+        }
+
+        if let Some(url) = &self.auth_url {
+            lines.push(truncate_to_width(url, width, "...", false));
+        }
+        if let Some(instructions) = &self.auth_instructions {
+            lines.push(truncate_to_width(instructions, width, "...", false));
+        }
+
+        if let Some(prompt) = &self.prompt {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push(truncate_to_width(&prompt.message, width, "...", false));
+            if let Some(placeholder) = &prompt.placeholder {
                 lines.push(truncate_to_width(
-                    "Waiting for OAuth instructions",
+                    &format!("e.g. {placeholder}"),
                     width,
                     "...",
                     false,
                 ));
             }
-            LoginDialogMode::Auth { url, instructions } => {
-                lines.push(truncate_to_width(url, width, "...", false));
-                if let Some(instructions) = instructions {
-                    lines.push(truncate_to_width(instructions, width, "...", false));
-                }
+            lines.extend(self.input.render(width));
+        } else if let Some(message) = &self.waiting_message {
+            if !lines.is_empty() {
+                lines.push(String::new());
             }
-            LoginDialogMode::Prompt {
-                message,
-                placeholder,
-            } => {
-                lines.push(truncate_to_width(message, width, "...", false));
-                if let Some(placeholder) = placeholder {
-                    lines.push(truncate_to_width(
-                        &format!("e.g. {placeholder}"),
-                        width,
-                        "...",
-                        false,
-                    ));
-                }
-                lines.extend(self.input.render(width));
-            }
-            LoginDialogMode::Waiting { message } => {
-                lines.push(truncate_to_width(message, width, "...", false));
-            }
+            lines.push(truncate_to_width(message, width, "...", false));
         }
 
         if !self.progress_lines.is_empty() {
-            lines.push(String::new());
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
             for progress_line in &self.progress_lines {
                 lines.push(truncate_to_width(progress_line, width, "...", false));
             }
@@ -175,16 +178,14 @@ impl Component for LoginDialogComponent {
             return;
         }
 
-        if matches!(self.mode, LoginDialogMode::Prompt { .. })
-            && matches_binding(&self.keybindings, data, "tui.select.confirm")
-        {
+        if self.prompt.is_some() && matches_binding(&self.keybindings, data, "tui.select.confirm") {
             if let Some(on_submit) = &mut self.on_submit {
                 on_submit(self.input.get_value().to_owned());
             }
             return;
         }
 
-        if matches!(self.mode, LoginDialogMode::Prompt { .. }) {
+        if self.prompt.is_some() {
             self.input.handle_input(data);
         }
     }

@@ -7,8 +7,9 @@ use crate::{
     AppMode, Args, Diagnostic, DiagnosticKind, ListModels, OverlayAuthSource, PrintModeOptions,
     ProcessFileOptions,
     auth::{
-        OAuthProviderSummary, list_persisted_oauth_providers, oauth_provider_name,
-        oauth_provider_summaries, remove_persisted_oauth_provider, run_terminal_oauth_login,
+        OAuthProviderSummary, best_effort_open_browser, list_persisted_oauth_providers,
+        oauth_provider_name, oauth_provider_summaries, persist_oauth_credentials,
+        remove_persisted_oauth_provider,
     },
     build_initial_message,
     list_models::render_list_models,
@@ -25,8 +26,8 @@ use crate::{
 };
 use pi_agent::{AgentUnsubscribe, BeforeToolCallResult, ThinkingLevel};
 use pi_ai::{
-    StreamOptions, ThinkingBudgets, Transport, is_context_overflow, models_are_equal,
-    supports_xhigh,
+    OAuthLoginCallbacks, StreamOptions, ThinkingBudgets, Transport, get_oauth_provider,
+    is_context_overflow, models_are_equal, supports_xhigh,
 };
 #[cfg(test)]
 use pi_coding_agent_core::create_coding_agent_core;
@@ -46,8 +47,8 @@ use pi_coding_agent_tui::PlainKeyHintStyler;
 use pi_coding_agent_tui::{
     CustomMessageComponent, DEFAULT_APP_KEYBINDINGS, ExternalEditorCommandRunner,
     ExternalEditorHost, FooterStateHandle, InteractiveCoreBinding, KeybindingsManager,
-    StartupShellComponent, StatusHandle, SystemClipboardImageSource, ThemedKeyHintStyler,
-    init_theme, key_hint, key_text, set_registered_themes,
+    LoginDialogComponent, StartupShellComponent, StatusHandle, SystemClipboardImageSource,
+    ThemedKeyHintStyler, init_theme, key_hint, key_text, set_registered_themes,
 };
 use pi_config::{LoadedRuntimeSettings, ThinkingBudgetsSettings, load_runtime_settings};
 use pi_events::{AssistantContent, Message, Model, UserContent};
@@ -59,7 +60,7 @@ use pi_tui::{
 use std::{
     borrow::Cow,
     cell::Cell,
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     env, fs,
     ops::Deref,
     path::{Path, PathBuf},
@@ -70,7 +71,11 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{process::Command as TokioCommand, sync::watch, time::sleep};
+use tokio::{
+    process::Command as TokioCommand,
+    sync::{oneshot, watch},
+    time::sleep,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rpc_extensions::{
@@ -150,6 +155,7 @@ enum InteractiveTransitionRequest {
     TreePicker,
     SettingsPicker,
     OAuthPicker(OAuthPickerMode),
+    OAuthLogin { provider_id: String },
     ScopedModelsPicker { initial_search: Option<String> },
     Reload,
 }
@@ -177,7 +183,6 @@ struct InteractiveSlashCommandContext {
     runtime_settings: Arc<Mutex<LoadedRuntimeSettings>>,
     cwd: PathBuf,
     agent_dir: Option<PathBuf>,
-    ui_host: Arc<dyn ExternalEditorHost>,
     auth_operation_in_progress: Arc<AtomicBool>,
 }
 
@@ -799,6 +804,315 @@ async fn select_oauth_provider(
 }
 
 #[derive(Clone)]
+struct SharedLoginDialog {
+    inner: Arc<Mutex<LoginDialogComponent>>,
+}
+
+impl SharedLoginDialog {
+    fn new(component: LoginDialogComponent) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(component)),
+        }
+    }
+
+    fn with_mut<T>(&self, callback: impl FnOnce(&mut LoginDialogComponent) -> T) -> T {
+        let mut guard = self
+            .inner
+            .lock()
+            .expect("shared oauth login dialog mutex poisoned");
+        callback(&mut guard)
+    }
+}
+
+impl Component for SharedLoginDialog {
+    fn render(&self, width: usize) -> Vec<String> {
+        self.inner
+            .lock()
+            .expect("shared oauth login dialog mutex poisoned")
+            .render(width)
+    }
+
+    fn invalidate(&mut self) {
+        self.inner
+            .lock()
+            .expect("shared oauth login dialog mutex poisoned")
+            .invalidate();
+    }
+
+    fn handle_input(&mut self, data: &str) {
+        self.inner
+            .lock()
+            .expect("shared oauth login dialog mutex poisoned")
+            .handle_input(data);
+    }
+
+    fn set_focused(&mut self, focused: bool) {
+        self.inner
+            .lock()
+            .expect("shared oauth login dialog mutex poisoned")
+            .set_focused(focused);
+    }
+
+    fn set_viewport_size(&self, width: usize, height: usize) {
+        self.inner
+            .lock()
+            .expect("shared oauth login dialog mutex poisoned")
+            .set_viewport_size(width, height);
+    }
+}
+
+enum OAuthLoginDialogEvent {
+    ShowAuth {
+        url: String,
+        instructions: Option<String>,
+    },
+    ShowPrompt {
+        message: String,
+        placeholder: Option<String>,
+        responder: oneshot::Sender<Result<String, String>>,
+    },
+    ShowProgress(String),
+    Complete(Result<Option<String>, String>),
+}
+
+fn push_oauth_login_dialog_event(
+    events: &Arc<Mutex<VecDeque<OAuthLoginDialogEvent>>>,
+    render_handle: &RenderHandle,
+    event: OAuthLoginDialogEvent,
+) {
+    events
+        .lock()
+        .expect("oauth login dialog event queue mutex poisoned")
+        .push_back(event);
+    render_handle.request_render();
+}
+
+async fn request_oauth_login_dialog_input(
+    events: Arc<Mutex<VecDeque<OAuthLoginDialogEvent>>>,
+    render_handle: RenderHandle,
+    cancel_requested: Arc<AtomicBool>,
+    message: String,
+    placeholder: Option<String>,
+) -> Result<String, String> {
+    if cancel_requested.load(Ordering::Relaxed) {
+        return Err(String::from("Login cancelled"));
+    }
+
+    let (sender, receiver) = oneshot::channel();
+    push_oauth_login_dialog_event(
+        &events,
+        &render_handle,
+        OAuthLoginDialogEvent::ShowPrompt {
+            message,
+            placeholder,
+            responder: sender,
+        },
+    );
+
+    receiver
+        .await
+        .unwrap_or_else(|_| Err(String::from("Login cancelled")))
+}
+
+async fn run_interactive_oauth_login_dialog(
+    runtime: &InteractiveRuntime,
+    keybindings: &KeybindingsManager,
+    auth_path: PathBuf,
+    provider_id: String,
+) -> Result<Option<String>, String> {
+    let provider = get_oauth_provider(&provider_id)
+        .ok_or_else(|| format!("Unknown OAuth provider: {provider_id}"))?;
+    let provider_name = provider.name().to_owned();
+    let uses_callback_server = provider.uses_callback_server();
+    let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
+    let mut tui = Tui::new(terminal);
+    let render_handle = tui.render_handle();
+    let events = Arc::new(Mutex::new(VecDeque::<OAuthLoginDialogEvent>::new()));
+    let prompt_responder = Arc::new(Mutex::new(None::<
+        oneshot::Sender<Result<String, String>>,
+    >));
+    let cancel_requested = Arc::new(AtomicBool::new(false));
+
+    let mut dialog = LoginDialogComponent::new(keybindings, provider_name.clone());
+    {
+        let prompt_responder = Arc::clone(&prompt_responder);
+        dialog.set_on_submit(move |value| {
+            if let Some(responder) = prompt_responder
+                .lock()
+                .expect("oauth login dialog prompt responder mutex poisoned")
+                .take()
+            {
+                let _ = responder.send(Ok(value));
+            }
+        });
+    }
+    {
+        let prompt_responder = Arc::clone(&prompt_responder);
+        let cancel_requested = Arc::clone(&cancel_requested);
+        dialog.set_on_cancel(move || {
+            cancel_requested.store(true, Ordering::Relaxed);
+            if let Some(responder) = prompt_responder
+                .lock()
+                .expect("oauth login dialog prompt responder mutex poisoned")
+                .take()
+            {
+                let _ = responder.send(Err(String::from("Login cancelled")));
+            }
+        });
+    }
+
+    let dialog = SharedLoginDialog::new(dialog);
+    let dialog_handle = dialog.clone();
+    let dialog_id = tui.add_child(Box::new(dialog));
+    let _ = tui.set_focus_child(dialog_id);
+    tui.start().map_err(|error| error.to_string())?;
+
+    let login_task = {
+        let provider = provider.clone();
+        let provider_id = provider_id.clone();
+        let provider_name = provider_name.clone();
+        let auth_path = auth_path.clone();
+        let events = Arc::clone(&events);
+        let render_handle = render_handle.clone();
+        let cancel_requested = Arc::clone(&cancel_requested);
+        tokio::spawn(async move {
+            let auth_events = Arc::clone(&events);
+            let auth_render_handle = render_handle.clone();
+            let auth_cancel_requested = Arc::clone(&cancel_requested);
+            let prompt_events = Arc::clone(&events);
+            let prompt_render_handle = render_handle.clone();
+            let prompt_cancel_requested = Arc::clone(&cancel_requested);
+            let progress_events = Arc::clone(&events);
+            let progress_render_handle = render_handle.clone();
+            let progress_cancel_requested = Arc::clone(&cancel_requested);
+            let manual_events = Arc::clone(&events);
+            let manual_render_handle = render_handle.clone();
+            let manual_cancel_requested = Arc::clone(&cancel_requested);
+
+            let mut callbacks = OAuthLoginCallbacks::new(
+                move |info| {
+                    if auth_cancel_requested.load(Ordering::Relaxed) {
+                        return Err(String::from("Login cancelled"));
+                    }
+
+                    let url = info.url;
+                    let _ = best_effort_open_browser(&url);
+                    push_oauth_login_dialog_event(
+                        &auth_events,
+                        &auth_render_handle,
+                        OAuthLoginDialogEvent::ShowAuth {
+                            url,
+                            instructions: info.instructions,
+                        },
+                    );
+                    Ok(())
+                },
+                move |prompt| {
+                    request_oauth_login_dialog_input(
+                        Arc::clone(&prompt_events),
+                        prompt_render_handle.clone(),
+                        Arc::clone(&prompt_cancel_requested),
+                        prompt.message,
+                        prompt.placeholder,
+                    )
+                },
+            )
+            .with_progress(move |message| {
+                if progress_cancel_requested.load(Ordering::Relaxed) {
+                    return Err(String::from("Login cancelled"));
+                }
+                push_oauth_login_dialog_event(
+                    &progress_events,
+                    &progress_render_handle,
+                    OAuthLoginDialogEvent::ShowProgress(message),
+                );
+                Ok(())
+            });
+
+            if uses_callback_server {
+                callbacks = callbacks.with_manual_code_input(move || {
+                    request_oauth_login_dialog_input(
+                        Arc::clone(&manual_events),
+                        manual_render_handle.clone(),
+                        Arc::clone(&manual_cancel_requested),
+                        String::from(
+                            "Paste redirect URL below, or complete login in browser:",
+                        ),
+                        None,
+                    )
+                });
+            }
+
+            let result = match provider.login(callbacks).await {
+                Ok(credentials) => persist_oauth_credentials(&auth_path, &provider_id, &credentials)
+                    .map(|_| Some(provider_name.clone())),
+                Err(error) if error == "Login cancelled" => Ok(None),
+                Err(error) => Err(format!(
+                    "Failed to login to {provider_name}: {error}"
+                )),
+            };
+
+            push_oauth_login_dialog_event(
+                &events,
+                &render_handle,
+                OAuthLoginDialogEvent::Complete(result),
+            );
+        })
+    };
+
+    let result = loop {
+        let event = {
+            events
+                .lock()
+                .expect("oauth login dialog event queue mutex poisoned")
+                .pop_front()
+        };
+
+        if let Some(event) = event {
+            match event {
+                OAuthLoginDialogEvent::ShowAuth { url, instructions } => {
+                    dialog_handle.with_mut(|dialog| {
+                        dialog.show_auth(url, instructions.as_deref());
+                    });
+                }
+                OAuthLoginDialogEvent::ShowPrompt {
+                    message,
+                    placeholder,
+                    responder,
+                } => {
+                    if cancel_requested.load(Ordering::Relaxed) {
+                        let _ = responder.send(Err(String::from("Login cancelled")));
+                    } else {
+                        *prompt_responder
+                            .lock()
+                            .expect("oauth login dialog prompt responder mutex poisoned") =
+                            Some(responder);
+                        dialog_handle.with_mut(|dialog| {
+                            dialog.show_prompt(message, placeholder.as_deref());
+                        });
+                    }
+                }
+                OAuthLoginDialogEvent::ShowProgress(message) => {
+                    dialog_handle.with_mut(|dialog| {
+                        dialog.show_progress(message);
+                    });
+                }
+                OAuthLoginDialogEvent::Complete(result) => break result,
+            }
+            continue;
+        }
+
+        tui.drain_terminal_events()
+            .map_err(|error| error.to_string())?;
+        sleep(Duration::from_millis(16)).await;
+    };
+
+    let _ = login_task.await;
+    let _ = tui.stop();
+    result
+}
+
+#[derive(Clone)]
 struct LiveInteractiveTerminal {
     state: Arc<Mutex<LiveInteractiveTerminalState>>,
 }
@@ -1034,11 +1348,6 @@ impl ExternalEditorHost for LiveExternalEditorHost {
         self.render_handle.request_render();
     }
 }
-
-#[derive(Default)]
-struct NoopExternalEditorHost;
-
-impl ExternalEditorHost for NoopExternalEditorHost {}
 
 pub async fn run_interactive_command(options: RunCommandOptions) -> i32 {
     run_interactive_command_with_terminal(options, Arc::new(|| Box::new(ProcessTerminal::new())))
@@ -1635,7 +1944,6 @@ async fn run_interactive_iteration(
         runtime_settings: shared_runtime_settings.clone(),
         cwd: cwd.clone(),
         agent_dir: agent_dir.clone(),
-        ui_host: Arc::new(interactive_host),
         auth_operation_in_progress: Arc::new(AtomicBool::new(false)),
     };
     shell.bind_footer_data_provider_with_render_handle(&footer_provider, render_handle.clone());
@@ -2346,18 +2654,21 @@ async fn resolve_interactive_transition(
 
             let initial_status_message = match selected {
                 Some(provider_id) => match mode {
-                    OAuthPickerMode::Login => {
-                        match run_terminal_oauth_login(
-                            auth_path.clone(),
-                            provider_id,
-                            Arc::new(NoopExternalEditorHost),
-                        )
-                        .await
-                        {
-                            Ok(provider_name) => Some(format!("Logged in to {provider_name}")),
-                            Err(error) => Some(format!("Error: {error}")),
-                        }
-                    }
+                    OAuthPickerMode::Login => match run_interactive_oauth_login_dialog(
+                        runtime,
+                        &keybindings,
+                        auth_path.clone(),
+                        provider_id,
+                    )
+                    .await
+                    {
+                        Ok(Some(provider_name)) => Some(format!(
+                            "Logged in to {provider_name}. Credentials saved to {}",
+                            auth_path.display()
+                        )),
+                        Ok(None) => None,
+                        Err(error) => Some(format!("Error: {error}")),
+                    },
                     OAuthPickerMode::Logout => {
                         let provider_name = oauth_provider_name(&provider_id)
                             .unwrap_or_else(|| provider_id.clone());
@@ -2371,6 +2682,50 @@ async fn resolve_interactive_transition(
                     }
                 },
                 None => None,
+            };
+
+            Ok(InteractiveTransitionPlan {
+                cwd: preserved.cwd,
+                manager: preserved.manager,
+                prefill_input: None,
+                initial_status_message,
+                bootstrap_defaults: preserved.bootstrap_defaults,
+                scoped_models: preserved.scoped_models,
+                runtime_settings: preserved.runtime_settings,
+            })
+        }
+        InteractiveTransitionRequest::OAuthLogin { provider_id } => {
+            let preserved = preserve_interactive_context(session_context, current_cwd)?;
+            let Some(agent_dir) = agent_dir else {
+                return Ok(InteractiveTransitionPlan {
+                    cwd: preserved.cwd,
+                    manager: preserved.manager,
+                    prefill_input: None,
+                    initial_status_message: Some(String::from(
+                        "OAuth login requires an agent directory.",
+                    )),
+                    bootstrap_defaults: preserved.bootstrap_defaults,
+                    scoped_models: preserved.scoped_models,
+                    runtime_settings: preserved.runtime_settings,
+                });
+            };
+
+            let keybindings = create_keybindings_manager(Some(agent_dir));
+            let auth_path = agent_dir.join("auth.json");
+            let initial_status_message = match run_interactive_oauth_login_dialog(
+                runtime,
+                &keybindings,
+                auth_path.clone(),
+                provider_id,
+            )
+            .await
+            {
+                Ok(Some(provider_name)) => Some(format!(
+                    "Logged in to {provider_name}. Credentials saved to {}",
+                    auth_path.display()
+                )),
+                Ok(None) => None,
+                Err(error) => Some(format!("Error: {error}")),
             };
 
             Ok(InteractiveTransitionPlan {
@@ -9653,36 +10008,21 @@ fn handle_interactive_slash_command(
             return true;
         }
 
-        let Some(agent_dir) = slash_command_context.agent_dir.as_ref() else {
+        if slash_command_context.agent_dir.is_none() {
             status_handle.set_message("OAuth login requires an agent directory.");
-            return true;
-        };
-
-        if slash_command_context
-            .auth_operation_in_progress
-            .swap(true, Ordering::Relaxed)
-        {
-            status_handle.set_message("An OAuth login is already in progress.");
             return true;
         }
 
-        let provider_id = provider_id.to_owned();
-        let auth_path = agent_dir.join("auth.json");
-        let status_handle = status_handle.clone();
-        let ui_host = slash_command_context.ui_host.clone();
-        let auth_operation_in_progress = slash_command_context.auth_operation_in_progress.clone();
-        status_handle.set_message(format!("Starting OAuth login for {provider_id}..."));
-        tokio::spawn(async move {
-            let result = run_terminal_oauth_login(auth_path, provider_id.clone(), ui_host).await;
-            auth_operation_in_progress.store(false, Ordering::Relaxed);
-            match result {
-                Ok(provider_name) => {
-                    status_handle.set_message(format!("Logged in to {provider_name}"));
-                }
-                Err(error) => status_handle.set_message(format!("Error: {error}")),
-            }
-        });
-        return true;
+        return request_interactive_transition(
+            InteractiveTransitionRequest::OAuthLogin {
+                provider_id: provider_id.to_owned(),
+            },
+            core,
+            session_manager,
+            status_handle,
+            transition_request,
+            exit_requested,
+        );
     }
 
     if text == "/logout" || text.starts_with("/logout ") {
@@ -10240,11 +10580,6 @@ mod tests {
         result
     }
 
-    #[derive(Default)]
-    struct TestExternalEditorHost;
-
-    impl ExternalEditorHost for TestExternalEditorHost {}
-
     fn test_slash_command_context(
         keybindings: &KeybindingsManager,
         cwd: impl Into<PathBuf>,
@@ -10262,7 +10597,6 @@ mod tests {
             runtime_settings: Arc::new(Mutex::new(LoadedRuntimeSettings::default())),
             cwd: cwd.into(),
             agent_dir,
-            ui_host: Arc::new(TestExternalEditorHost),
             auth_operation_in_progress: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -10290,6 +10624,57 @@ mod tests {
 
         fn login<'a>(&'a self, _callbacks: OAuthLoginCallbacks) -> OAuthCredentialsFuture<'a> {
             Box::pin(async move {
+                Ok(OAuthCredentials::new(
+                    "refresh-token",
+                    self.access_token,
+                    i64::MAX,
+                ))
+            })
+        }
+
+        fn refresh_token<'a>(
+            &'a self,
+            credentials: OAuthCredentials,
+        ) -> OAuthCredentialsFuture<'a> {
+            Box::pin(async move { Ok(credentials) })
+        }
+
+        fn get_api_key(&self, credentials: &OAuthCredentials) -> Result<String, String> {
+            Ok(credentials.access.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct PromptingOAuthProvider {
+        id: &'static str,
+        name: &'static str,
+        access_token: &'static str,
+    }
+
+    impl OAuthProvider for PromptingOAuthProvider {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn uses_callback_server(&self) -> bool {
+            true
+        }
+
+        fn login<'a>(&'a self, callbacks: OAuthLoginCallbacks) -> OAuthCredentialsFuture<'a> {
+            Box::pin(async move {
+                callbacks.auth(pi_ai::OAuthAuthInfo {
+                    url: String::from("https://example.com/login"),
+                    instructions: Some(String::from("Complete login in your browser.")),
+                })?;
+                let Some(result) = callbacks.manual_code_input().await else {
+                    return Err(String::from("Manual code input unavailable"));
+                };
+                let input = result?;
+                callbacks.progress(format!("Received redirect: {input}"))?;
                 Ok(OAuthCredentials::new(
                     "refresh-token",
                     self.access_token,
@@ -11524,6 +11909,81 @@ mod tests {
     }
 
     #[test]
+    fn login_slash_command_with_provider_requests_oauth_login_transition() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "slash-login-direct-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "slash-login-direct-faux-1".into(),
+                name: Some("Slash Login Direct Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("slash-login-direct-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("slash-login-direct-cwd");
+        let agent_dir = unique_temp_dir("slash-login-direct-agent");
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(cwd.clone()),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
+        let status_handle = shell.status_handle();
+        let footer_state_handle = shell.footer_state_handle();
+        let exit_requested = Arc::new(AtomicBool::new(false));
+        let transition_request = Arc::new(Mutex::new(None));
+        let slash_command_context =
+            test_slash_command_context_with_agent_dir(&keybindings, cwd, Some(agent_dir));
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/login anthropic",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            None,
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+        assert!(exit_requested.load(Ordering::Relaxed));
+        assert_eq!(
+            transition_request
+                .lock()
+                .expect("interactive transition request mutex poisoned")
+                .clone(),
+            Some(InteractiveTransitionRequest::OAuthLogin {
+                provider_id: String::from("anthropic"),
+            })
+        );
+
+        faux.unregister();
+    }
+
+    #[test]
     fn logout_slash_command_requests_oauth_picker_transition() {
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             provider: "slash-logout-picker-faux".into(),
@@ -11702,9 +12162,11 @@ mod tests {
 
     #[tokio::test]
     async fn oauth_login_picker_transition_persists_credentials() {
-        let _guard = oauth_registry_lock().lock().unwrap();
+        let _guard = oauth_registry_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         register_oauth_provider(Arc::new(TestOAuthProvider {
-            id: "zz-transition-oauth",
+            id: "00-transition-oauth",
             name: "Transition OAuth Provider",
             access_token: "transition-access-token",
         }));
@@ -11723,11 +12185,8 @@ mod tests {
             .expect("expected faux model");
         let cwd = unique_temp_dir("oauth-login-transition-cwd");
         let agent_dir = unique_temp_dir("oauth-login-transition-agent");
-        let terminal = LifecycleScriptedTerminal::new(vec![
-            (Duration::from_millis(5), String::from("\x1b[B")),
-            (Duration::from_millis(5), String::from("\x1b[B")),
-            (Duration::from_millis(5), String::from("\r")),
-        ]);
+        let terminal =
+            LifecycleScriptedTerminal::new(vec![(Duration::from_millis(5), String::from("\r"))]);
         let runtime = InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone())));
 
         let plan = resolve_interactive_transition(
@@ -11750,21 +12209,208 @@ mod tests {
         .await
         .expect("expected oauth login transition plan");
 
+        let expected_status = format!(
+            "Logged in to Transition OAuth Provider. Credentials saved to {}",
+            agent_dir.join("auth.json").display()
+        );
         assert_eq!(
             plan.initial_status_message.as_deref(),
-            Some("Logged in to Transition OAuth Provider")
+            Some(expected_status.as_str())
         );
         let auth: Value =
             serde_json::from_str(&fs::read_to_string(agent_dir.join("auth.json")).unwrap())
                 .unwrap();
         assert_eq!(
-            auth.pointer("/zz-transition-oauth/access")
+            auth.pointer("/00-transition-oauth/access")
                 .and_then(Value::as_str),
             Some("transition-access-token")
         );
 
         faux.unregister();
-        unregister_oauth_provider("zz-transition-oauth");
+        unregister_oauth_provider("00-transition-oauth");
+    }
+
+    #[tokio::test]
+    async fn oauth_login_transition_renders_dialog_and_accepts_manual_redirect_input() {
+        let _guard = oauth_registry_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        register_oauth_provider(Arc::new(PromptingOAuthProvider {
+            id: "00-prompting-oauth",
+            name: "Prompting OAuth Provider",
+            access_token: "prompting-access-token",
+        }));
+
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "oauth-login-dialog-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "oauth-login-dialog-faux-1".into(),
+                name: Some("OAuth Login Dialog Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("oauth-login-dialog-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("oauth-login-dialog-cwd");
+        let agent_dir = unique_temp_dir("oauth-login-dialog-agent");
+        let terminal = LifecycleScriptedTerminal::new(vec![
+            (Duration::from_millis(20), String::from("h")),
+            (Duration::from_millis(5), String::from("t")),
+            (Duration::from_millis(5), String::from("t")),
+            (Duration::from_millis(5), String::from("p")),
+            (Duration::from_millis(5), String::from("s")),
+            (Duration::from_millis(5), String::from(":")),
+            (Duration::from_millis(5), String::from("/")),
+            (Duration::from_millis(5), String::from("/")),
+            (Duration::from_millis(5), String::from("e")),
+            (Duration::from_millis(5), String::from("x")),
+            (Duration::from_millis(5), String::from("a")),
+            (Duration::from_millis(5), String::from("m")),
+            (Duration::from_millis(5), String::from("p")),
+            (Duration::from_millis(5), String::from("l")),
+            (Duration::from_millis(5), String::from("e")),
+            (Duration::from_millis(5), String::from(".")),
+            (Duration::from_millis(5), String::from("c")),
+            (Duration::from_millis(5), String::from("o")),
+            (Duration::from_millis(5), String::from("m")),
+            (Duration::from_millis(5), String::from("/")),
+            (Duration::from_millis(5), String::from("c")),
+            (Duration::from_millis(5), String::from("a")),
+            (Duration::from_millis(5), String::from("l")),
+            (Duration::from_millis(5), String::from("l")),
+            (Duration::from_millis(5), String::from("b")),
+            (Duration::from_millis(5), String::from("a")),
+            (Duration::from_millis(5), String::from("c")),
+            (Duration::from_millis(5), String::from("k")),
+            (Duration::from_millis(5), String::from("?")),
+            (Duration::from_millis(5), String::from("c")),
+            (Duration::from_millis(5), String::from("o")),
+            (Duration::from_millis(5), String::from("d")),
+            (Duration::from_millis(5), String::from("e")),
+            (Duration::from_millis(5), String::from("=")),
+            (Duration::from_millis(5), String::from("a")),
+            (Duration::from_millis(5), String::from("b")),
+            (Duration::from_millis(5), String::from("c")),
+            (Duration::from_millis(5), String::from("\r")),
+        ]);
+        let inspector = terminal.clone();
+        let runtime = InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone())));
+
+        let plan = resolve_interactive_transition(
+            InteractiveTransitionRequest::OAuthLogin {
+                provider_id: String::from("00-prompting-oauth"),
+            },
+            Some(InteractiveSessionContext {
+                manager: Some(SessionManager::in_memory(cwd.to_str().unwrap())),
+                session_file: None,
+                session_dir: None,
+                cwd: cwd.to_string_lossy().into_owned(),
+                model,
+                thinking_level: ThinkingLevel::Off,
+                scoped_models: Vec::new(),
+                available_models: Vec::new(),
+                runtime_settings: LoadedRuntimeSettings::default(),
+            }),
+            &cwd,
+            Some(agent_dir.as_path()),
+            &runtime,
+        )
+        .await
+        .expect("expected oauth login dialog transition plan");
+
+        let expected_status = format!(
+            "Logged in to Prompting OAuth Provider. Credentials saved to {}",
+            agent_dir.join("auth.json").display()
+        );
+        assert_eq!(
+            plan.initial_status_message.as_deref(),
+            Some(expected_status.as_str())
+        );
+        let output = strip_terminal_control_sequences(&inspector.output());
+        assert!(
+            output.contains("Login to Prompting OAuth Provider"),
+            "output: {output}"
+        );
+        assert!(
+            output.contains("https://example.com/login"),
+            "output: {output}"
+        );
+        assert!(
+            output.contains("Paste redirect URL below, or complete login in browser:"),
+            "output: {output}"
+        );
+
+        let auth: Value =
+            serde_json::from_str(&fs::read_to_string(agent_dir.join("auth.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            auth.pointer("/00-prompting-oauth/access")
+                .and_then(Value::as_str),
+            Some("prompting-access-token")
+        );
+
+        faux.unregister();
+        unregister_oauth_provider("00-prompting-oauth");
+    }
+
+    #[tokio::test]
+    async fn oauth_login_transition_returns_without_status_when_cancelled() {
+        let _guard = oauth_registry_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        register_oauth_provider(Arc::new(PromptingOAuthProvider {
+            id: "00-prompting-cancel-oauth",
+            name: "Prompting Cancel OAuth Provider",
+            access_token: "unused-access-token",
+        }));
+
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "oauth-login-cancel-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "oauth-login-cancel-faux-1".into(),
+                name: Some("OAuth Login Cancel Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("oauth-login-cancel-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("oauth-login-cancel-cwd");
+        let agent_dir = unique_temp_dir("oauth-login-cancel-agent");
+        let terminal =
+            LifecycleScriptedTerminal::new(vec![(Duration::from_millis(20), String::from("\x1b"))]);
+        let runtime = InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone())));
+
+        let plan = resolve_interactive_transition(
+            InteractiveTransitionRequest::OAuthLogin {
+                provider_id: String::from("00-prompting-cancel-oauth"),
+            },
+            Some(InteractiveSessionContext {
+                manager: Some(SessionManager::in_memory(cwd.to_str().unwrap())),
+                session_file: None,
+                session_dir: None,
+                cwd: cwd.to_string_lossy().into_owned(),
+                model,
+                thinking_level: ThinkingLevel::Off,
+                scoped_models: Vec::new(),
+                available_models: Vec::new(),
+                runtime_settings: LoadedRuntimeSettings::default(),
+            }),
+            &cwd,
+            Some(agent_dir.as_path()),
+            &runtime,
+        )
+        .await
+        .expect("expected cancelled oauth login transition plan");
+
+        assert_eq!(plan.initial_status_message, None);
+        assert!(!agent_dir.join("auth.json").exists());
+
+        faux.unregister();
+        unregister_oauth_provider("00-prompting-cancel-oauth");
     }
 
     #[tokio::test]
