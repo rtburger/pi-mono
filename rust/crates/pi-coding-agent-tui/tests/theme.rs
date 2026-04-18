@@ -9,7 +9,8 @@ use std::{
     fs,
     path::PathBuf,
     sync::{Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
@@ -104,6 +105,75 @@ fn init_theme_uses_registered_themes_and_falls_back_to_dark() {
     assert_eq!(current_theme().name(), "dark");
 
     set_registered_themes(Vec::new());
+}
+
+#[test]
+fn selected_custom_theme_hot_reloads_from_disk() {
+    let _guard = theme_test_guard();
+    let temp_dir = unique_temp_dir("watch");
+    let custom_path = temp_dir.join("watched.json");
+    let previous_colorterm = std::env::var_os("COLORTERM");
+    unsafe { std::env::set_var("COLORTERM", "truecolor") };
+
+    let result = (|| {
+        let initial_source = include_str!("../src/theme/dark.json")
+            .replace("\"name\": \"dark\"", "\"name\": \"watched\"")
+            .replace("\"accent\": \"#8abeb7\"", "\"accent\": \"#123456\"");
+        fs::write(&custom_path, initial_source).unwrap();
+
+        let loaded = load_themes(LoadThemesOptions {
+            cwd: temp_dir.clone(),
+            agent_dir: None,
+            theme_paths: vec![custom_path.to_string_lossy().into_owned()],
+            include_defaults: false,
+        });
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+
+        set_registered_themes(loaded.themes);
+        let selected = init_theme(Some("watched"));
+        assert!(selected.success, "{selected:?}");
+        assert!(
+            current_theme()
+                .fg("accent", "x")
+                .starts_with("\u{1b}[38;2;18;52;86m"),
+            "theme: {}",
+            current_theme().fg("accent", "x")
+        );
+
+        let updated_source = include_str!("../src/theme/dark.json")
+            .replace("\"name\": \"dark\"", "\"name\": \"watched\"")
+            .replace("\"accent\": \"#8abeb7\"", "\"accent\": \"#abcdef\"");
+        fs::write(&custom_path, updated_source).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if current_theme()
+                .fg("accent", "x")
+                .starts_with("\u{1b}[38;2;171;205;239m")
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        assert_eq!(current_theme_name(), "watched");
+        assert!(
+            current_theme()
+                .fg("accent", "x")
+                .starts_with("\u{1b}[38;2;171;205;239m"),
+            "theme: {}",
+            current_theme().fg("accent", "x")
+        );
+    })();
+
+    let _ = init_theme(Some("dark"));
+    set_registered_themes(Vec::new());
+    match previous_colorterm {
+        Some(value) => unsafe { std::env::set_var("COLORTERM", value) },
+        None => unsafe { std::env::remove_var("COLORTERM") },
+    }
+
+    result
 }
 
 #[test]

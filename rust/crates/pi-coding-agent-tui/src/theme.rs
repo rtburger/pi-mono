@@ -7,7 +7,9 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, mpsc},
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
 const CONFIG_DIR_NAME: &str = ".pi";
@@ -149,6 +151,11 @@ struct ThemeRegistry {
     current: Theme,
     current_name: String,
     registered: BTreeMap<String, Theme>,
+}
+
+struct ThemeWatcherHandle {
+    stop_tx: mpsc::Sender<()>,
+    thread: JoinHandle<()>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -496,11 +503,14 @@ pub fn get_theme_by_name(name: &str) -> Option<Theme> {
 }
 
 pub fn set_theme_instance(theme: Theme) {
-    let mut registry = theme_registry()
-        .lock()
-        .expect("theme registry mutex poisoned");
-    registry.current = theme;
-    registry.current_name = String::from("<in-memory>");
+    {
+        let mut registry = theme_registry()
+            .lock()
+            .expect("theme registry mutex poisoned");
+        registry.current = theme;
+        registry.current_name = String::from("<in-memory>");
+    }
+    stop_theme_watcher();
 }
 
 pub fn init_theme(theme_name: Option<&str>) -> ThemeSelectionResult {
@@ -514,18 +524,29 @@ pub fn init_theme(theme_name: Option<&str>) -> ThemeSelectionResult {
 
 pub fn set_theme(theme_name: &str) -> ThemeSelectionResult {
     let fallback = built_in_theme("dark").expect("dark theme must exist");
-    let mut registry = theme_registry()
-        .lock()
-        .expect("theme registry mutex poisoned");
+    let selected_theme = {
+        let mut registry = theme_registry()
+            .lock()
+            .expect("theme registry mutex poisoned");
 
-    if let Some(theme) = registry
-        .registered
-        .get(theme_name)
-        .cloned()
-        .or_else(|| built_in_theme(theme_name))
-    {
-        registry.current = theme;
-        registry.current_name = theme_name.to_owned();
+        if let Some(theme) = registry
+            .registered
+            .get(theme_name)
+            .cloned()
+            .or_else(|| built_in_theme(theme_name))
+        {
+            registry.current = theme.clone();
+            registry.current_name = theme_name.to_owned();
+            Some(theme)
+        } else {
+            registry.current = fallback;
+            registry.current_name = String::from("dark");
+            None
+        }
+    };
+
+    if let Some(theme) = selected_theme {
+        restart_theme_watcher(theme_name, &theme);
         return ThemeSelectionResult {
             success: true,
             error: None,
@@ -533,8 +554,7 @@ pub fn set_theme(theme_name: &str) -> ThemeSelectionResult {
         };
     }
 
-    registry.current = fallback;
-    registry.current_name = String::from("dark");
+    stop_theme_watcher();
     ThemeSelectionResult {
         success: false,
         error: Some(format!("Theme not found: {theme_name}")),
@@ -635,6 +655,82 @@ fn theme_registry() -> &'static Mutex<ThemeRegistry> {
             registered: BTreeMap::new(),
         })
     })
+}
+
+fn theme_watcher_handle() -> &'static Mutex<Option<ThemeWatcherHandle>> {
+    static WATCHER: OnceLock<Mutex<Option<ThemeWatcherHandle>>> = OnceLock::new();
+    WATCHER.get_or_init(|| Mutex::new(None))
+}
+
+fn stop_theme_watcher() {
+    let watcher = theme_watcher_handle()
+        .lock()
+        .expect("theme watcher mutex poisoned")
+        .take();
+    if let Some(watcher) = watcher {
+        let _ = watcher.stop_tx.send(());
+        let _ = watcher.thread.join();
+    }
+}
+
+fn restart_theme_watcher(theme_name: &str, theme: &Theme) {
+    stop_theme_watcher();
+
+    if matches!(theme_name, "dark" | "light") {
+        return;
+    }
+
+    let Some(source_path) = theme.source_path().map(ToOwned::to_owned) else {
+        return;
+    };
+
+    let watched_name = theme_name.to_owned();
+    let source_info = theme.source_info().cloned();
+    let mode = theme.mode();
+    let mut last_content = fs::read_to_string(&source_path).ok();
+    let (stop_tx, stop_rx) = mpsc::channel();
+
+    let thread = thread::spawn(move || {
+        loop {
+            match stop_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+
+            let Ok(content) = fs::read_to_string(&source_path) else {
+                continue;
+            };
+            if last_content.as_ref() == Some(&content) {
+                continue;
+            }
+            last_content = Some(content.clone());
+
+            let Ok(reloaded) = parse_theme_content(
+                &source_path,
+                &content,
+                Some(source_path.clone()),
+                source_info.clone(),
+                mode,
+            ) else {
+                continue;
+            };
+
+            let mut registry = theme_registry()
+                .lock()
+                .expect("theme registry mutex poisoned");
+            if registry.current_name != watched_name {
+                continue;
+            }
+            registry
+                .registered
+                .insert(watched_name.clone(), reloaded.clone());
+            registry.current = reloaded;
+        }
+    });
+
+    *theme_watcher_handle()
+        .lock()
+        .expect("theme watcher mutex poisoned") = Some(ThemeWatcherHandle { stop_tx, thread });
 }
 
 fn built_in_themes() -> &'static BTreeMap<String, Theme> {
