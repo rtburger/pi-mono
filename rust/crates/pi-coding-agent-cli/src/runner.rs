@@ -8787,7 +8787,7 @@ fn capitalize_key_id(key: &str) -> String {
 
 fn render_changelog_text() -> Result<String, String> {
     let changelog_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../packages/coding-agent/CHANGELOG.md");
+        .join("../../support/coding-agent-reference/CHANGELOG.md");
     let content = fs::read_to_string(&changelog_path)
         .map_err(|error| format!("{}: {error}", changelog_path.display()))?;
 

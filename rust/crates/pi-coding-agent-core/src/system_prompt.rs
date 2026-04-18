@@ -336,17 +336,17 @@ fn default_pi_docs_paths(
     docs_path: Option<PathBuf>,
     examples_path: Option<PathBuf>,
 ) -> (PathBuf, PathBuf, PathBuf) {
-    let package_dir = coding_agent_package_dir();
+    let reference_dir = coding_agent_reference_dir();
     (
-        readme_path.unwrap_or_else(|| package_dir.join("README.md")),
-        docs_path.unwrap_or_else(|| package_dir.join("docs")),
-        examples_path.unwrap_or_else(|| package_dir.join("examples")),
+        readme_path.unwrap_or_else(|| reference_dir.join("README.md")),
+        docs_path.unwrap_or_else(|| reference_dir.join("docs")),
+        examples_path.unwrap_or_else(|| reference_dir.join("examples")),
     )
 }
 
-fn coding_agent_package_dir() -> PathBuf {
+fn coding_agent_reference_dir() -> PathBuf {
     let candidate =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../packages/coding-agent");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../support/coding-agent-reference");
     candidate.canonicalize().unwrap_or(candidate)
 }
 

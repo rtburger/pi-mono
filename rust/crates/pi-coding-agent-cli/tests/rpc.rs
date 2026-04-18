@@ -317,6 +317,22 @@ fn last_user_text(context: &Context) -> String {
         .unwrap_or_default()
 }
 
+#[test]
+fn extension_sidecar_uses_rust_local_extension_runtime() {
+    let sidecar_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../support/extension-sidecar.mjs");
+    let source = fs::read_to_string(&sidecar_path).expect("expected extension sidecar source");
+
+    assert!(
+        source.contains("./extension-runtime/index.mjs"),
+        "sidecar: {source}"
+    );
+    assert!(
+        !source.contains("packages/coding-agent/src/core/extensions/index.ts"),
+        "sidecar: {source}"
+    );
+}
+
 #[tokio::test]
 async fn run_command_rpc_mode_loads_extension_commands_and_resources() {
     let provider = unique_name("rpc-extension-provider");

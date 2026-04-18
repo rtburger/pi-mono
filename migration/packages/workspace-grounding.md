@@ -19,6 +19,17 @@ The Rust rewrite targets only these packages:
 
 The TypeScript packages remain in the monorepo as the behavioral reference during migration.
 
+## Coding-agent reference assets
+
+The Rust workspace keeps its default coding-agent reference assets under:
+
+- `rust/support/coding-agent-reference/README.md`
+- `rust/support/coding-agent-reference/docs/`
+- `rust/support/coding-agent-reference/examples/`
+- `rust/support/coding-agent-reference/CHANGELOG.md`
+
+Those files are the Rust runtime's local reference bundle for coding-agent docs/help text. `packages/coding-agent` remains the compatibility reference and upstream source material, but the Rust runtime should not resolve these default prompt/help paths directly into the TypeScript package tree.
+
 ## Model catalog ownership
 
 Built-in Rust model metadata is owned inside the Rust workspace:

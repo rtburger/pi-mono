@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { ExtensionRunner, discoverAndLoadExtensions } from "../../packages/coding-agent/src/core/extensions/index.ts";
+import { ExtensionRunner, discoverAndLoadExtensions } from "./extension-runtime/index.mjs";
 
 let runner;
 let uiCounter = 0;
