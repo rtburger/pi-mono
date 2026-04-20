@@ -1,10 +1,17 @@
 use crate::{
-    AuthSource, CompactionResult, CompactionSettings, SessionEntry, SessionManager,
-    bootstrap::BootstrapDiagnostic, bootstrap::ExistingSessionSelection,
-    bootstrap::SessionBootstrapOptions, bootstrap_session, calculate_context_tokens,
-    compact as run_compaction, convert_to_llm, estimate_context_tokens, filter_blocked_images,
-    latest_compaction_timestamp, model_resolver::parse_thinking_level, prepare_compaction,
-    should_compact,
+    AuthSource, BranchSummaryDetails, BranchSummaryOptions, CompactionResult, CompactionSettings,
+    SessionEntry, SessionManager,
+    bootstrap::BootstrapDiagnostic,
+    bootstrap::ExistingSessionSelection,
+    bootstrap::SessionBootstrapOptions,
+    bootstrap_session, calculate_context_tokens, compact as run_compaction, convert_to_llm,
+    estimate_context_tokens, filter_blocked_images, generate_branch_summary_with_details,
+    get_latest_compaction_entry, latest_compaction_timestamp,
+    model_resolver::parse_thinking_level,
+    prepare_compaction, should_compact,
+    tree_navigation::{
+        TreeNavigationResult, TreeNavigationSummary, apply_tree_navigation, prepare_tree_navigation,
+    },
 };
 use async_stream::stream;
 use futures::{StreamExt, future::BoxFuture};
@@ -18,6 +25,7 @@ use pi_ai::{
 };
 use pi_coding_agent_tools::create_coding_tools_with_read_auto_resize_flag;
 use pi_events::{AssistantMessage, Context, Message, Model, StopReason};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
@@ -119,6 +127,61 @@ impl Default for RetrySettings {
             base_delay_ms: 2_000,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    pub tokens: Option<u64>,
+    pub context_window: u64,
+    pub percent: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTokenUsage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStats {
+    pub session_file: Option<String>,
+    pub session_id: Option<String>,
+    pub user_messages: usize,
+    pub assistant_messages: usize,
+    pub tool_calls: usize,
+    pub tool_results: usize,
+    pub total_messages: usize,
+    pub tokens: SessionTokenUsage,
+    pub cost: f64,
+    pub context_usage: Option<ContextUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkMessageCandidate {
+    pub entry_id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NavigateTreeOptions {
+    #[serde(default)]
+    pub summarize: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_instructions: Option<String>,
+    #[serde(default)]
+    pub replace_instructions: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserve_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Clone)]
@@ -581,6 +644,277 @@ impl AgentSession {
 
     pub async fn wait_for_idle(&self) {
         self.inner.core.wait_for_idle().await;
+    }
+
+    pub fn set_session_name(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<(), crate::CodingAgentCoreError> {
+        let Some(session_manager) = self.session_manager() else {
+            return Err(crate::CodingAgentCoreError::Message(String::from(
+                "Session history is unavailable",
+            )));
+        };
+
+        session_manager
+            .lock()
+            .expect("session manager mutex poisoned")
+            .append_session_info(name)
+            .map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn navigate_tree(
+        &self,
+        target_id: Option<&str>,
+        options: NavigateTreeOptions,
+    ) -> Result<TreeNavigationResult, crate::CodingAgentCoreError> {
+        let Some(session_manager) = self.session_manager() else {
+            return Err(crate::CodingAgentCoreError::Message(String::from(
+                "Session tree navigation is unavailable",
+            )));
+        };
+
+        let preparation = {
+            let session_manager = session_manager
+                .lock()
+                .expect("session manager mutex poisoned");
+            prepare_tree_navigation(&session_manager, target_id)
+                .map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))?
+        };
+
+        let summary = if options.summarize && !preparation.entries_to_summarize.is_empty() {
+            let model = self.state().model;
+            let auth = self
+                .model_registry()
+                .get_api_key_and_headers_async(&model)
+                .await
+                .map_err(crate::CodingAgentCoreError::Message)?;
+            let Some(api_key) = auth.api_key else {
+                return Err(crate::CodingAgentCoreError::Message(format!(
+                    "No API key found for {}.",
+                    model.provider
+                )));
+            };
+
+            let generated = generate_branch_summary_with_details(
+                &preparation.entries_to_summarize,
+                &model,
+                &api_key,
+                auth.headers,
+                BranchSummaryOptions {
+                    reserve_tokens: options.reserve_tokens.unwrap_or(16_384),
+                    custom_instructions: options.custom_instructions.clone(),
+                    replace_instructions: options.replace_instructions,
+                },
+            )
+            .await
+            .map_err(crate::CodingAgentCoreError::Message)?;
+
+            Some(TreeNavigationSummary {
+                summary: generated.summary,
+                details: Some(
+                    serde_json::to_value(BranchSummaryDetails {
+                        read_files: generated.read_files,
+                        modified_files: generated.modified_files,
+                    })
+                    .expect("branch summary details should serialize"),
+                ),
+                from_hook: None,
+            })
+        } else {
+            None
+        };
+
+        let (session_context, navigation) = {
+            let mut session_manager = session_manager
+                .lock()
+                .expect("session manager mutex poisoned");
+            let navigation = apply_tree_navigation(
+                &mut session_manager,
+                &preparation,
+                summary,
+                options.label.as_deref(),
+            )
+            .map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))?;
+            (session_manager.build_session_context(), navigation)
+        };
+
+        let next_messages = session_context.messages;
+        self.agent().update_state(move |state| {
+            state.messages = next_messages.clone();
+        });
+
+        Ok(navigation)
+    }
+
+    pub fn user_messages_for_forking(&self) -> Vec<ForkMessageCandidate> {
+        let Some(session_manager) = self.session_manager() else {
+            return Vec::new();
+        };
+
+        session_manager
+            .lock()
+            .expect("session manager mutex poisoned")
+            .get_entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                SessionEntry::Message { id, message, .. } => message
+                    .as_standard_message()
+                    .and_then(extract_user_text)
+                    .filter(|text| !text.is_empty())
+                    .map(|text| ForkMessageCandidate {
+                        entry_id: id.clone(),
+                        text,
+                    }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn session_stats(&self) -> SessionStats {
+        let state = self.state();
+        let mut user_messages = 0usize;
+        let mut assistant_messages = 0usize;
+        let mut tool_results = 0usize;
+        let mut tool_calls = 0usize;
+        let mut total_input = 0u64;
+        let mut total_output = 0u64;
+        let mut total_cache_read = 0u64;
+        let mut total_cache_write = 0u64;
+        let mut total_cost = 0.0f64;
+
+        for message in &state.messages {
+            let Some(standard) = message.as_standard_message() else {
+                continue;
+            };
+
+            match standard {
+                Message::User { .. } => user_messages += 1,
+                Message::Assistant { content, usage, .. } => {
+                    assistant_messages += 1;
+                    tool_calls += content
+                        .iter()
+                        .filter(|content| {
+                            matches!(content, pi_events::AssistantContent::ToolCall { .. })
+                        })
+                        .count();
+                    total_input += usage.input;
+                    total_output += usage.output;
+                    total_cache_read += usage.cache_read;
+                    total_cache_write += usage.cache_write;
+                    total_cost += usage.cost.total;
+                }
+                Message::ToolResult { .. } => tool_results += 1,
+            }
+        }
+
+        SessionStats {
+            session_file: self.session_file(),
+            session_id: self.session_id(),
+            user_messages,
+            assistant_messages,
+            tool_calls,
+            tool_results,
+            total_messages: state.messages.len(),
+            tokens: SessionTokenUsage {
+                input: total_input,
+                output: total_output,
+                cache_read: total_cache_read,
+                cache_write: total_cache_write,
+                total: total_input + total_output + total_cache_read + total_cache_write,
+            },
+            cost: total_cost,
+            context_usage: self.context_usage(),
+        }
+    }
+
+    pub fn context_usage(&self) -> Option<ContextUsage> {
+        let state = self.state();
+        let context_window = state.model.context_window;
+        if context_window == 0 {
+            return None;
+        }
+
+        if let Some(session_manager) = self.session_manager() {
+            let branch_entries = {
+                let session_manager = session_manager
+                    .lock()
+                    .expect("session manager mutex poisoned");
+                let leaf_id = session_manager.get_leaf_id().map(str::to_owned);
+                session_manager.get_branch(leaf_id.as_deref())
+            };
+
+            if let Some(latest_compaction) = get_latest_compaction_entry(&branch_entries)
+                && !has_assistant_usage_after_entry(&branch_entries, latest_compaction.id())
+            {
+                return Some(ContextUsage {
+                    tokens: None,
+                    context_window,
+                    percent: None,
+                });
+            }
+        }
+
+        let estimate = estimate_context_tokens(&state.messages);
+        Some(ContextUsage {
+            tokens: Some(estimate.tokens),
+            context_window,
+            percent: Some((estimate.tokens as f64 / context_window as f64) * 100.0),
+        })
+    }
+
+    pub fn export_to_jsonl<P: AsRef<Path>>(
+        &self,
+        output_path: P,
+    ) -> Result<String, crate::CodingAgentCoreError> {
+        let Some(session_manager) = self.session_manager() else {
+            return Err(crate::CodingAgentCoreError::Message(String::from(
+                "Session export is unavailable",
+            )));
+        };
+
+        session_manager
+            .lock()
+            .expect("session manager mutex poisoned")
+            .export_branch_jsonl(output_path)
+            .map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))
+    }
+
+    pub fn last_assistant_text(&self) -> Option<String> {
+        self.state()
+            .messages
+            .iter()
+            .rev()
+            .filter_map(|message| message.as_standard_message())
+            .find_map(|message| {
+                let Message::Assistant {
+                    content,
+                    stop_reason,
+                    ..
+                } = message
+                else {
+                    return None;
+                };
+
+                if *stop_reason == StopReason::Aborted && content.is_empty() {
+                    return None;
+                }
+
+                let text = content
+                    .iter()
+                    .filter_map(|content| match content {
+                        pi_events::AssistantContent::Text { text, .. } => Some(text.as_str()),
+                        pi_events::AssistantContent::Thinking { .. }
+                        | pi_events::AssistantContent::ToolCall { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+                    .trim()
+                    .to_owned();
+
+                (!text.is_empty()).then_some(text)
+            })
     }
 
     async fn wait_for_retry(&self) {
@@ -1810,6 +2144,31 @@ fn extract_user_message_text(message: &AgentMessage) -> Option<String> {
     extract_user_text(message.as_standard_message()?)
 }
 
+fn has_assistant_usage_after_entry(entries: &[SessionEntry], entry_id: &str) -> bool {
+    let Some(entry_index) = entries.iter().rposition(|entry| entry.id() == entry_id) else {
+        return false;
+    };
+
+    entries.iter().skip(entry_index + 1).rev().any(|entry| {
+        let SessionEntry::Message { message, .. } = entry else {
+            return false;
+        };
+
+        let Some(Message::Assistant {
+            usage, stop_reason, ..
+        }) = message.as_standard_message()
+        else {
+            return false;
+        };
+
+        if matches!(stop_reason, StopReason::Aborted | StopReason::Error) {
+            return false;
+        }
+
+        calculate_context_tokens(usage) > 0
+    })
+}
+
 fn extract_user_text(message: &Message) -> Option<String> {
     let Message::User { content, .. } = message else {
         return None;
@@ -1821,7 +2180,9 @@ fn extract_user_text(message: &Message) -> Option<String> {
             pi_events::UserContent::Image { .. } => None,
         })
         .collect::<Vec<_>>()
-        .join("");
+        .join("")
+        .trim()
+        .to_owned();
     (!text.is_empty()).then_some(text)
 }
 
