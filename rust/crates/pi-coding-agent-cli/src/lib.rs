@@ -7,6 +7,7 @@ pub mod package_commands;
 pub mod package_manager;
 pub mod print_mode;
 mod resources;
+pub mod rpc_client;
 pub mod runner;
 mod session_picker;
 mod tree_picker;
@@ -30,6 +31,15 @@ pub use resources::{
     CliResourceLoader, ExtensionResourcePath, LoadedCliResources, build_runtime_system_prompt,
     build_selected_tools, extend_cli_resources_from_extensions, load_cli_resources,
     preprocess_prompt_text,
+};
+pub use rpc_client::{
+    DEFAULT_RPC_EVENT_TIMEOUT, DEFAULT_RPC_RESPONSE_TIMEOUT, RpcAgentMessage, RpcBashResult,
+    RpcCancelledResult, RpcClient, RpcClientError, RpcClientOptions, RpcCommandSource,
+    RpcCompactionReason, RpcCompactionResult, RpcCustomMessage, RpcCycleModelResult,
+    RpcEventSubscription, RpcExportHtmlResult, RpcExtensionUiMethod, RpcExtensionUiRequest,
+    RpcExtensionUiResponse, RpcModel, RpcNotifyType, RpcOutputEvent, RpcQueueMode, RpcSessionEvent,
+    RpcSessionState, RpcSlashCommand, RpcThinkingLevel, RpcThinkingLevelResult, RpcToolResult,
+    RpcWidgetPlacement,
 };
 pub use runner::{
     RunCommandOptions, RunCommandResult, finalize_system_prompt, run_command,
