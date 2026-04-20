@@ -60,7 +60,7 @@ use pi_events::{AssistantContent, Message, Model, UserContent};
 use pi_tui::{
     AutocompleteItem, CombinedAutocompleteProvider, Component, Input, ProcessTerminal,
     RenderHandle, SlashCommand, Terminal, Tui, TuiError, fuzzy_filter, get_capabilities,
-    matches_key, truncate_to_width,
+    matches_key, truncate_to_width, visible_width,
 };
 use std::{
     borrow::Cow,
@@ -96,6 +96,28 @@ const FINALIZED_SYSTEM_PROMPT_PREFIX: &str = "\0pi-final-system-prompt\n";
 #[allow(dead_code)]
 const ROOT_TREE_ENTRY_ID: &str = "root";
 const DEFAULT_SHARE_VIEWER_URL: &str = "https://pi.dev/session/";
+const DEBUG_LOG_FILE_NAME: &str = "pi-debug.log";
+const ARMIN_SAYS_HI_ART: &[&str] = &[
+    "        ▄▄▄▄",
+    "         ▀▄ ▀▄",
+    "           █  ▀▄▄",
+    "     ▄▀▀▀▀▀     █",
+    "     █▄   ▄▄▄▄▀▀▀▀▄",
+    "   ▄▀  ▀▀▀  ▄▄▄▄▀▀ █",
+    "   █              ▄█▄",
+    "   ▀▄   ▄▄▄▀▀▀▀▀▀▀▀▄█  ▄▄▄▄▄",
+    " ▄▄▄▀▀▀▀▄▄▄▄▄▄▄▄▄▄█▄ ▄▀   ▄ ▀▄",
+    " █▄▄▄▄        ▀▀▀▀  █     ▀█ █",
+    "     ██ ▄█      █   █ ▄      █",
+    "     ▀█████▄▄▄▄███▄▄▀▄▀▄▄▄  ▄▀",
+    "       ▀██████▀▀▀▀   ▀▄▄▄▄▄▀",
+    "         ▀████████▀  ▄▄ ▄▄▄",
+    "           ▀█████▀  ██▀ ██▄",
+    "                    ██  ▄▄▄",
+    "                     █  ▀█▀",
+    "                      ▀▀▀",
+    "ARMIN SAYS HI",
+];
 
 pub struct RunCommandOptions {
     pub args: Vec<String>,
@@ -163,6 +185,7 @@ enum InteractiveTransitionRequest {
     OAuthPicker(OAuthPickerMode),
     OAuthLogin { provider_id: String },
     ScopedModelsPicker { initial_search: Option<String> },
+    ImportSession { input_path: String },
     Reload,
 }
 
@@ -190,6 +213,7 @@ struct InteractiveSlashCommandContext {
     cwd: PathBuf,
     agent_dir: Option<PathBuf>,
     auth_operation_in_progress: Arc<AtomicBool>,
+    viewport_size: Arc<Mutex<(usize, usize)>>,
 }
 
 struct InteractiveIterationOptions {
@@ -1992,6 +2016,9 @@ async fn run_interactive_iteration(
     let transition_request = Arc::new(Mutex::new(None::<InteractiveTransitionRequest>));
     let footer_provider = FooterDataProvider::new(&cwd);
     let render_handle = tui.render_handle();
+    let terminal_width = tui.terminal_mut().columns() as usize;
+    let terminal_height = tui.terminal_mut().rows() as usize;
+    let viewport_size = Arc::new(Mutex::new((terminal_width, terminal_height)));
     if let Some(command) = runtime.extension_editor_command.clone() {
         shell.set_extension_editor_command(command);
     }
@@ -2006,6 +2033,7 @@ async fn run_interactive_iteration(
         cwd: cwd.clone(),
         agent_dir: agent_dir.clone(),
         auth_operation_in_progress: Arc::new(AtomicBool::new(false)),
+        viewport_size,
     };
     shell.bind_footer_data_provider_with_render_handle(&footer_provider, render_handle.clone());
     let binding = InteractiveCoreBinding::bind(core.clone(), &mut shell, render_handle.clone());
@@ -2875,6 +2903,62 @@ async fn resolve_interactive_transition(
                 )),
                 scoped_models: next_scoped_models,
                 runtime_settings: session_context.runtime_settings,
+            })
+        }
+        InteractiveTransitionRequest::ImportSession { input_path } => {
+            let current_runtime_settings = session_context
+                .as_ref()
+                .map(|context| context.runtime_settings.clone())
+                .unwrap_or_default();
+            let current_scoped_models = session_context
+                .as_ref()
+                .map(|context| context.scoped_models.clone())
+                .unwrap_or_default();
+            let session_dir = session_context
+                .as_ref()
+                .and_then(|context| context.session_dir.clone());
+            let resolved_path = PathBuf::from(resolve_session_path(current_cwd, &input_path));
+            if !resolved_path.exists() {
+                return Err(format!("File not found: {}", resolved_path.display()));
+            }
+
+            let import_path = if let Some(session_dir) = session_dir.as_deref() {
+                fs::create_dir_all(session_dir).map_err(|error| error.to_string())?;
+                let file_name = resolved_path
+                    .file_name()
+                    .ok_or_else(|| String::from("Invalid import file path"))?;
+                let destination_path = Path::new(session_dir).join(file_name);
+                if destination_path != resolved_path {
+                    fs::copy(&resolved_path, &destination_path)
+                        .map_err(|error| error.to_string())?;
+                }
+                destination_path
+            } else {
+                resolved_path.clone()
+            };
+
+            let manager = SessionManager::open(
+                import_path.to_string_lossy().as_ref(),
+                session_dir.as_deref(),
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+            let next_cwd = PathBuf::from(manager.get_cwd());
+            let runtime_settings = agent_dir
+                .map(|agent_dir| load_runtime_settings(&next_cwd, agent_dir))
+                .unwrap_or(current_runtime_settings);
+
+            Ok(InteractiveTransitionPlan {
+                cwd: next_cwd,
+                manager: Some(manager),
+                prefill_input: None,
+                initial_status_message: Some(format!(
+                    "Session imported from: {}",
+                    resolved_path.display()
+                )),
+                bootstrap_defaults: None,
+                scoped_models: current_scoped_models,
+                runtime_settings,
             })
         }
         InteractiveTransitionRequest::Reload => {
@@ -8141,6 +8225,7 @@ fn build_interactive_slash_commands(
             "Configure scoped models for Ctrl+P cycling",
         ),
         simple_slash_command("export", "Export session (HTML default, or specify .jsonl)"),
+        simple_slash_command("import", "Import session from a .jsonl snapshot"),
         simple_slash_command("share", "Share session with an HTML preview link"),
         simple_slash_command("copy", "Copy last assistant message to clipboard"),
         simple_slash_command("name", "Set session display name"),
@@ -8170,6 +8255,11 @@ fn build_interactive_slash_commands(
             "reload",
             "Reload keybindings, skills, prompts, and settings",
         ),
+        simple_slash_command(
+            "debug",
+            "Write a debug log for the current interactive view",
+        ),
+        simple_slash_command("arminsayshi", "Armin says hi"),
         SlashCommand {
             name: String::from("quit"),
             description: Some(String::from("Quit pi")),
@@ -8827,6 +8917,73 @@ fn render_changelog_text() -> Result<String, String> {
     }
 
     Ok(selected.join("\n\n").trim().to_owned())
+}
+
+fn resolve_interactive_debug_log_path(context: &InteractiveSlashCommandContext) -> PathBuf {
+    context
+        .agent_dir
+        .as_ref()
+        .map(|agent_dir| agent_dir.join(DEBUG_LOG_FILE_NAME))
+        .unwrap_or_else(|| context.cwd.join(DEBUG_LOG_FILE_NAME))
+}
+
+fn write_interactive_debug_log(
+    shell: &StartupShellComponent,
+    core: &CodingAgentCore,
+    slash_command_context: &InteractiveSlashCommandContext,
+) -> Result<PathBuf, String> {
+    let (width, height) = {
+        let viewport_size = slash_command_context
+            .viewport_size
+            .lock()
+            .expect("interactive viewport mutex poisoned");
+        *viewport_size
+    };
+    let width = width.max(1);
+    let all_lines = shell.render(width);
+
+    let mut debug_data = String::new();
+    push_line(&mut debug_data, &format!("Debug output at {}", now_ms()));
+    push_line(&mut debug_data, &format!("Terminal: {width}x{height}"));
+    push_line(
+        &mut debug_data,
+        &format!("Total lines: {}", all_lines.len()),
+    );
+    push_line(&mut debug_data, "");
+    push_line(
+        &mut debug_data,
+        "=== All rendered lines with visible widths ===",
+    );
+    for (index, line) in all_lines.iter().enumerate() {
+        push_line(
+            &mut debug_data,
+            &format!(
+                "[{index}] (w={}) {}",
+                visible_width(line),
+                serde_json::to_string(line).expect("debug line serialization must succeed")
+            ),
+        );
+    }
+    push_line(&mut debug_data, "");
+    push_line(&mut debug_data, "=== Agent messages (JSONL) ===");
+    for message in &core.state().messages {
+        push_line(
+            &mut debug_data,
+            &serde_json::to_string(&rpc_agent_message_to_json(message))
+                .expect("debug message serialization must succeed"),
+        );
+    }
+
+    let debug_log_path = resolve_interactive_debug_log_path(slash_command_context);
+    if let Some(parent) = debug_log_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(&debug_log_path, debug_data).map_err(|error| error.to_string())?;
+    Ok(debug_log_path)
+}
+
+fn render_armin_says_hi_text() -> String {
+    ARMIN_SAYS_HI_ART.join("\n")
 }
 
 #[allow(dead_code)]
@@ -10423,6 +10580,23 @@ fn handle_interactive_slash_command(
         return true;
     }
 
+    if text == "/debug" {
+        match write_interactive_debug_log(shell, core, slash_command_context) {
+            Ok(path) => append_transcript_custom_message(
+                shell,
+                "debug",
+                format!("Debug log written\n{}", path.display()),
+            ),
+            Err(error) => status_handle.set_message(format!("Error: {error}")),
+        }
+        return true;
+    }
+
+    if text == "/arminsayshi" {
+        append_transcript_custom_message(shell, "armin", render_armin_says_hi_text());
+        return true;
+    }
+
     if text == "/export" || text.starts_with("/export ") {
         let Some(session_manager) = session_manager else {
             status_handle.set_message("Session export is not available in this interactive mode.");
@@ -10685,6 +10859,25 @@ fn handle_interactive_slash_command(
 
         return request_interactive_transition(
             InteractiveTransitionRequest::Reload,
+            core,
+            session_manager,
+            status_handle,
+            transition_request,
+            exit_requested,
+        );
+    }
+
+    if text == "/import" || text.starts_with("/import ") {
+        let input_path = text.strip_prefix("/import").unwrap_or_default().trim();
+        if input_path.is_empty() {
+            status_handle.set_message("Usage: /import <path.jsonl>");
+            return true;
+        }
+
+        return request_interactive_transition(
+            InteractiveTransitionRequest::ImportSession {
+                input_path: input_path.to_owned(),
+            },
             core,
             session_manager,
             status_handle,
@@ -11141,6 +11334,7 @@ mod tests {
             cwd: cwd.into(),
             agent_dir,
             auth_operation_in_progress: Arc::new(AtomicBool::new(false)),
+            viewport_size: Arc::new(Mutex::new((100, 24))),
         }
     }
 
@@ -12134,6 +12328,7 @@ mod tests {
             "model",
             "scoped-models",
             "export",
+            "import",
             "share",
             "copy",
             "name",
@@ -12148,6 +12343,8 @@ mod tests {
             "compact",
             "resume",
             "reload",
+            "debug",
+            "arminsayshi",
             "quit",
         ] {
             assert!(
@@ -12155,6 +12352,249 @@ mod tests {
                 "missing command {command}: {commands:?}"
             );
         }
+    }
+
+    #[test]
+    fn import_slash_command_requests_transition_with_path() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "slash-import-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "slash-import-faux-1".into(),
+                name: Some("Slash Import Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("slash-import-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("slash-import-cwd");
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(cwd.clone()),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
+        let status_handle = shell.status_handle();
+        let footer_state_handle = shell.footer_state_handle();
+        let exit_requested = Arc::new(AtomicBool::new(false));
+        let transition_request = Arc::new(Mutex::new(None));
+        let slash_command_context = test_slash_command_context(&keybindings, cwd);
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/import imported.jsonl",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            None,
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+        assert!(exit_requested.load(Ordering::Relaxed));
+        assert_eq!(
+            transition_request
+                .lock()
+                .expect("interactive transition request mutex poisoned")
+                .clone(),
+            Some(InteractiveTransitionRequest::ImportSession {
+                input_path: String::from("imported.jsonl"),
+            })
+        );
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn import_transition_opens_session_snapshot_and_updates_cwd() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "import-transition-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "import-transition-faux-1".into(),
+                name: Some("Import Transition Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("import-transition-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("import-transition-cwd");
+        let imported_cwd = unique_temp_dir("import-transition-imported-cwd");
+        let mut imported_manager = SessionManager::in_memory(imported_cwd.to_str().unwrap());
+        imported_manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("imported session"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        let import_path = cwd.join("imported.jsonl");
+        imported_manager.export_branch_jsonl(&import_path).unwrap();
+
+        let plan = resolve_interactive_transition(
+            InteractiveTransitionRequest::ImportSession {
+                input_path: String::from("imported.jsonl"),
+            },
+            Some(InteractiveSessionContext {
+                manager: Some(SessionManager::in_memory(cwd.to_str().unwrap())),
+                session_file: None,
+                session_dir: None,
+                cwd: cwd.to_string_lossy().into_owned(),
+                model,
+                thinking_level: ThinkingLevel::Off,
+                scoped_models: Vec::new(),
+                available_models: Vec::new(),
+                runtime_settings: LoadedRuntimeSettings::default(),
+            }),
+            &cwd,
+            None,
+            &InteractiveRuntime::new(Arc::new(|| {
+                Box::new(LifecycleScriptedTerminal::new(Vec::new()))
+            })),
+        )
+        .await
+        .expect("expected import transition plan");
+
+        assert_eq!(plan.cwd, imported_cwd);
+        let expected_status = format!("Session imported from: {}", import_path.display());
+        assert_eq!(
+            plan.initial_status_message.as_deref(),
+            Some(expected_status.as_str())
+        );
+        let imported_manager = plan.manager.expect("expected imported session manager");
+        let imported_messages = imported_manager
+            .build_session_context()
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                pi_agent::AgentMessage::Standard(Message::User { content, .. }) => {
+                    Some(extract_user_text(content))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            imported_messages
+                .iter()
+                .any(|message| message == "imported session"),
+            "messages: {imported_messages:?}"
+        );
+
+        faux.unregister();
+    }
+
+    #[test]
+    fn debug_and_armin_slash_commands_render_transcript_entries() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "slash-debug-armin-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "slash-debug-armin-faux-1".into(),
+                name: Some("Slash Debug Armin Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("slash-debug-armin-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("slash-debug-armin-cwd");
+        let created = create_coding_agent_core(CodingAgentCoreOptions {
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model],
+            models_json_path: None,
+            cwd: Some(cwd.clone()),
+            tools: None,
+            system_prompt: String::new(),
+            bootstrap: SessionBootstrapOptions::default(),
+            stream_options: StreamOptions::default(),
+        })
+        .expect("expected coding agent core");
+        let core = created.core;
+        let keybindings = create_keybindings_manager(None);
+        let mut shell = StartupShellComponent::new(
+            "Pi",
+            "0.1.0",
+            &keybindings,
+            &PlainKeyHintStyler,
+            true,
+            None,
+            false,
+        );
+        let status_handle = shell.status_handle();
+        let footer_state_handle = shell.footer_state_handle();
+        let exit_requested = Arc::new(AtomicBool::new(false));
+        let transition_request = Arc::new(Mutex::new(None));
+        let slash_command_context = test_slash_command_context(&keybindings, cwd.clone());
+
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/debug",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            None,
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/arminsayshi",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            None,
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
+
+        let debug_log = cwd.join(DEBUG_LOG_FILE_NAME);
+        assert!(
+            debug_log.exists(),
+            "missing debug log: {}",
+            debug_log.display()
+        );
+        let debug_output = fs::read_to_string(&debug_log).expect("expected debug log contents");
+        assert!(debug_output.contains("=== Agent messages (JSONL) ==="));
+        assert!(debug_output.contains("=== All rendered lines with visible widths ==="));
+
+        let rendered = strip_terminal_control_sequences(&shell.render(120).join("\n"));
+        assert!(rendered.contains("Debug log written"), "output: {rendered}");
+        assert!(rendered.contains("ARMIN SAYS HI"), "output: {rendered}");
+
+        faux.unregister();
     }
 
     #[test]
@@ -12728,8 +13168,11 @@ mod tests {
             .expect("expected faux model");
         let cwd = unique_temp_dir("oauth-login-transition-cwd");
         let agent_dir = unique_temp_dir("oauth-login-transition-agent");
-        let terminal =
-            LifecycleScriptedTerminal::new(vec![(Duration::from_millis(5), String::from("\r"))]);
+        let terminal = LifecycleScriptedTerminal::new(vec![
+            (Duration::from_millis(5), String::from("\x1b[B")),
+            (Duration::from_millis(5), String::from("\x1b[B")),
+            (Duration::from_millis(5), String::from("\r")),
+        ]);
         let runtime = InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone())));
 
         let plan = resolve_interactive_transition(
