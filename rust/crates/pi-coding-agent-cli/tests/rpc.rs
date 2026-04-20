@@ -319,8 +319,8 @@ fn last_user_text(context: &Context) -> String {
 
 #[test]
 fn extension_sidecar_uses_rust_local_extension_runtime() {
-    let sidecar_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../support/extension-sidecar.mjs");
+    let sidecar_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../support/extension-sidecar.mjs");
     let source = fs::read_to_string(&sidecar_path).expect("expected extension sidecar source");
 
     assert!(

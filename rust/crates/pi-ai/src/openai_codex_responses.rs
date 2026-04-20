@@ -913,7 +913,7 @@ impl AiProvider for OpenAiCodexResponsesProvider {
                     reasoning_summary: options.reasoning_summary.clone(),
                     temperature: options.temperature,
                     session_id: options.session_id.clone(),
-                    text_verbosity: None,
+                    text_verbosity: options.text_verbosity.clone(),
                 },
             );
             let payload = match crate::apply_payload_hook(&model, params, options.on_payload.as_ref()).await {

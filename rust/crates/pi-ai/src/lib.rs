@@ -129,6 +129,8 @@ pub struct StreamOptions {
     pub max_tokens: Option<u64>,
     pub reasoning_effort: Option<String>,
     pub reasoning_summary: Option<String>,
+    /// OpenAI Codex Responses text verbosity ("low", "medium", or "high").
+    pub text_verbosity: Option<String>,
     pub tool_choice: Option<crate::openai_completions::OpenAiCompletionsToolChoice>,
     pub service_tier: Option<crate::openai_responses::OpenAiResponsesServiceTier>,
 }
@@ -375,6 +377,7 @@ fn map_simple_stream_options(model: &Model, options: SimpleStreamOptions) -> Str
         max_tokens: resolved_max_tokens,
         reasoning_effort,
         reasoning_summary: None,
+        text_verbosity: None,
         tool_choice,
         service_tier,
     }

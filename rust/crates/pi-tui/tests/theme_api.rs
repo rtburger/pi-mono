@@ -195,14 +195,12 @@ fn theme_specs_convert_to_equivalent_concrete_themes() {
         default_text_theme.clone(),
         DefaultTextStyle::from(&default_text_spec),
     );
-    let second_default_text = Markdown::with_default_text_style(
-        "plain",
-        1,
-        1,
-        default_text_theme,
-        default_text_builder,
+    let second_default_text =
+        Markdown::with_default_text_style("plain", 1, 1, default_text_theme, default_text_builder);
+    assert_eq!(
+        first_default_text.render(12),
+        second_default_text.render(12)
     );
-    assert_eq!(first_default_text.render(12), second_default_text.render(12));
 
     let first_select = SelectList::new(
         themed_select_items(),

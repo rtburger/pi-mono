@@ -1125,9 +1125,7 @@ fn rendered_lines_append_segment_resets_to_prevent_style_leaks() {
     tui.start().expect("start should succeed");
 
     let writes = inspector.writes().join("");
-    assert!(writes.contains(
-        "\x1b[3mItalic\x1b[0m\x1b]8;;\x07\r\nPlain\x1b[0m\x1b]8;;\x07"
-    ));
+    assert!(writes.contains("\x1b[3mItalic\x1b[0m\x1b]8;;\x07\r\nPlain\x1b[0m\x1b]8;;\x07"));
 
     tui.stop().expect("stop should succeed");
 }

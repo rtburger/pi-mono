@@ -268,6 +268,36 @@ async fn clamps_minimal_reasoning_effort_for_newer_codex_models() {
 }
 
 #[tokio::test]
+async fn forwards_codex_text_verbosity_from_generic_stream_options() {
+    let server = MockServer::start();
+    let token = mock_token();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/codex/responses")
+            .body_contains("\"text\":{\"verbosity\":\"high\"}");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(completed_sse());
+    });
+
+    let response = complete(
+        model(server.base_url()),
+        context(),
+        StreamOptions {
+            api_key: Some(token),
+            text_verbosity: Some("high".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    mock.assert();
+    assert_eq!(response.response_id.as_deref(), Some("resp_1"));
+}
+
+#[tokio::test]
 async fn emits_aborted_terminal_error_before_http_send() {
     let (tx, rx) = watch::channel(false);
     tx.send(true).unwrap();
