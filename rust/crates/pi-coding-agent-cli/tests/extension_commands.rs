@@ -139,6 +139,26 @@ fn last_user_text(context: &Context) -> String {
         .unwrap_or_default()
 }
 
+fn user_texts(context: &Context) -> Vec<String> {
+    context
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::User { content, .. } => Some(
+                content
+                    .iter()
+                    .filter_map(|item| match item {
+                        UserContent::Text { text } => Some(text.as_str()),
+                        UserContent::Image { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
 fn write_extension(path: &PathBuf, source: &str) {
     fs::write(path, source).unwrap();
 }
@@ -228,6 +248,121 @@ async fn rpc_extension_command_can_send_user_messages_through_host_control_plane
         last_user_text(&recorded.contexts[0]),
         "hello from extension host bridge"
     );
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
+async fn rpc_extension_command_can_manage_custom_messages_entries_and_active_tools() {
+    let (model, api, recorded) = register_recording_provider("bridge complete");
+    let cwd = unique_temp_dir("rpc-bridge-actions");
+    let agent_dir = unique_temp_dir("rpc-bridge-actions-agent");
+    let session_dir = unique_temp_dir("rpc-bridge-actions-sessions");
+    let extension_path = cwd.join("bridge-actions-extension.ts");
+    write_extension(
+        &extension_path,
+        r#"export default function (pi) {
+	pi.registerCommand("bridge-actions", {
+		description: "Exercise the RPC extension bridge",
+		handler: async () => {
+			const toolNames = pi.getAllTools().map((tool) => tool.name).join(",");
+			pi.appendEntry("tool-catalog", { tools: toolNames });
+			pi.setSessionName("configured bridge session");
+			pi.sendMessage({
+				customType: "note",
+				content: "custom context from extension",
+				display: true,
+				details: { source: "bridge" },
+			});
+			pi.setActiveTools(["read", "grep", "missing-tool"]);
+			pi.sendUserMessage("hello from extension after setup");
+		},
+	});
+}
+"#,
+    );
+
+    let result = run_command(RunCommandOptions {
+        args: vec![
+            String::from("--mode"),
+            String::from("rpc"),
+            String::from("--session-dir"),
+            session_dir.to_string_lossy().into_owned(),
+            String::from("--provider"),
+            model.provider.clone(),
+            String::from("--model"),
+            model.id.clone(),
+            String::from("--extension"),
+            extension_path.to_string_lossy().into_owned(),
+        ],
+        stdin_is_tty: false,
+        stdin_content: Some(String::from(
+            "{\"id\":\"cmd-1\",\"type\":\"prompt\",\"message\":\"/bridge-actions\"}\n",
+        )),
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            model.provider.as_str(),
+            "token",
+        )])),
+        built_in_models: vec![model],
+        models_json_path: None,
+        agent_dir: Some(agent_dir),
+        cwd: cwd.clone(),
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+    assert!(result.stderr.is_empty(), "stderr: {}", result.stderr);
+    assert!(
+        !result.stdout.contains("\"type\":\"extension_error\""),
+        "stdout: {}",
+        result.stdout
+    );
+
+    let recorded = recorded.lock().unwrap().clone();
+    assert_eq!(
+        recorded.contexts.len(),
+        1,
+        "contexts: {:?}",
+        recorded.contexts
+    );
+    let context = &recorded.contexts[0];
+    let tool_names = context
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(tool_names, vec!["read", "grep"]);
+    assert_eq!(
+        user_texts(context),
+        vec![
+            String::from("custom context from extension"),
+            String::from("hello from extension after setup"),
+        ]
+    );
+
+    let session_files = fs::read_dir(&session_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+        .collect::<Vec<_>>();
+    assert_eq!(session_files.len(), 1, "files: {session_files:?}");
+    let session_contents = fs::read_to_string(&session_files[0]).unwrap();
+    assert!(
+        session_contents.contains("configured bridge session"),
+        "session: {session_contents}"
+    );
+    assert!(
+        session_contents.contains("\"customType\":\"note\""),
+        "session: {session_contents}"
+    );
+    assert!(
+        session_contents.contains("\"customType\":\"tool-catalog\""),
+        "session: {session_contents}"
+    );
+    assert!(session_contents.contains("read,bash,edit,write,grep,find,ls"));
 
     unregister_provider(&api);
 }

@@ -24,7 +24,7 @@ use crate::{
     to_print_output_mode,
     tree_picker::TreePickerItem,
 };
-use pi_agent::{AgentUnsubscribe, BeforeToolCallResult, ThinkingLevel};
+use pi_agent::{AgentTool, AgentUnsubscribe, BeforeToolCallResult, ThinkingLevel};
 use pi_ai::{
     OAuthLoginCallbacks, StreamOptions, ThinkingBudgets, Transport, get_oauth_provider,
     is_context_overflow, models_are_equal, supports_xhigh,
@@ -37,12 +37,12 @@ use pi_coding_agent_core::{
     CodingAgentCoreOptions, CompactionResult, CompactionSettings, ContextUsageEstimate,
     CustomMessage, CustomMessageContent, ExistingSessionSelection, FooterDataProvider,
     ModelRegistry, NewSessionOptions, ScopedModel, SessionBootstrapOptions, SessionEntry,
-    SessionHeader, SessionInfo, SessionManager, TreeNavigationSummary, apply_tree_navigation,
-    build_default_pi_system_prompt, calculate_context_tokens, compact, create_agent_session,
-    create_bash_execution_message, estimate_context_tokens, find_exact_model_reference_match,
-    generate_branch_summary_with_details, get_default_session_dir, parse_thinking_level,
-    prepare_compaction, prepare_tree_navigation, resolve_cli_model, resolve_model_scope,
-    restore_model_from_session, should_compact,
+    SessionHeader, SessionInfo, SessionManager, SourceInfo, TreeNavigationSummary,
+    apply_tree_navigation, build_default_pi_system_prompt, calculate_context_tokens, compact,
+    create_agent_session, create_bash_execution_message, estimate_context_tokens,
+    find_exact_model_reference_match, generate_branch_summary_with_details,
+    get_default_session_dir, parse_thinking_level, prepare_compaction, prepare_tree_navigation,
+    resolve_cli_model, resolve_model_scope, restore_model_from_session, should_compact,
 };
 #[cfg(test)]
 use pi_coding_agent_tui::PlainKeyHintStyler;
@@ -4927,6 +4927,7 @@ struct RpcState {
     scoped_models: Vec<ScopedModel>,
     runtime_settings: LoadedRuntimeSettings,
     resources: LoadedCliResources,
+    all_tools: Vec<AgentTool>,
     extension_host: Option<RpcExtensionHost>,
     auto_compaction_enabled: bool,
     is_compacting: Arc<AtomicBool>,
@@ -4943,6 +4944,7 @@ struct RpcSnapshot {
     scoped_models: Vec<ScopedModel>,
     runtime_settings: LoadedRuntimeSettings,
     resources: LoadedCliResources,
+    all_tools: Vec<AgentTool>,
     extension_host: Option<RpcExtensionHost>,
     auto_compaction_enabled: bool,
     is_compacting: Arc<AtomicBool>,
@@ -4989,6 +4991,7 @@ impl RpcShared {
             scoped_models: state.scoped_models.clone(),
             runtime_settings: state.runtime_settings.clone(),
             resources: state.resources.clone(),
+            all_tools: state.all_tools.clone(),
             extension_host: state.extension_host.clone(),
             auto_compaction_enabled: state.auto_compaction_enabled,
             is_compacting: state.is_compacting.clone(),
@@ -5636,6 +5639,7 @@ async fn build_rpc_state(
         cwd,
         runtime_settings.settings.images.auto_resize_images,
     );
+    let all_tools = build_all_rpc_tools(cwd, runtime_settings.settings.images.auto_resize_images);
 
     let session_support = if let Some(session_support_override) = session_support_override {
         Some(session_support_override)
@@ -5764,7 +5768,13 @@ async fn build_rpc_state(
             extension_paths: options.parsed.extensions.clone().unwrap_or_default(),
             no_extensions: options.parsed.no_extensions,
             flag_values: unknown_flags_to_json(&options.parsed.unknown_flags),
-            state: rpc_extension_state_json(&core, session_manager.as_ref(), &resources, &[]),
+            state: rpc_extension_state_json(
+                &core,
+                session_manager.as_ref(),
+                &resources,
+                &all_tools,
+                &[],
+            ),
             session_start_reason,
             previous_session_file,
             stdout_emitter,
@@ -5837,6 +5847,7 @@ async fn build_rpc_state(
                 &core,
                 session_manager.as_ref(),
                 &resources,
+                &all_tools,
                 &extension_commands,
             ))
             .await?;
@@ -5882,6 +5893,7 @@ async fn build_rpc_state(
             scoped_models,
             runtime_settings: runtime_settings.clone(),
             resources,
+            all_tools,
             extension_host,
             auto_compaction_enabled: runtime_settings.settings.compaction.enabled,
             is_compacting: Arc::new(AtomicBool::new(false)),
@@ -6765,6 +6777,29 @@ async fn handle_extension_host_app_request(
             execute_extension_send_user_message(&shared, content, deliver_as.as_deref()).await?;
             Ok(Value::Null)
         }
+        "send_message" => {
+            let message = parse_extension_custom_message(
+                request
+                    .get("message")
+                    .ok_or_else(|| String::from("Missing required field: message"))?,
+            )?;
+            let options = request.get("options").and_then(Value::as_object);
+            let trigger_turn = options
+                .and_then(|options| options.get("triggerTurn"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let deliver_as =
+                options.and_then(|options| optional_string_field(options, "deliverAs"));
+            execute_extension_send_message(&shared, message, trigger_turn, deliver_as.as_deref())
+                .await?;
+            Ok(Value::Null)
+        }
+        "append_entry" => {
+            let custom_type = required_string_field(request, "customType")?;
+            let data = request.get("data").cloned();
+            execute_extension_append_entry(&shared, custom_type, data)?;
+            Ok(Value::Null)
+        }
         "set_session_name" => {
             let name = required_string_field(request, "name")?;
             if name.trim().is_empty() {
@@ -6780,6 +6815,17 @@ async fn handle_extension_host_app_request(
                 .append_session_info(&name)
                 .map_err(|error| error.to_string())?;
             sync_rpc_extension_state(&shared).await;
+            Ok(Value::Null)
+        }
+        "set_label" => {
+            let entry_id = required_string_field(request, "entryId")?;
+            let label = request
+                .get("label")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(ToOwned::to_owned);
+            execute_extension_set_label(&shared, &entry_id, label)?;
             Ok(Value::Null)
         }
         "set_model" => {
@@ -6819,6 +6865,16 @@ async fn handle_extension_host_app_request(
             )?;
             sync_rpc_extension_state(&shared).await;
             Ok(Value::Null)
+        }
+        "set_active_tools" => {
+            let tool_names = parse_extension_tool_names(
+                request
+                    .get("toolNames")
+                    .ok_or_else(|| String::from("Missing required field: toolNames"))?,
+            )?;
+            let active_tools = set_rpc_active_tools(&shared, &tool_names);
+            sync_rpc_extension_state(&shared).await;
+            Ok(json!({ "activeTools": active_tools }))
         }
         "new_session" => {
             let snapshot = shared.snapshot();
@@ -7034,6 +7090,130 @@ async fn handle_extension_host_app_request(
     }
 }
 
+fn emit_rpc_extension_event_json(shared: &RpcShared, event_json: Value) {
+    if shared.emit_session_events {
+        shared.emit_json(&event_json);
+    }
+
+    if let Some(extension_host) = shared.snapshot().extension_host {
+        tokio::spawn(async move {
+            let _ = extension_host.emit_event(event_json).await;
+        });
+    }
+}
+
+fn emit_manual_rpc_agent_event(shared: &RpcShared, event: pi_agent::AgentEvent) {
+    emit_rpc_extension_event_json(shared, rpc_agent_event_to_json(&event));
+}
+
+fn parse_extension_custom_message(value: &Value) -> Result<CustomMessage, String> {
+    serde_json::from_value(value.clone())
+        .map_err(|error| format!("Invalid custom message payload: {error}"))
+}
+
+fn execute_extension_append_entry(
+    shared: &RpcShared,
+    custom_type: String,
+    data: Option<Value>,
+) -> Result<(), String> {
+    let snapshot = shared.snapshot();
+    let Some(session_manager) = snapshot.session_manager.as_ref() else {
+        return Err(String::from("Session history is unavailable"));
+    };
+    session_manager
+        .lock()
+        .expect("rpc session manager mutex poisoned")
+        .append_custom_entry(custom_type, data)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn execute_extension_set_label(
+    shared: &RpcShared,
+    entry_id: &str,
+    label: Option<String>,
+) -> Result<(), String> {
+    let snapshot = shared.snapshot();
+    let Some(session_manager) = snapshot.session_manager.as_ref() else {
+        return Err(String::from("Session history is unavailable"));
+    };
+    session_manager
+        .lock()
+        .expect("rpc session manager mutex poisoned")
+        .append_label_change(entry_id, label)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn execute_extension_send_message(
+    shared: &RpcShared,
+    message: CustomMessage,
+    trigger_turn: bool,
+    deliver_as: Option<&str>,
+) -> Result<(), String> {
+    if deliver_as == Some("nextTurn") {
+        return Err(String::from(
+            "deliverAs \"nextTurn\" is not supported in the Rust RPC extension bridge yet",
+        ));
+    }
+
+    let agent_message = message.clone().into_agent_message(now_ms());
+    let snapshot = shared.snapshot();
+    if snapshot.core.state().is_streaming {
+        match deliver_as {
+            Some("followUp") => snapshot.core.agent().follow_up(agent_message),
+            Some("steer") | None => snapshot.core.agent().steer(agent_message),
+            Some(other) => return Err(format!("Invalid deliverAs value: {other}")),
+        }
+        sync_rpc_extension_state(shared).await;
+        return Ok(());
+    }
+
+    if trigger_turn {
+        snapshot
+            .core
+            .agent()
+            .prompt(agent_message)
+            .await
+            .map_err(|error| error.to_string())?;
+        sync_rpc_extension_state(shared).await;
+        return Ok(());
+    }
+
+    let message_for_state = agent_message.clone();
+    snapshot.core.agent().update_state(move |state| {
+        state.messages.push(message_for_state.clone());
+    });
+
+    if let Some(session_manager) = snapshot.session_manager.as_ref() {
+        session_manager
+            .lock()
+            .expect("rpc session manager mutex poisoned")
+            .append_custom_message_entry(
+                message.custom_type.clone(),
+                message.content.clone(),
+                message.display,
+                message.details.clone(),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    emit_manual_rpc_agent_event(
+        shared,
+        pi_agent::AgentEvent::MessageStart {
+            message: agent_message.clone(),
+        },
+    );
+    emit_manual_rpc_agent_event(
+        shared,
+        pi_agent::AgentEvent::MessageEnd {
+            message: agent_message,
+        },
+    );
+    sync_rpc_extension_state(shared).await;
+    Ok(())
+}
+
 async fn execute_extension_send_user_message(
     shared: &RpcShared,
     content: &Value,
@@ -7052,10 +7232,11 @@ async fn execute_extension_send_user_message(
                 ));
             }
         }
+        sync_rpc_extension_state(shared).await;
         return Ok(());
     }
 
-    if images.is_empty() {
+    let result = if images.is_empty() {
         snapshot
             .session
             .prompt_text(text)
@@ -7067,7 +7248,27 @@ async fn execute_extension_send_user_message(
             .prompt_message(build_rpc_user_message(text, images))
             .await
             .map_err(|error| error.to_string())
+    };
+    if result.is_ok() {
+        sync_rpc_extension_state(shared).await;
     }
+    result
+}
+
+fn parse_extension_tool_names(value: &Value) -> Result<Vec<String>, String> {
+    let Some(tool_names) = value.as_array() else {
+        return Err(String::from("toolNames must be an array"));
+    };
+
+    tool_names
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| String::from("toolNames entries must be strings"))
+        })
+        .collect()
 }
 
 fn parse_extension_user_message_content(
@@ -7226,6 +7427,68 @@ fn spawn_rpc_extension_command_task(
     })
 }
 
+fn build_all_rpc_tools(cwd: &Path, auto_resize_images: bool) -> Vec<AgentTool> {
+    let mut parsed = Args::default();
+    parsed.tools = Some(crate::ToolName::all().to_vec());
+    let (_, tools) = build_selected_tools(&parsed, cwd, auto_resize_images);
+    tools
+}
+
+fn builtin_tool_source_info(name: &str) -> SourceInfo {
+    SourceInfo {
+        path: format!("<builtin:{name}>"),
+        source: String::from("builtin"),
+        scope: String::from("temporary"),
+        origin: String::from("top-level"),
+        base_dir: None,
+    }
+}
+
+fn rpc_tool_info_json(tool: &AgentTool) -> Value {
+    json!({
+        "name": tool.definition.name.clone(),
+        "description": tool.definition.description.clone(),
+        "parameters": tool.definition.parameters.clone(),
+        "sourceInfo": builtin_tool_source_info(&tool.definition.name),
+    })
+}
+
+fn set_rpc_active_tools(shared: &RpcShared, tool_names: &[String]) -> Vec<String> {
+    let snapshot = shared.snapshot();
+    let mut active_tools = Vec::new();
+    let mut active_tool_names = Vec::new();
+
+    for name in tool_names {
+        if active_tool_names.iter().any(|existing| existing == name) {
+            continue;
+        }
+        if let Some(tool) = snapshot
+            .all_tools
+            .iter()
+            .find(|tool| tool.definition.name == *name)
+        {
+            active_tools.push(tool.clone());
+            active_tool_names.push(name.clone());
+        }
+    }
+
+    let system_prompt = build_runtime_system_prompt(
+        &shared.options.default_system_prompt,
+        &shared.options.parsed,
+        &snapshot.cwd,
+        shared.options.agent_dir.as_deref(),
+        &active_tool_names,
+        &snapshot.resources,
+    );
+    let tools_for_state = active_tools.clone();
+    snapshot.core.agent().update_state(move |state| {
+        state.tools = tools_for_state.clone();
+        state.system_prompt = system_prompt.clone();
+    });
+
+    active_tool_names
+}
+
 async fn sync_rpc_extension_state(shared: &RpcShared) {
     let snapshot = shared.snapshot();
     let Some(extension_host) = snapshot.extension_host else {
@@ -7236,6 +7499,7 @@ async fn sync_rpc_extension_state(shared: &RpcShared) {
             &snapshot.core,
             snapshot.session_manager.as_ref(),
             &snapshot.resources,
+            &snapshot.all_tools,
             &extension_host.commands(),
         ))
         .await;
@@ -7281,6 +7545,7 @@ fn rpc_extension_state_json(
     core: &CodingAgentCore,
     session_manager: Option<&Arc<Mutex<SessionManager>>>,
     resources: &LoadedCliResources,
+    all_tools: &[AgentTool],
     extension_commands: &[RpcExtensionCommandInfo],
 ) -> Value {
     let state = core.state();
@@ -7289,6 +7554,7 @@ fn rpc_extension_state_json(
         .iter()
         .map(|tool| Value::String(tool.definition.name.clone()))
         .collect::<Vec<_>>();
+    let all_tools = all_tools.iter().map(rpc_tool_info_json).collect::<Vec<_>>();
     let mut commands = extension_commands
         .iter()
         .map(|command| {
@@ -7324,8 +7590,8 @@ fn rpc_extension_state_json(
         "hasPendingMessages": core.agent().has_queued_messages(),
         "systemPrompt": state.system_prompt,
         "sessionName": current_session_name(session_manager),
-        "activeTools": active_tools.clone(),
-        "allTools": active_tools,
+        "activeTools": active_tools,
+        "allTools": all_tools,
         "commands": commands,
     })
 }

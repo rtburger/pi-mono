@@ -5,6 +5,7 @@ let runner;
 let uiCounter = 0;
 let appRequestCounter = 0;
 let commandActionPromises = null;
+let commandActionChain = null;
 const pendingUiRequests = new Map();
 const pendingAppRequests = new Map();
 const runtimeState = {
@@ -66,7 +67,9 @@ function trackCommandAction(promise) {
 }
 
 function fireAndTrackHostRequest(method, payload, event, onSuccess) {
-	const tracked = requestHost(method, payload)
+	const previous = commandActionChain ?? Promise.resolve();
+	const tracked = previous
+		.then(() => requestHost(method, payload))
 		.then((data) => {
 			onSuccess?.(data);
 			return data;
@@ -75,6 +78,7 @@ function fireAndTrackHostRequest(method, payload, event, onSuccess) {
 			emitRuntimeError(event, error instanceof Error ? error.message : String(error));
 			return undefined;
 		});
+	commandActionChain = tracked;
 	trackCommandAction(tracked);
 }
 
@@ -362,8 +366,8 @@ function bindRunner(loaded, cwd) {
 
 	runner.bindCore(
 		{
-			sendMessage() {
-				unsupported("send_message");
+			sendMessage(message, options) {
+				fireAndTrackHostRequest("send_message", { message, options }, "send_message");
 			},
 			sendUserMessage(content, options) {
 				fireAndTrackHostRequest(
@@ -372,8 +376,8 @@ function bindRunner(loaded, cwd) {
 					"send_user_message",
 				);
 			},
-			appendEntry() {
-				unsupported("append_entry");
+			appendEntry(customType, data) {
+				fireAndTrackHostRequest("append_entry", { customType, data }, "append_entry");
 			},
 			setSessionName(name) {
 				fireAndTrackHostRequest(
@@ -388,8 +392,8 @@ function bindRunner(loaded, cwd) {
 			getSessionName() {
 				return runtimeState.sessionName;
 			},
-			setLabel() {
-				unsupported("set_label");
+			setLabel(entryId, label) {
+				fireAndTrackHostRequest("set_label", { entryId, label }, "set_label");
 			},
 			getActiveTools() {
 				return runtimeState.activeTools;
@@ -398,8 +402,20 @@ function bindRunner(loaded, cwd) {
 				return runtimeState.allTools;
 			},
 			setActiveTools(toolNames) {
-				runtimeState.activeTools = [...toolNames];
-				emitUnsupported("set_active_tools");
+				const knownToolNames = new Set(runtimeState.allTools.map((tool) => tool?.name).filter(Boolean));
+				runtimeState.activeTools = toolNames.filter((name) =>
+					knownToolNames.size === 0 ? true : knownToolNames.has(name),
+				);
+				fireAndTrackHostRequest(
+					"set_active_tools",
+					{ toolNames },
+					"set_active_tools",
+					(data) => {
+						if (Array.isArray(data?.activeTools)) {
+							runtimeState.activeTools = [...data.activeTools];
+						}
+					},
+				);
 			},
 			refreshTools() {},
 			getCommands() {
@@ -563,7 +579,9 @@ async function handleExecuteCommand(message) {
 		return;
 	}
 	const previousActionPromises = commandActionPromises;
+	const previousActionChain = commandActionChain;
 	commandActionPromises = [];
+	commandActionChain = Promise.resolve();
 	try {
 		await command.handler(message.args ?? "", runner.createCommandContext());
 		await Promise.all(commandActionPromises);
@@ -572,6 +590,7 @@ async function handleExecuteCommand(message) {
 		replyError(message.id, error instanceof Error ? error.message : String(error));
 	} finally {
 		commandActionPromises = previousActionPromises;
+		commandActionChain = previousActionChain;
 	}
 }
 
