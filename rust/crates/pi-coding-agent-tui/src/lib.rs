@@ -6,7 +6,10 @@ mod compaction_summary;
 mod config_selector;
 mod custom_editor;
 mod custom_message;
+mod dialog_countdown;
 mod extension_editor;
+mod extension_input;
+mod extension_selector;
 mod footer;
 mod interactive_binding;
 mod keybinding_hints;
@@ -50,6 +53,8 @@ pub use custom_message::CustomMessageComponent;
 pub use extension_editor::{
     ExtensionEditorComponent, ExternalEditorCommandRunner, ExternalEditorHost,
 };
+pub use extension_input::ExtensionInputComponent;
+pub use extension_selector::ExtensionSelectorComponent;
 pub use footer::{FooterComponent, FooterState, FooterStateHandle};
 pub use interactive_binding::InteractiveCoreBinding;
 pub use keybinding_hints::{KeyHintStyler, PlainKeyHintStyler, key_hint, key_text, raw_key_hint};
@@ -80,7 +85,7 @@ pub use startup_header::{
     BuiltInHeaderComponent, StartupHeaderComponent, StartupHeaderStyler,
     build_condensed_changelog_notice, build_startup_header_text,
 };
-pub use startup_shell::{StartupShellComponent, StatusHandle};
+pub use startup_shell::{ShellUpdateHandle, StartupShellComponent, StatusHandle};
 pub use theme::{
     ColorMode, LoadThemesOptions, LoadThemesResult, Theme, ThemeExportColors, ThemeInfo,
     ThemeSelectionResult, ThemedKeyHintStyler, current_theme, current_theme_name,

@@ -51,9 +51,9 @@ use pi_coding_agent_tui::{
     ExternalEditorCommandRunner, ExternalEditorHost, FooterStateHandle, InteractiveCoreBinding,
     KeybindingsManager, LoginDialogComponent, OAuthProviderItem, OAuthSelectorComponent,
     OAuthSelectorMode, SettingsChange, SettingsConfig, SettingsSelectorComponent,
-    StartupShellComponent, StatusHandle, SystemClipboardImageSource, ThemedKeyHintStyler,
-    TreeFilterMode, TreeSelectorComponent, get_available_themes, init_theme, key_hint, key_text,
-    set_registered_themes, set_theme,
+    ShellUpdateHandle, StartupShellComponent, StatusHandle, SystemClipboardImageSource,
+    ThemedKeyHintStyler, TreeFilterMode, TreeSelectorComponent, get_available_themes, init_theme,
+    key_hint, key_text, set_registered_themes, set_theme,
 };
 use pi_config::{LoadedRuntimeSettings, ThinkingBudgetsSettings, load_runtime_settings};
 use pi_events::{AssistantContent, Message, Model, UserContent};
@@ -85,8 +85,8 @@ use tokio::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rpc_extensions::{
     RpcExtensionCommandInfo, RpcExtensionHost, RpcExtensionHostStartOptions,
-    RpcExtensionInputResult, RpcExtensionShortcutInfo, RpcExtensionToolInfo,
-    RpcToolCallResult, RpcToolResultMutation, should_start_extension_host,
+    RpcExtensionInputResult, RpcExtensionShortcutInfo, RpcExtensionToolInfo, RpcToolCallResult,
+    RpcToolResultMutation, should_start_extension_host,
 };
 use serde_json::{Value, json};
 
@@ -1983,10 +1983,8 @@ async fn run_interactive_iteration(
     let interactive_session_manager = session_support
         .as_ref()
         .map(|support| support.manager.clone());
-    let mut all_tools = build_all_rpc_tools(
-        &cwd,
-        runtime_settings.settings.images.auto_resize_images,
-    );
+    let mut all_tools =
+        build_all_rpc_tools(&cwd, runtime_settings.settings.images.auto_resize_images);
     let mut tool_source_info = builtin_rpc_tool_source_info_map(&all_tools);
 
     let mut shell = StartupShellComponent::new(
@@ -2023,6 +2021,8 @@ async fn run_interactive_iteration(
     let terminal_width = tui.terminal_mut().columns() as usize;
     let terminal_height = tui.terminal_mut().rows() as usize;
     let viewport_size = Arc::new(Mutex::new((terminal_width, terminal_height)));
+    shell.set_render_handle(render_handle.clone());
+    let shell_update_handle = shell.update_handle_with_render_handle(render_handle.clone());
     if let Some(command) = runtime.extension_editor_command.clone() {
         shell.set_extension_editor_command(command);
     }
@@ -2031,7 +2031,10 @@ async fn run_interactive_iteration(
     }
     let interactive_host = terminal.external_editor_host(render_handle.clone());
     shell.set_extension_editor_host(interactive_host.clone());
-    shell.bind_footer_data_provider_with_render_handle(footer_provider.as_ref(), render_handle.clone());
+    shell.bind_footer_data_provider_with_render_handle(
+        footer_provider.as_ref(),
+        render_handle.clone(),
+    );
     let binding = InteractiveCoreBinding::bind(core.clone(), &mut shell, render_handle.clone());
     let status_handle = shell.status_handle_with_render_handle(render_handle.clone());
     let footer_state_handle = shell.footer_state_handle_with_render_handle(render_handle.clone());
@@ -2047,6 +2050,7 @@ async fn run_interactive_iteration(
     let mut interactive_extension_host = None::<RpcExtensionHost>;
     let mut interactive_extension_shortcuts = Vec::<RpcExtensionShortcutInfo>::new();
     let mut interactive_extension_event_unsubscribe = None::<AgentUnsubscribe>;
+    let pending_terminal_title = Arc::new(Mutex::new(None::<String>));
     if should_start_extension_host(
         &cwd,
         agent_dir.as_deref(),
@@ -2057,6 +2061,8 @@ async fn run_interactive_iteration(
         let extension_stdout_emitter = interactive_extension_output_emitter(
             status_handle.clone(),
             footer_provider.clone(),
+            shell_update_handle.clone(),
+            pending_terminal_title.clone(),
             extension_host_holder.clone(),
         );
         let extension_stderr_emitter: TextEmitter = Arc::new({
@@ -2172,7 +2178,10 @@ async fn run_interactive_iteration(
             all_tools.extend(extension_tools);
             for tool_info in &extension_tool_infos {
                 tool_source_info.insert(tool_info.name.clone(), tool_info.source_info.clone());
-                if !selected_tool_names.iter().any(|name| name == &tool_info.name) {
+                if !selected_tool_names
+                    .iter()
+                    .any(|name| name == &tool_info.name)
+                {
                     selected_tool_names.push(tool_info.name.clone());
                 }
             }
@@ -2336,6 +2345,13 @@ async fn run_interactive_iteration(
 
     let mut exit_code = 0;
     while !exit_requested.load(Ordering::Relaxed) {
+        if let Some(title) = pending_terminal_title
+            .lock()
+            .expect("interactive terminal title mutex poisoned")
+            .take()
+        {
+            let _ = tui.terminal_mut().set_title(&title);
+        }
         if let Err(error) = tui.drain_terminal_events() {
             eprintln!("Error: {error}");
             exit_code = 1;
@@ -6030,7 +6046,9 @@ async fn build_rpc_state(
             extension_paths: options.parsed.extensions.clone().unwrap_or_default(),
             no_extensions: options.parsed.no_extensions,
             flag_values: unknown_flags_to_json(&options.parsed.unknown_flags),
-            keybindings: keybindings_json(&create_keybindings_manager(options.agent_dir.as_deref())),
+            keybindings: keybindings_json(&create_keybindings_manager(
+                options.agent_dir.as_deref(),
+            )),
             state: rpc_extension_state_json(
                 &core,
                 session_manager.as_ref(),
@@ -9692,6 +9710,8 @@ fn keybindings_json(keybindings: &KeybindingsManager) -> Value {
 fn interactive_extension_output_emitter(
     status_handle: StatusHandle,
     footer_provider: Arc<FooterDataProvider>,
+    shell_update_handle: ShellUpdateHandle,
+    pending_terminal_title: Arc<Mutex<Option<String>>>,
     extension_host_holder: Arc<Mutex<Option<RpcExtensionHost>>>,
 ) -> TextEmitter {
     Arc::new(move |text| {
@@ -9704,16 +9724,35 @@ fn interactive_extension_output_emitter(
                 trimmed,
                 &status_handle,
                 footer_provider.as_ref(),
+                &shell_update_handle,
+                &pending_terminal_title,
                 &extension_host_holder,
             );
         }
     })
 }
 
+fn spawn_interactive_extension_ui_response(
+    extension_host_holder: &Arc<Mutex<Option<RpcExtensionHost>>>,
+    response: Value,
+) {
+    let extension_host = extension_host_holder
+        .lock()
+        .expect("interactive extension host mutex poisoned")
+        .clone();
+    if let Some(extension_host) = extension_host {
+        tokio::spawn(async move {
+            let _ = extension_host.deliver_ui_response(response).await;
+        });
+    }
+}
+
 fn handle_interactive_extension_output_line(
     line: &str,
     status_handle: &StatusHandle,
     footer_provider: &FooterDataProvider,
+    shell_update_handle: &ShellUpdateHandle,
+    pending_terminal_title: &Arc<Mutex<Option<String>>>,
     extension_host_holder: &Arc<Mutex<Option<RpcExtensionHost>>>,
 ) {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -9727,7 +9766,10 @@ fn handle_interactive_extension_output_line(
             }
         }
         Some("extension_ui_request") => {
-            let request_id = value.get("id").and_then(Value::as_str).map(ToOwned::to_owned);
+            let request_id = value
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
             match value.get("method").and_then(Value::as_str) {
                 Some("notify") => {
                     if let Some(message) = value.get("message").and_then(Value::as_str) {
@@ -9743,24 +9785,169 @@ fn handle_interactive_extension_output_line(
                         footer_provider.set_extension_status(key.to_owned(), text);
                     }
                 }
-                Some("input") | Some("select") | Some("confirm") | Some("editor") => {
-                    if let Some(request_id) = request_id
-                        && let Some(extension_host) = extension_host_holder
+                Some("setTitle") => {
+                    if let Some(title) = value.get("title").and_then(Value::as_str) {
+                        *pending_terminal_title
                             .lock()
-                            .expect("interactive extension host mutex poisoned")
-                            .clone()
-                    {
-                        tokio::spawn(async move {
-                            let _ = extension_host
-                                .deliver_ui_response(json!({
-                                    "id": request_id,
-                                    "cancelled": true,
-                                }))
-                                .await;
-                        });
+                            .expect("interactive terminal title mutex poisoned") =
+                            Some(title.to_owned());
                     }
-                    status_handle.set_message(
-                        "Extension dialogs are not supported in the Rust interactive CLI yet.",
+                }
+                Some("set_editor_text") => {
+                    if let Some(text) = value.get("text").and_then(Value::as_str) {
+                        shell_update_handle.set_input_value(text.to_owned(), Some(text.len()));
+                    }
+                }
+                Some("input") => {
+                    let Some(request_id) = request_id else {
+                        return;
+                    };
+                    let title = value
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Extension input")
+                        .to_owned();
+                    let placeholder = value
+                        .get("placeholder")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned);
+                    let timeout_ms = value.get("timeout").and_then(Value::as_u64);
+                    let submit_request_id = request_id.clone();
+                    let cancel_request_id = request_id.clone();
+                    let submit_holder = extension_host_holder.clone();
+                    let cancel_holder = extension_host_holder.clone();
+                    shell_update_handle.show_extension_input(
+                        title,
+                        placeholder,
+                        timeout_ms,
+                        move |value| {
+                            spawn_interactive_extension_ui_response(
+                                &submit_holder,
+                                json!({ "id": submit_request_id, "value": value }),
+                            );
+                        },
+                        move || {
+                            spawn_interactive_extension_ui_response(
+                                &cancel_holder,
+                                json!({ "id": cancel_request_id, "cancelled": true }),
+                            );
+                        },
+                    );
+                }
+                Some("select") => {
+                    let Some(request_id) = request_id else {
+                        return;
+                    };
+                    let title = value
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Extension selection")
+                        .to_owned();
+                    let options = value
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|options| {
+                            options
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(ToOwned::to_owned)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let timeout_ms = value.get("timeout").and_then(Value::as_u64);
+                    let select_request_id = request_id.clone();
+                    let cancel_request_id = request_id.clone();
+                    let select_holder = extension_host_holder.clone();
+                    let cancel_holder = extension_host_holder.clone();
+                    shell_update_handle.show_extension_selector(
+                        title,
+                        options,
+                        timeout_ms,
+                        move |value| {
+                            spawn_interactive_extension_ui_response(
+                                &select_holder,
+                                json!({ "id": select_request_id, "value": value }),
+                            );
+                        },
+                        move || {
+                            spawn_interactive_extension_ui_response(
+                                &cancel_holder,
+                                json!({ "id": cancel_request_id, "cancelled": true }),
+                            );
+                        },
+                    );
+                }
+                Some("confirm") => {
+                    let Some(request_id) = request_id else {
+                        return;
+                    };
+                    let title = value
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Confirm")
+                        .to_owned();
+                    let message = value
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let timeout_ms = value.get("timeout").and_then(Value::as_u64);
+                    let confirm_request_id = request_id.clone();
+                    let cancel_request_id = request_id.clone();
+                    let confirm_holder = extension_host_holder.clone();
+                    let cancel_holder = extension_host_holder.clone();
+                    shell_update_handle.show_extension_selector(
+                        format!("{title}\n{message}"),
+                        vec![String::from("Yes"), String::from("No")],
+                        timeout_ms,
+                        move |value| {
+                            spawn_interactive_extension_ui_response(
+                                &confirm_holder,
+                                json!({
+                                    "id": confirm_request_id,
+                                    "confirmed": value == "Yes",
+                                }),
+                            );
+                        },
+                        move || {
+                            spawn_interactive_extension_ui_response(
+                                &cancel_holder,
+                                json!({ "id": cancel_request_id, "cancelled": true }),
+                            );
+                        },
+                    );
+                }
+                Some("editor") => {
+                    let Some(request_id) = request_id else {
+                        return;
+                    };
+                    let title = value
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Extension editor")
+                        .to_owned();
+                    let prefill = value
+                        .get("prefill")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned);
+                    let submit_request_id = request_id.clone();
+                    let cancel_request_id = request_id.clone();
+                    let submit_holder = extension_host_holder.clone();
+                    let cancel_holder = extension_host_holder.clone();
+                    shell_update_handle.show_extension_editor(
+                        title,
+                        prefill,
+                        move |value| {
+                            spawn_interactive_extension_ui_response(
+                                &submit_holder,
+                                json!({ "id": submit_request_id, "value": value }),
+                            );
+                        },
+                        move || {
+                            spawn_interactive_extension_ui_response(
+                                &cancel_holder,
+                                json!({ "id": cancel_request_id, "cancelled": true }),
+                            );
+                        },
                     );
                 }
                 _ => {}
@@ -9770,6 +9957,7 @@ fn handle_interactive_extension_output_line(
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn render_hotkeys_text(keybindings: &KeybindingsManager) -> String {
     render_hotkeys_text_with_extensions(keybindings, &[])
 }
@@ -11312,6 +11500,7 @@ fn install_interactive_submit_handler(
     let bash_controller = Arc::new(Mutex::new(InteractiveBashController::default()));
     let extension_shortcuts = slash_command_context.extension_shortcuts.clone();
     let extension_host = slash_command_context.extension_host.clone();
+    let extension_command_host = slash_command_context.extension_host.clone();
     let extension_status_handle = status_handle.clone();
     let interrupt_keybindings = slash_command_context.keybindings.clone();
     let interrupt_bash_controller = bash_controller.clone();
@@ -11328,9 +11517,7 @@ fn install_interactive_submit_handler(
                     Ok(true) => {}
                     Ok(false) => extension_status_handle
                         .set_message(format!("Extension shortcut unavailable: {shortcut_id}")),
-                    Err(error) => {
-                        extension_status_handle.set_message(format!("Error: {error}"))
-                    }
+                    Err(error) => extension_status_handle.set_message(format!("Error: {error}")),
                 }
             });
             return true;
@@ -11372,6 +11559,22 @@ fn install_interactive_submit_handler(
             &exit_requested,
             &transition_request,
         ) {
+            return;
+        }
+
+        if let Some((command_name, args)) = parse_rpc_extension_command(trimmed)
+            && let Some(extension_host) = extension_command_host.clone()
+            && extension_host.has_command(&command_name)
+        {
+            let status_handle = status_handle.clone();
+            tokio::spawn(async move {
+                match extension_host.execute_command(&command_name, &args).await {
+                    Ok(true) => {}
+                    Ok(false) => status_handle
+                        .set_message(format!("Unknown extension command: /{command_name}")),
+                    Err(error) => status_handle.set_message(format!("Error: {error}")),
+                }
+            });
             return;
         }
 
@@ -12596,6 +12799,7 @@ mod tests {
 
     struct LifecycleScriptedTerminalState {
         writes: Mutex<Vec<String>>,
+        titles: Mutex<Vec<String>>,
         input_handler: Mutex<Option<SharedInputHandler>>,
         resize_handler: Mutex<Option<SharedResizeHandler>>,
         active: AtomicBool,
@@ -12607,6 +12811,7 @@ mod tests {
         fn new(script: Vec<(Duration, String)>) -> Self {
             let state = Arc::new(LifecycleScriptedTerminalState {
                 writes: Mutex::new(Vec::new()),
+                titles: Mutex::new(Vec::new()),
                 input_handler: Mutex::new(None),
                 resize_handler: Mutex::new(None),
                 active: AtomicBool::new(false),
@@ -12655,6 +12860,14 @@ mod tests {
 
         fn stop_count(&self) -> usize {
             self.state.stop_count.load(Ordering::Relaxed)
+        }
+
+        fn titles(&self) -> Vec<String> {
+            self.state
+                .titles
+                .lock()
+                .expect("scripted terminal titles mutex poisoned")
+                .clone()
         }
     }
 
@@ -12736,7 +12949,12 @@ mod tests {
             Ok(())
         }
 
-        fn set_title(&mut self, _title: &str) -> Result<(), TuiError> {
+        fn set_title(&mut self, title: &str) -> Result<(), TuiError> {
+            self.state
+                .titles
+                .lock()
+                .expect("scripted terminal titles mutex poisoned")
+                .push(title.to_owned());
             Ok(())
         }
     }
@@ -12833,6 +13051,196 @@ mod tests {
         );
         assert_eq!(inspector.start_count(), 2, "output: {output}");
         assert_eq!(inspector.stop_count(), 2, "output: {output}");
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn interactive_extension_input_dialog_accepts_response_and_updates_prompt_text() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "interactive-extension-input-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "interactive-extension-input-faux-1".into(),
+                name: Some("Interactive Extension Input Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("interactive-extension-input-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("interactive-extension-input-cwd");
+        let agent_dir = unique_temp_dir("interactive-extension-input-agent");
+        let extension_path = cwd.join("input-extension.ts");
+        fs::write(
+            &extension_path,
+            r#"export default function (pi) {
+	pi.on("session_start", async (_event, ctx) => {
+		ctx.ui.setTitle("Interactive Extension Input");
+	});
+
+	pi.registerCommand("interactive-input", {
+		description: "Prompt for input in interactive mode",
+		handler: async (_args, ctx) => {
+			const value = await ctx.ui.input("Enter a value", "type something...");
+			if (!value) {
+				ctx.ui.notify("Input cancelled", "info");
+				return;
+			}
+			ctx.ui.setEditorText(`prefilled from extension: ${value}`);
+			ctx.ui.notify(`You entered: ${value}`, "info");
+		},
+	});
+}
+"#,
+        )
+        .unwrap();
+
+        let terminal = LifecycleScriptedTerminal::new(vec![
+            (
+                Duration::from_millis(50),
+                String::from("/interactive-input"),
+            ),
+            (Duration::from_millis(10), String::from("\r")),
+            (Duration::from_millis(300), String::from("hello")),
+            (Duration::from_millis(10), String::from("\r")),
+            (Duration::from_millis(300), String::from("\x03")),
+            (Duration::from_millis(20), String::from("\x04")),
+        ]);
+        let inspector = terminal.clone();
+
+        let exit_code = timeout(
+            Duration::from_secs(10),
+            run_interactive_command_with_runtime(
+                RunCommandOptions {
+                    args: vec![
+                        String::from("--provider"),
+                        model.provider.clone(),
+                        String::from("--model"),
+                        model.id.clone(),
+                        String::from("--extension"),
+                        extension_path.to_string_lossy().into_owned(),
+                    ],
+                    stdin_is_tty: true,
+                    stdin_content: None,
+                    auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                        model.provider.as_str(),
+                        "token",
+                    )])),
+                    built_in_models: vec![model],
+                    models_json_path: None,
+                    agent_dir: Some(agent_dir),
+                    cwd,
+                    default_system_prompt: String::new(),
+                    version: String::from("0.1.0"),
+                    stream_options: StreamOptions::default(),
+                },
+                InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone()))),
+            ),
+        )
+        .await
+        .expect("interactive extension input run should complete");
+
+        let output = strip_terminal_control_sequences(&inspector.output());
+        assert_eq!(exit_code, 0, "output: {output}");
+        assert!(output.contains("Enter a value"), "output: {output}");
+        assert!(output.contains("You entered: hello"), "output: {output}");
+        assert!(
+            output.contains("prefilled from extension: hello"),
+            "output: {output}"
+        );
+        assert!(
+            inspector
+                .titles()
+                .iter()
+                .any(|title| title == "Interactive Extension Input"),
+            "titles: {:?}",
+            inspector.titles()
+        );
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn interactive_extension_select_dialog_returns_selected_option() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "interactive-extension-select-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "interactive-extension-select-faux-1".into(),
+                name: Some("Interactive Extension Select Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("interactive-extension-select-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("interactive-extension-select-cwd");
+        let agent_dir = unique_temp_dir("interactive-extension-select-agent");
+        let extension_path = cwd.join("select-extension.ts");
+        fs::write(
+            &extension_path,
+            r#"export default function (pi) {
+	pi.registerCommand("interactive-select", {
+		description: "Prompt for selection in interactive mode",
+		handler: async (_args, ctx) => {
+			const value = await ctx.ui.select("Choose action", ["Allow", "Block"]);
+			ctx.ui.notify(value ? `Selected: ${value}` : "Selection cancelled", "info");
+		},
+	});
+}
+"#,
+        )
+        .unwrap();
+
+        let terminal = LifecycleScriptedTerminal::new(vec![
+            (
+                Duration::from_millis(50),
+                String::from("/interactive-select"),
+            ),
+            (Duration::from_millis(10), String::from("\r")),
+            (Duration::from_millis(300), String::from("\x1b[B")),
+            (Duration::from_millis(10), String::from("\r")),
+            (Duration::from_millis(250), String::from("\x04")),
+        ]);
+        let inspector = terminal.clone();
+
+        let exit_code = timeout(
+            Duration::from_secs(10),
+            run_interactive_command_with_runtime(
+                RunCommandOptions {
+                    args: vec![
+                        String::from("--provider"),
+                        model.provider.clone(),
+                        String::from("--model"),
+                        model.id.clone(),
+                        String::from("--extension"),
+                        extension_path.to_string_lossy().into_owned(),
+                    ],
+                    stdin_is_tty: true,
+                    stdin_content: None,
+                    auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                        model.provider.as_str(),
+                        "token",
+                    )])),
+                    built_in_models: vec![model],
+                    models_json_path: None,
+                    agent_dir: Some(agent_dir),
+                    cwd,
+                    default_system_prompt: String::new(),
+                    version: String::from("0.1.0"),
+                    stream_options: StreamOptions::default(),
+                },
+                InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone()))),
+            ),
+        )
+        .await
+        .expect("interactive extension select run should complete");
+
+        let output = strip_terminal_control_sequences(&inspector.output());
+        assert_eq!(exit_code, 0, "output: {output}");
+        assert!(output.contains("Choose action"), "output: {output}");
+        assert!(output.contains("Selected: Block"), "output: {output}");
 
         faux.unregister();
     }
