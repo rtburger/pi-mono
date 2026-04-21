@@ -8353,6 +8353,10 @@ fn apply_runtime_transport_preference(
     } else if runtime_settings.settings.transport != Transport::Sse {
         stream_options.transport = Some(runtime_settings.settings.transport);
     }
+
+    if stream_options.max_retry_delay_ms.is_none() {
+        stream_options.max_retry_delay_ms = Some(runtime_settings.settings.retry.max_delay_ms);
+    }
 }
 
 fn normalize_stdin_content(stdin_is_tty: bool, stdin_content: Option<String>) -> Option<String> {
@@ -14417,6 +14421,33 @@ mod tests {
         assert_eq!(result.stdout.trim(), expected_output.to_string_lossy());
         let exported = fs::read_to_string(&expected_output).expect("expected exported html");
         assert!(exported.contains("export from cli"), "content: {exported}");
+    }
+
+    #[test]
+    fn apply_runtime_transport_preference_sets_retry_delay_from_runtime_settings() {
+        let mut stream_options = StreamOptions::default();
+        let parsed = Args::default();
+        let mut runtime_settings = LoadedRuntimeSettings::default();
+        runtime_settings.settings.retry.max_delay_ms = 9_000;
+
+        apply_runtime_transport_preference(&mut stream_options, &parsed, &runtime_settings);
+
+        assert_eq!(stream_options.max_retry_delay_ms, Some(9_000));
+    }
+
+    #[test]
+    fn apply_runtime_transport_preference_preserves_explicit_retry_delay() {
+        let mut stream_options = StreamOptions {
+            max_retry_delay_ms: Some(321),
+            ..StreamOptions::default()
+        };
+        let parsed = Args::default();
+        let mut runtime_settings = LoadedRuntimeSettings::default();
+        runtime_settings.settings.retry.max_delay_ms = 9_000;
+
+        apply_runtime_transport_preference(&mut stream_options, &parsed, &runtime_settings);
+
+        assert_eq!(stream_options.max_retry_delay_ms, Some(321));
     }
 
     #[test]
