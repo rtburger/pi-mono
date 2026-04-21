@@ -6,6 +6,7 @@ let uiCounter = 0;
 let appRequestCounter = 0;
 let commandActionPromises = null;
 let commandActionChain = null;
+let appRequestsReady = false;
 const pendingUiRequests = new Map();
 const pendingAppRequests = new Map();
 const runtimeState = {
@@ -417,7 +418,26 @@ function bindRunner(loaded, cwd) {
 					},
 				);
 			},
-			refreshTools() {},
+			refreshTools() {
+				const tools = extensionTools();
+				updateRuntimeToolStateFromExtensionTools(tools);
+				if (!appRequestsReady) {
+					return;
+				}
+				fireAndTrackHostRequest(
+					"refresh_tools",
+					{ tools },
+					"refresh_tools",
+					(data) => {
+						if (Array.isArray(data?.activeTools)) {
+							runtimeState.activeTools = [...data.activeTools];
+						}
+						if (Array.isArray(data?.allTools)) {
+							runtimeState.allTools = [...data.allTools];
+						}
+					},
+				);
+			},
 			getCommands() {
 				return runtimeState.commands;
 			},
@@ -535,6 +555,40 @@ function extensionTools() {
 	}));
 }
 
+function updateRuntimeToolStateFromExtensionTools(nextExtensionTools) {
+	const previousNames = new Set(runtimeState.allTools.map((tool) => tool?.name).filter(Boolean));
+	const builtInTools = runtimeState.allTools.filter((tool) => tool?.sourceInfo?.source === "builtin");
+	const mergedToolsByName = new Map();
+	for (const tool of builtInTools) {
+		if (tool?.name) {
+			mergedToolsByName.set(tool.name, tool);
+		}
+	}
+	for (const tool of nextExtensionTools) {
+		if (tool?.name) {
+			mergedToolsByName.set(tool.name, tool);
+		}
+	}
+
+	const nextAllTools = Array.from(mergedToolsByName.values());
+	const nextToolNames = new Set(nextAllTools.map((tool) => tool?.name).filter(Boolean));
+	const nextActiveTools = runtimeState.activeTools.filter((name) => nextToolNames.has(name));
+	const seenActiveTools = new Set(nextActiveTools);
+	for (const tool of nextAllTools) {
+		const toolName = tool?.name;
+		if (!toolName) {
+			continue;
+		}
+		if (!previousNames.has(toolName) && !seenActiveTools.has(toolName)) {
+			nextActiveTools.push(toolName);
+			seenActiveTools.add(toolName);
+		}
+	}
+
+	runtimeState.allTools = nextAllTools;
+	runtimeState.activeTools = nextActiveTools;
+}
+
 async function handleInit(message) {
 	applyRuntimeState(message.state);
 	const loaded = message.noExtensions
@@ -583,6 +637,7 @@ async function handleInit(message) {
 		themePaths: resources.themePaths,
 		diagnostics,
 	});
+	appRequestsReady = true;
 }
 
 async function handleExecuteCommand(message) {

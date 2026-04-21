@@ -7024,6 +7024,18 @@ async fn handle_extension_host_app_request(
             sync_rpc_extension_state(&shared).await;
             Ok(json!({ "activeTools": active_tools }))
         }
+        "refresh_tools" => {
+            let tool_infos = serde_json::from_value::<Vec<RpcExtensionToolInfo>>(
+                request
+                    .get("tools")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(Vec::new())),
+            )
+            .map_err(|error| format!("Invalid tools payload: {error}"))?;
+            let refreshed = refresh_rpc_extension_tools(&shared, &tool_infos);
+            sync_rpc_extension_state(&shared).await;
+            Ok(refreshed)
+        }
         "new_session" => {
             let snapshot = shared.snapshot();
             if snapshot.core.state().is_streaming {
@@ -7737,6 +7749,109 @@ fn rpc_tool_info_json(tool: &AgentTool, tool_source_info: &BTreeMap<String, Sour
             .get(&tool.definition.name)
             .cloned()
             .unwrap_or_else(|| builtin_tool_source_info(&tool.definition.name)),
+    })
+}
+
+fn refresh_rpc_extension_tools(
+    shared: &RpcShared,
+    extension_tool_infos: &[RpcExtensionToolInfo],
+) -> Value {
+    let snapshot = shared.snapshot();
+    let Some(extension_host) = snapshot.extension_host.clone() else {
+        let active_tools = snapshot
+            .core
+            .state()
+            .tools
+            .iter()
+            .map(|tool| tool.definition.name.clone())
+            .collect::<Vec<_>>();
+        let all_tools = snapshot
+            .all_tools
+            .iter()
+            .map(|tool| rpc_tool_info_json(tool, &snapshot.tool_source_info))
+            .collect::<Vec<_>>();
+        return json!({
+            "activeTools": active_tools,
+            "allTools": all_tools,
+        });
+    };
+
+    let previous_registry_names = snapshot
+        .all_tools
+        .iter()
+        .map(|tool| tool.definition.name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let previous_active_tool_names = snapshot
+        .core
+        .state()
+        .tools
+        .iter()
+        .map(|tool| tool.definition.name.clone())
+        .collect::<Vec<_>>();
+
+    let mut all_tools = build_all_rpc_tools(
+        &snapshot.cwd,
+        snapshot.runtime_settings.settings.images.auto_resize_images,
+    );
+    let mut tool_source_info = builtin_rpc_tool_source_info_map(&all_tools);
+    let extension_tools = build_rpc_extension_tools(&extension_host, extension_tool_infos);
+    for extension_tool in &extension_tools {
+        all_tools.retain(|tool| tool.definition.name != extension_tool.definition.name);
+    }
+    all_tools.extend(extension_tools);
+
+    for tool_info in extension_tool_infos {
+        tool_source_info.insert(tool_info.name.clone(), tool_info.source_info.clone());
+    }
+
+    let tool_metadata = runtime_tool_metadata_for_extensions(extension_tool_infos);
+    let mut active_tool_names = collect_rpc_tools_by_name(&all_tools, &previous_active_tool_names)
+        .iter()
+        .map(|tool| tool.definition.name.clone())
+        .collect::<Vec<_>>();
+    let mut seen_active_tool_names = active_tool_names
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    for tool in &all_tools {
+        let tool_name = &tool.definition.name;
+        if !previous_registry_names.contains(tool_name)
+            && seen_active_tool_names.insert(tool_name.clone())
+        {
+            active_tool_names.push(tool_name.clone());
+        }
+    }
+
+    let active_tools = collect_rpc_tools_by_name(&all_tools, &active_tool_names);
+    let system_prompt = build_runtime_system_prompt(
+        &shared.options.default_system_prompt,
+        &shared.options.parsed,
+        &snapshot.cwd,
+        shared.options.agent_dir.as_deref(),
+        &active_tool_names,
+        &snapshot.resources,
+        Some(&tool_metadata),
+    );
+    let tools_for_state = active_tools.clone();
+    snapshot.core.agent().update_state(move |state| {
+        state.tools = tools_for_state.clone();
+        state.system_prompt = system_prompt.clone();
+    });
+
+    {
+        let mut state = shared.state.lock().expect("rpc state mutex poisoned");
+        state.all_tools = all_tools.clone();
+        state.tool_source_info = tool_source_info.clone();
+        state.tool_metadata = tool_metadata;
+    }
+
+    let all_tools = all_tools
+        .iter()
+        .map(|tool| rpc_tool_info_json(tool, &tool_source_info))
+        .collect::<Vec<_>>();
+    json!({
+        "activeTools": active_tool_names,
+        "allTools": all_tools,
     })
 }
 
