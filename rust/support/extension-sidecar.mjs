@@ -521,6 +521,20 @@ function extensionCommands() {
 	}));
 }
 
+function extensionTools() {
+	if (!runner) {
+		return [];
+	}
+	return runner.getAllRegisteredTools().map((tool) => ({
+		name: tool.definition.name,
+		description: tool.definition.description,
+		parameters: tool.definition.parameters,
+		sourceInfo: tool.sourceInfo,
+		promptSnippet: tool.definition.promptSnippet,
+		promptGuidelines: tool.definition.promptGuidelines,
+	}));
+}
+
 async function handleInit(message) {
 	applyRuntimeState(message.state);
 	const loaded = message.noExtensions
@@ -531,6 +545,7 @@ async function handleInit(message) {
 		reply(message.id, {
 			extensionCount: 0,
 			commands: [],
+			tools: [],
 			skillPaths: [],
 			promptPaths: [],
 			themePaths: [],
@@ -557,10 +572,12 @@ async function handleInit(message) {
 			)
 		: { skillPaths: [], promptPaths: [], themePaths: [] };
 	const commands = extensionCommands();
+	const tools = extensionTools();
 	runtimeState.commands = [...commands, ...(message.state?.commands ?? [])];
 	reply(message.id, {
 		extensionCount: loaded.extensions.length,
 		commands,
+		tools,
 		skillPaths: resources.skillPaths,
 		promptPaths: resources.promptPaths,
 		themePaths: resources.themePaths,
@@ -624,6 +641,77 @@ async function handleToolCall(message) {
 			input: message.input ?? {},
 		});
 		reply(message.id, result ?? null);
+	} catch (error) {
+		replyError(message.id, error instanceof Error ? error.message : String(error));
+	}
+}
+
+async function handleExecuteTool(message) {
+	if (!runner) {
+		replyError(message.id, "Extension runtime unavailable");
+		return;
+	}
+	const tool = runner.getAllRegisteredTools().find((entry) => entry.definition.name === message.toolName);
+	if (!tool) {
+		replyError(message.id, `Unknown extension tool: ${message.toolName}`);
+		return;
+	}
+	try {
+		const result = await tool.definition.execute(
+			message.toolCallId,
+			message.args ?? {},
+			undefined,
+			undefined,
+			runner.createContext(),
+		);
+		reply(message.id, result);
+	} catch (error) {
+		replyError(message.id, error instanceof Error ? error.message : String(error));
+	}
+}
+
+async function handleToolResult(message) {
+	if (!runner || !runner.hasHandlers("tool_result")) {
+		reply(message.id, null);
+		return;
+	}
+	try {
+		const result = await runner.emitToolResult({
+			type: "tool_result",
+			toolName: message.toolName,
+			toolCallId: message.toolCallId,
+			input: message.input ?? {},
+			content: message.content ?? [],
+			details: message.details,
+			isError: Boolean(message.isError),
+		});
+		reply(message.id, result ?? null);
+	} catch (error) {
+		replyError(message.id, error instanceof Error ? error.message : String(error));
+	}
+}
+
+async function handleInput(message) {
+	if (!runner || !runner.hasHandlers("input")) {
+		reply(message.id, { action: "continue" });
+		return;
+	}
+	try {
+		const result = await runner.emitInput(message.text ?? "", message.images, message.source ?? "rpc");
+		reply(message.id, result);
+	} catch (error) {
+		replyError(message.id, error instanceof Error ? error.message : String(error));
+	}
+}
+
+async function handleBeforeProviderRequest(message) {
+	if (!runner || !runner.hasHandlers("before_provider_request")) {
+		reply(message.id, message.payload ?? null);
+		return;
+	}
+	try {
+		const payload = await runner.emitBeforeProviderRequest(message.payload);
+		reply(message.id, payload ?? null);
 	} catch (error) {
 		replyError(message.id, error instanceof Error ? error.message : String(error));
 	}
@@ -697,6 +785,18 @@ async function handleMessage(rawLine) {
 				break;
 			case "tool_call":
 				await handleToolCall(message);
+				break;
+			case "execute_tool":
+				await handleExecuteTool(message);
+				break;
+			case "tool_result":
+				await handleToolResult(message);
+				break;
+			case "input":
+				await handleInput(message);
+				break;
+			case "before_provider_request":
+				await handleBeforeProviderRequest(message);
 				break;
 			case "ui_response":
 				await handleUiResponse(message);

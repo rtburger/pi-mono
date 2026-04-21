@@ -1,6 +1,7 @@
 use super::TextEmitter;
 use crate::package_manager::{DefaultPackageManager, ResolveExtensionSourcesOptions};
 use pi_coding_agent_core::SourceInfo;
+use pi_events::UserContent;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -29,6 +30,19 @@ pub struct RpcExtensionCommandInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RpcExtensionToolInfo {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+    pub source_info: SourceInfo,
+    #[serde(default)]
+    pub prompt_snippet: Option<String>,
+    #[serde(default)]
+    pub prompt_guidelines: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RpcExtensionResourcePath {
     pub path: String,
     pub extension_path: String,
@@ -40,11 +54,41 @@ pub struct RpcExtensionDiagnostic {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RpcExtensionToolExecutionResult {
+    #[serde(default)]
+    pub content: Vec<UserContent>,
+    #[serde(default)]
+    pub details: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcToolResultMutation {
+    #[serde(default)]
+    pub content: Option<Vec<UserContent>>,
+    #[serde(default)]
+    pub details: Option<Value>,
+    #[serde(default)]
+    pub is_error: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RpcExtensionInputResult {
+    pub action: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub images: Option<Vec<UserContent>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcExtensionInitOutput {
     pub extension_count: usize,
     pub commands: Vec<RpcExtensionCommandInfo>,
+    #[serde(default)]
+    pub tools: Vec<RpcExtensionToolInfo>,
     #[serde(default)]
     pub skill_paths: Vec<RpcExtensionResourcePath>,
     #[serde(default)]
@@ -81,6 +125,7 @@ type RpcExtensionHostAppRequestHandler =
 pub struct RpcExtensionHost {
     inner: Arc<RpcExtensionHostInner>,
     commands: Arc<Vec<RpcExtensionCommandInfo>>,
+    tools: Arc<Vec<RpcExtensionToolInfo>>,
 }
 
 struct RpcExtensionHostInner {
@@ -189,6 +234,7 @@ impl RpcExtensionHost {
         let host = Self {
             inner,
             commands: Arc::new(Vec::new()),
+            tools: Arc::new(Vec::new()),
         };
         let init_value = host
             .request(
@@ -216,6 +262,7 @@ impl RpcExtensionHost {
         let host = Self {
             inner: host.inner,
             commands: Arc::new(init.commands.clone()),
+            tools: Arc::new(init.tools.clone()),
         };
         Ok(RpcExtensionHostStartResult {
             host: Some(host),
@@ -225,6 +272,10 @@ impl RpcExtensionHost {
 
     pub fn commands(&self) -> Vec<RpcExtensionCommandInfo> {
         (*self.commands).clone()
+    }
+
+    pub fn tools(&self) -> Vec<RpcExtensionToolInfo> {
+        (*self.tools).clone()
     }
 
     pub fn set_app_request_handler<F, Fut>(&self, handler: F)
@@ -307,6 +358,86 @@ impl RpcExtensionHost {
         serde_json::from_value(value)
             .map(Some)
             .map_err(|error| format!("Invalid extension tool_call response: {error}"))
+    }
+
+    pub async fn execute_tool(
+        &self,
+        tool_name: &str,
+        tool_call_id: &str,
+        args: Value,
+    ) -> Result<RpcExtensionToolExecutionResult, String> {
+        let value = self
+            .request(
+                "execute_tool",
+                json!({
+                    "toolName": tool_name,
+                    "toolCallId": tool_call_id,
+                    "args": args,
+                }),
+            )
+            .await?;
+        serde_json::from_value(value)
+            .map_err(|error| format!("Invalid extension execute_tool response: {error}"))
+    }
+
+    pub async fn tool_result(
+        &self,
+        tool_name: &str,
+        tool_call_id: &str,
+        input: Value,
+        content: Vec<UserContent>,
+        details: Option<Value>,
+        is_error: bool,
+    ) -> Result<Option<RpcToolResultMutation>, String> {
+        let value = self
+            .request(
+                "tool_result",
+                json!({
+                    "toolName": tool_name,
+                    "toolCallId": tool_call_id,
+                    "input": input,
+                    "content": content,
+                    "details": details,
+                    "isError": is_error,
+                }),
+            )
+            .await?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        serde_json::from_value(value)
+            .map(Some)
+            .map_err(|error| format!("Invalid extension tool_result response: {error}"))
+    }
+
+    pub async fn input(
+        &self,
+        text: &str,
+        images: &[UserContent],
+        source: &str,
+    ) -> Result<RpcExtensionInputResult, String> {
+        let value = self
+            .request(
+                "input",
+                json!({
+                    "text": text,
+                    "images": images,
+                    "source": source,
+                }),
+            )
+            .await?;
+        serde_json::from_value(value)
+            .map_err(|error| format!("Invalid extension input response: {error}"))
+    }
+
+    pub async fn before_provider_request(&self, payload: Value) -> Result<Value, String> {
+        self.request(
+            "before_provider_request",
+            json!({
+                "payload": payload,
+            }),
+        )
+        .await
     }
 
     pub async fn update_state(&self, state: Value) -> Result<(), String> {

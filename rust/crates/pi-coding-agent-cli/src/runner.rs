@@ -15,19 +15,19 @@ use crate::{
     list_models::render_list_models,
     parse_args, process_file_arguments, resolve_app_mode,
     resources::{
-        ExtensionResourcePath, LoadedCliResources, build_runtime_system_prompt,
-        build_selected_tools, extend_cli_resources_from_extensions, load_cli_resources,
-        preprocess_prompt_text,
+        ExtensionResourcePath, LoadedCliResources, RuntimeToolMetadata,
+        build_runtime_system_prompt, build_selected_tools, extend_cli_resources_from_extensions,
+        load_cli_resources, preprocess_prompt_text,
     },
     run_print_mode,
     session_picker::SessionPickerComponent,
     to_print_output_mode,
     tree_picker::TreePickerItem,
 };
-use pi_agent::{AgentTool, AgentUnsubscribe, BeforeToolCallResult, ThinkingLevel};
+use pi_agent::{AgentTool, AgentToolError, AgentUnsubscribe, BeforeToolCallResult, ThinkingLevel};
 use pi_ai::{
-    OAuthLoginCallbacks, StreamOptions, ThinkingBudgets, Transport, get_oauth_provider,
-    is_context_overflow, models_are_equal, supports_xhigh,
+    OAuthLoginCallbacks, PayloadHook, StreamOptions, ThinkingBudgets, Transport,
+    get_oauth_provider, is_context_overflow, models_are_equal, supports_xhigh,
 };
 #[cfg(test)]
 use pi_coding_agent_core::create_coding_agent_core;
@@ -84,7 +84,8 @@ use tokio::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rpc_extensions::{
-    RpcExtensionCommandInfo, RpcExtensionHost, RpcExtensionHostStartOptions, RpcToolCallResult,
+    RpcExtensionCommandInfo, RpcExtensionHost, RpcExtensionHostStartOptions,
+    RpcExtensionInputResult, RpcExtensionToolInfo, RpcToolCallResult, RpcToolResultMutation,
     should_start_extension_host,
 };
 use serde_json::{Value, json};
@@ -1892,6 +1893,7 @@ async fn run_interactive_iteration(
                 agent_dir.as_deref(),
                 &selected_tool_names,
                 &resources,
+                None,
             ),
             bootstrap: SessionBootstrapOptions {
                 cli_provider: parsed.provider.clone(),
@@ -4824,6 +4826,7 @@ async fn run_command_with_terminal_factory(
                 agent_dir.as_deref(),
                 &selected_tool_names,
                 &resources,
+                None,
             ),
             bootstrap: SessionBootstrapOptions {
                 cli_provider: parsed.provider.clone(),
@@ -4928,6 +4931,8 @@ struct RpcState {
     runtime_settings: LoadedRuntimeSettings,
     resources: LoadedCliResources,
     all_tools: Vec<AgentTool>,
+    tool_source_info: BTreeMap<String, SourceInfo>,
+    tool_metadata: RuntimeToolMetadata,
     extension_host: Option<RpcExtensionHost>,
     auto_compaction_enabled: bool,
     is_compacting: Arc<AtomicBool>,
@@ -4945,6 +4950,8 @@ struct RpcSnapshot {
     runtime_settings: LoadedRuntimeSettings,
     resources: LoadedCliResources,
     all_tools: Vec<AgentTool>,
+    tool_source_info: BTreeMap<String, SourceInfo>,
+    tool_metadata: RuntimeToolMetadata,
     extension_host: Option<RpcExtensionHost>,
     auto_compaction_enabled: bool,
     is_compacting: Arc<AtomicBool>,
@@ -4992,6 +4999,8 @@ impl RpcShared {
             runtime_settings: state.runtime_settings.clone(),
             resources: state.resources.clone(),
             all_tools: state.all_tools.clone(),
+            tool_source_info: state.tool_source_info.clone(),
+            tool_metadata: state.tool_metadata.clone(),
             extension_host: state.extension_host.clone(),
             auto_compaction_enabled: state.auto_compaction_enabled,
             is_compacting: state.is_compacting.clone(),
@@ -5567,20 +5576,20 @@ async fn execute_extension_aware_print_prompt(
         return Ok(());
     }
 
-    let prepared = preprocess_prompt_text(message, &snapshot.resources);
-    if let Some(images) = images {
-        snapshot
-            .session
-            .prompt_message(build_rpc_user_message(prepared, images.to_vec()))
-            .await
-            .map_err(|error| error.to_string())
-    } else {
-        snapshot
-            .session
-            .prompt_text(prepared)
-            .await
-            .map_err(|error| error.to_string())
-    }
+    let images = images.map_or_else(Vec::new, ToOwned::to_owned);
+    let Some((message, images)) = apply_rpc_extension_input(
+        snapshot.extension_host.clone(),
+        message.to_owned(),
+        images,
+        "interactive",
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+
+    let prepared = preprocess_prompt_text(&message, &snapshot.resources);
+    prompt_rpc_session(&snapshot.session, prepared, images).await
 }
 
 fn resolve_rpc_scoped_models(
@@ -5634,12 +5643,15 @@ async fn build_rpc_state(
     for warning in &resources.warnings {
         push_line(&mut resource_output, warning);
     }
-    let (selected_tool_names, selected_tools) = build_selected_tools(
+    let (mut selected_tool_names, selected_tools) = build_selected_tools(
         &options.parsed,
         cwd,
         runtime_settings.settings.images.auto_resize_images,
     );
-    let all_tools = build_all_rpc_tools(cwd, runtime_settings.settings.images.auto_resize_images);
+    let mut all_tools =
+        build_all_rpc_tools(cwd, runtime_settings.settings.images.auto_resize_images);
+    let mut tool_source_info = builtin_rpc_tool_source_info_map(&all_tools);
+    let mut tool_metadata = RuntimeToolMetadata::default();
 
     let session_support = if let Some(session_support_override) = session_support_override {
         Some(session_support_override)
@@ -5691,6 +5703,7 @@ async fn build_rpc_state(
                 options.agent_dir.as_deref(),
                 &selected_tool_names,
                 &resources,
+                None,
             ),
             bootstrap: SessionBootstrapOptions {
                 cli_provider: options.parsed.provider.clone(),
@@ -5773,12 +5786,13 @@ async fn build_rpc_state(
                 session_manager.as_ref(),
                 &resources,
                 &all_tools,
+                &tool_source_info,
                 &[],
             ),
             session_start_reason,
             previous_session_file,
-            stdout_emitter,
-            stderr_emitter,
+            stdout_emitter: stdout_emitter.clone(),
+            stderr_emitter: stderr_emitter.clone(),
         })
         .await?;
 
@@ -5794,6 +5808,7 @@ async fn build_rpc_state(
         resource_output.push_str(&diagnostics_output);
 
         if let Some(host) = start_result.host {
+            let extension_tool_infos = host.tools();
             let skill_paths = start_result
                 .init
                 .skill_paths
@@ -5831,7 +5846,24 @@ async fn build_rpc_state(
                 push_line(&mut resource_output, &warning);
             }
 
+            let extension_tools = build_rpc_extension_tools(&host, &extension_tool_infos);
+            for extension_tool in &extension_tools {
+                all_tools.retain(|tool| tool.definition.name != extension_tool.definition.name);
+            }
+            all_tools.extend(extension_tools);
+            for tool_info in &extension_tool_infos {
+                tool_source_info.insert(tool_info.name.clone(), tool_info.source_info.clone());
+                if !selected_tool_names
+                    .iter()
+                    .any(|name| name == &tool_info.name)
+                {
+                    selected_tool_names.push(tool_info.name.clone());
+                }
+            }
+            tool_metadata = runtime_tool_metadata_for_extensions(&extension_tool_infos);
+
             let extension_commands = host.commands();
+            let active_tools = collect_rpc_tools_by_name(&all_tools, &selected_tool_names);
             let extension_system_prompt = build_runtime_system_prompt(
                 &default_system_prompt,
                 &options.parsed,
@@ -5839,8 +5871,10 @@ async fn build_rpc_state(
                 options.agent_dir.as_deref(),
                 &selected_tool_names,
                 &resources,
+                Some(&tool_metadata),
             );
-            core.agent().update_state(|state| {
+            core.agent().update_state(move |state| {
+                state.tools = active_tools.clone();
                 state.system_prompt = extension_system_prompt.clone();
             });
             host.update_state(rpc_extension_state_json(
@@ -5848,6 +5882,7 @@ async fn build_rpc_state(
                 session_manager.as_ref(),
                 &resources,
                 &all_tools,
+                &tool_source_info,
                 &extension_commands,
             ))
             .await?;
@@ -5880,6 +5915,62 @@ async fn build_rpc_state(
                     }
                 }
             });
+
+            let tool_result_host = host.clone();
+            let tool_result_stderr = stderr_emitter.clone();
+            core.agent().set_after_tool_call(move |context, _signal| {
+                let tool_result_host = tool_result_host.clone();
+                let tool_result_stderr = tool_result_stderr.clone();
+                async move {
+                    let details = (!context.is_error).then_some(context.result.details.clone());
+                    match tool_result_host
+                        .tool_result(
+                            &context.tool_name,
+                            &context.tool_call_id,
+                            context.args.clone(),
+                            context.result.content.clone(),
+                            details,
+                            context.is_error,
+                        )
+                        .await
+                    {
+                        Ok(Some(RpcToolResultMutation {
+                            content,
+                            details,
+                            is_error,
+                        })) if !context.is_error => Some(pi_agent::AfterToolCallResult {
+                            content,
+                            details,
+                            is_error,
+                        }),
+                        Ok(_) => None,
+                        Err(error) => {
+                            tool_result_stderr(format!(
+                                "Warning: extension tool_result hook failed: {error}\n"
+                            ));
+                            None
+                        }
+                    }
+                }
+            });
+
+            let before_provider_request_host = host.clone();
+            let before_provider_request_stderr = stderr_emitter.clone();
+            core.agent().set_on_payload(Some(PayloadHook::new(move |payload, _model| {
+                let before_provider_request_host = before_provider_request_host.clone();
+                let before_provider_request_stderr = before_provider_request_stderr.clone();
+                async move {
+                    match before_provider_request_host.before_provider_request(payload).await {
+                        Ok(payload) => Ok(Some(payload)),
+                        Err(error) => {
+                            before_provider_request_stderr(format!(
+                                "Warning: extension before_provider_request hook failed: {error}\n"
+                            ));
+                            Ok(None)
+                        }
+                    }
+                }
+            })));
             extension_host = Some(host);
         }
     }
@@ -5894,6 +5985,8 @@ async fn build_rpc_state(
             runtime_settings: runtime_settings.clone(),
             resources,
             all_tools,
+            tool_source_info,
+            tool_metadata,
             extension_host,
             auto_compaction_enabled: runtime_settings.settings.compaction.enabled,
             is_compacting: Arc::new(AtomicBool::new(false)),
@@ -5990,6 +6083,25 @@ async fn handle_rpc_input_line(
                 return;
             }
 
+            let (message, images) = match apply_rpc_extension_input(
+                snapshot.extension_host.clone(),
+                message,
+                images,
+                "rpc",
+            )
+            .await
+            {
+                Ok(Some(result)) => result,
+                Ok(None) => {
+                    shared.emit_response(id.as_deref(), "prompt", None);
+                    return;
+                }
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "prompt", error);
+                    return;
+                }
+            };
+
             let prepared_message = preprocess_prompt_text(&message, &snapshot.resources);
             if snapshot.core.state().is_streaming {
                 if streaming_behavior.as_deref() == Some("steer") {
@@ -6043,6 +6155,24 @@ async fn handle_rpc_input_line(
                 );
                 return;
             }
+            let (message, images) = match apply_rpc_extension_input(
+                snapshot.extension_host.clone(),
+                message,
+                images,
+                "rpc",
+            )
+            .await
+            {
+                Ok(Some(result)) => result,
+                Ok(None) => {
+                    shared.emit_response(id.as_deref(), "steer", None);
+                    return;
+                }
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "steer", error);
+                    return;
+                }
+            };
             queue_rpc_message(
                 &snapshot.session,
                 "steer",
@@ -6078,6 +6208,24 @@ async fn handle_rpc_input_line(
                 );
                 return;
             }
+            let (message, images) = match apply_rpc_extension_input(
+                snapshot.extension_host.clone(),
+                message,
+                images,
+                "rpc",
+            )
+            .await
+            {
+                Ok(Some(result)) => result,
+                Ok(None) => {
+                    shared.emit_response(id.as_deref(), "follow_up", None);
+                    return;
+                }
+                Err(error) => {
+                    shared.emit_error(id.as_deref(), "follow_up", error);
+                    return;
+                }
+            };
             queue_rpc_message(
                 &snapshot.session,
                 "follow_up",
@@ -7221,6 +7369,13 @@ async fn execute_extension_send_user_message(
 ) -> Result<(), String> {
     let (text, images) = parse_extension_user_message_content(content)?;
     let snapshot = shared.snapshot();
+    let Some((text, images)) =
+        apply_rpc_extension_input(snapshot.extension_host.clone(), text, images, "extension")
+            .await?
+    else {
+        return Ok(());
+    };
+
     if snapshot.core.state().is_streaming {
         match deliver_as {
             Some("followUp") => queue_rpc_message(&snapshot.session, "follow_up", text, images),
@@ -7236,19 +7391,7 @@ async fn execute_extension_send_user_message(
         return Ok(());
     }
 
-    let result = if images.is_empty() {
-        snapshot
-            .session
-            .prompt_text(text)
-            .await
-            .map_err(|error| error.to_string())
-    } else {
-        snapshot
-            .session
-            .prompt_message(build_rpc_user_message(text, images))
-            .await
-            .map_err(|error| error.to_string())
-    };
+    let result = prompt_rpc_session(&snapshot.session, text, images).await;
     if result.is_ok() {
         sync_rpc_extension_state(shared).await;
     }
@@ -7358,6 +7501,51 @@ fn build_rpc_user_message(text: String, images: Vec<UserContent>) -> Message {
     }
 }
 
+async fn apply_rpc_extension_input(
+    extension_host: Option<RpcExtensionHost>,
+    text: String,
+    images: Vec<UserContent>,
+    source: &str,
+) -> Result<Option<(String, Vec<UserContent>)>, String> {
+    let Some(extension_host) = extension_host else {
+        return Ok(Some((text, images)));
+    };
+
+    let RpcExtensionInputResult {
+        action,
+        text: next_text,
+        images: next_images,
+    } = extension_host.input(&text, &images, source).await?;
+
+    match action.as_str() {
+        "handled" => Ok(None),
+        "transform" => Ok(Some((
+            next_text.unwrap_or(text),
+            next_images.unwrap_or(images),
+        ))),
+        "continue" => Ok(Some((text, images))),
+        other => Err(format!("Invalid extension input action: {other}")),
+    }
+}
+
+async fn prompt_rpc_session(
+    session: &AgentSession,
+    text: String,
+    images: Vec<UserContent>,
+) -> Result<(), String> {
+    if images.is_empty() {
+        session
+            .prompt_text(text)
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        session
+            .prompt_message(build_rpc_user_message(text, images))
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
 fn queue_rpc_message(session: &AgentSession, kind: &str, text: String, images: Vec<UserContent>) {
     let message = build_rpc_user_message(text, images);
     if kind == "follow_up" {
@@ -7375,17 +7563,7 @@ fn spawn_rpc_prompt_task(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let session = shared.current_session();
-        let result = if images.is_empty() {
-            session
-                .prompt_text(message)
-                .await
-                .map_err(|error| error.to_string())
-        } else {
-            session
-                .prompt_message(build_rpc_user_message(message, images))
-                .await
-                .map_err(|error| error.to_string())
-        };
+        let result = prompt_rpc_session(&session, message, images).await;
         if let Err(error) = result {
             shared.emit_error(id.as_deref(), "prompt", error);
         }
@@ -7444,33 +7622,131 @@ fn builtin_tool_source_info(name: &str) -> SourceInfo {
     }
 }
 
-fn rpc_tool_info_json(tool: &AgentTool) -> Value {
+fn builtin_rpc_tool_source_info_map(all_tools: &[AgentTool]) -> BTreeMap<String, SourceInfo> {
+    all_tools
+        .iter()
+        .map(|tool| {
+            (
+                tool.definition.name.clone(),
+                builtin_tool_source_info(&tool.definition.name),
+            )
+        })
+        .collect()
+}
+
+fn collect_rpc_tools_by_name(all_tools: &[AgentTool], tool_names: &[String]) -> Vec<AgentTool> {
+    let mut active_tools = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for name in tool_names {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        if let Some(tool) = all_tools.iter().find(|tool| tool.definition.name == *name) {
+            active_tools.push(tool.clone());
+        }
+    }
+
+    active_tools
+}
+
+fn runtime_tool_metadata_for_extensions(
+    tool_infos: &[RpcExtensionToolInfo],
+) -> RuntimeToolMetadata {
+    let mut metadata = RuntimeToolMetadata::default();
+
+    for tool in tool_infos {
+        if let Some(prompt_snippet) = tool.prompt_snippet.as_ref() {
+            metadata
+                .snippets
+                .insert(tool.name.clone(), prompt_snippet.clone());
+        }
+        if !tool.prompt_guidelines.is_empty() {
+            metadata
+                .guidelines
+                .insert(tool.name.clone(), tool.prompt_guidelines.clone());
+        }
+    }
+
+    metadata
+}
+
+async fn wait_for_abort_signal(mut signal: watch::Receiver<bool>) {
+    if *signal.borrow() {
+        return;
+    }
+
+    while signal.changed().await.is_ok() {
+        if *signal.borrow() {
+            return;
+        }
+    }
+}
+
+fn build_rpc_extension_tools(
+    extension_host: &RpcExtensionHost,
+    tool_infos: &[RpcExtensionToolInfo],
+) -> Vec<AgentTool> {
+    tool_infos
+        .iter()
+        .map(|tool_info| {
+            let tool_name = tool_info.name.clone();
+            let definition = pi_events::ToolDefinition {
+                name: tool_name.clone(),
+                description: tool_info.description.clone(),
+                parameters: tool_info.parameters.clone(),
+            };
+            let host = extension_host.clone();
+            AgentTool::new(definition, move |tool_call_id, args, signal| {
+                let host = host.clone();
+                let tool_name = tool_name.clone();
+                async move {
+                    let request = host.execute_tool(&tool_name, &tool_call_id, args);
+                    tokio::pin!(request);
+
+                    let execution = if let Some(signal) = signal {
+                        let abort = wait_for_abort_signal(signal);
+                        tokio::pin!(abort);
+                        tokio::select! {
+                            result = &mut request => result,
+                            _ = &mut abort => {
+                                return Err(AgentToolError::message("Request was aborted"));
+                            }
+                        }
+                    } else {
+                        request.await
+                    };
+
+                    let result = execution.map_err(AgentToolError::message)?;
+                    Ok(pi_agent::AgentToolResult {
+                        content: result.content,
+                        details: result.details,
+                    })
+                }
+            })
+        })
+        .collect()
+}
+
+fn rpc_tool_info_json(tool: &AgentTool, tool_source_info: &BTreeMap<String, SourceInfo>) -> Value {
     json!({
         "name": tool.definition.name.clone(),
         "description": tool.definition.description.clone(),
         "parameters": tool.definition.parameters.clone(),
-        "sourceInfo": builtin_tool_source_info(&tool.definition.name),
+        "sourceInfo": tool_source_info
+            .get(&tool.definition.name)
+            .cloned()
+            .unwrap_or_else(|| builtin_tool_source_info(&tool.definition.name)),
     })
 }
 
 fn set_rpc_active_tools(shared: &RpcShared, tool_names: &[String]) -> Vec<String> {
     let snapshot = shared.snapshot();
-    let mut active_tools = Vec::new();
-    let mut active_tool_names = Vec::new();
-
-    for name in tool_names {
-        if active_tool_names.iter().any(|existing| existing == name) {
-            continue;
-        }
-        if let Some(tool) = snapshot
-            .all_tools
-            .iter()
-            .find(|tool| tool.definition.name == *name)
-        {
-            active_tools.push(tool.clone());
-            active_tool_names.push(name.clone());
-        }
-    }
+    let active_tools = collect_rpc_tools_by_name(&snapshot.all_tools, tool_names);
+    let active_tool_names = active_tools
+        .iter()
+        .map(|tool| tool.definition.name.clone())
+        .collect::<Vec<_>>();
 
     let system_prompt = build_runtime_system_prompt(
         &shared.options.default_system_prompt,
@@ -7479,6 +7755,7 @@ fn set_rpc_active_tools(shared: &RpcShared, tool_names: &[String]) -> Vec<String
         shared.options.agent_dir.as_deref(),
         &active_tool_names,
         &snapshot.resources,
+        Some(&snapshot.tool_metadata),
     );
     let tools_for_state = active_tools.clone();
     snapshot.core.agent().update_state(move |state| {
@@ -7500,6 +7777,7 @@ async fn sync_rpc_extension_state(shared: &RpcShared) {
             snapshot.session_manager.as_ref(),
             &snapshot.resources,
             &snapshot.all_tools,
+            &snapshot.tool_source_info,
             &extension_host.commands(),
         ))
         .await;
@@ -7546,6 +7824,7 @@ fn rpc_extension_state_json(
     session_manager: Option<&Arc<Mutex<SessionManager>>>,
     resources: &LoadedCliResources,
     all_tools: &[AgentTool],
+    tool_source_info: &BTreeMap<String, SourceInfo>,
     extension_commands: &[RpcExtensionCommandInfo],
 ) -> Value {
     let state = core.state();
@@ -7554,7 +7833,10 @@ fn rpc_extension_state_json(
         .iter()
         .map(|tool| Value::String(tool.definition.name.clone()))
         .collect::<Vec<_>>();
-    let all_tools = all_tools.iter().map(rpc_tool_info_json).collect::<Vec<_>>();
+    let all_tools = all_tools
+        .iter()
+        .map(|tool| rpc_tool_info_json(tool, tool_source_info))
+        .collect::<Vec<_>>();
     let mut commands = extension_commands
         .iter()
         .map(|command| {

@@ -689,6 +689,18 @@ export class ExtensionRunner {
 		});
 	}
 
+	getAllRegisteredTools() {
+		const toolsByName = new Map();
+		for (const extension of this.extensions) {
+			for (const tool of extension.tools.values()) {
+				if (!toolsByName.has(tool.definition.name)) {
+					toolsByName.set(tool.definition.name, tool);
+				}
+			}
+		}
+		return Array.from(toolsByName.values());
+	}
+
 	resolveRegisteredCommands() {
 		const commands = [];
 		const counts = new Map();
@@ -836,6 +848,120 @@ export class ExtensionRunner {
 		}
 
 		return result;
+	}
+
+	async emitToolResult(event) {
+		const context = this.createContext();
+		const currentEvent = { ...event };
+		let modified = false;
+
+		for (const extension of this.extensions) {
+			const handlers = extension.handlers.get("tool_result");
+			if (!handlers?.length) {
+				continue;
+			}
+
+			for (const handler of handlers) {
+				try {
+					const handlerResult = await handler(currentEvent, context);
+					if (!handlerResult) {
+						continue;
+					}
+					if (handlerResult.content !== undefined) {
+						currentEvent.content = handlerResult.content;
+						modified = true;
+					}
+					if (handlerResult.details !== undefined) {
+						currentEvent.details = handlerResult.details;
+						modified = true;
+					}
+					if (handlerResult.isError !== undefined) {
+						currentEvent.isError = handlerResult.isError;
+						modified = true;
+					}
+				} catch (error) {
+					this.emitError({
+						extensionPath: extension.path,
+						event: "tool_result",
+						error: error instanceof Error ? error.message : String(error),
+						stack: error instanceof Error ? error.stack : undefined,
+					});
+				}
+			}
+		}
+
+		if (!modified) {
+			return undefined;
+		}
+
+		return {
+			content: currentEvent.content,
+			details: currentEvent.details,
+			isError: currentEvent.isError,
+		};
+	}
+
+	async emitBeforeProviderRequest(payload) {
+		const context = this.createContext();
+		let currentPayload = payload;
+
+		for (const extension of this.extensions) {
+			const handlers = extension.handlers.get("before_provider_request");
+			if (!handlers?.length) {
+				continue;
+			}
+
+			for (const handler of handlers) {
+				try {
+					const handlerResult = await handler({ type: "before_provider_request", payload: currentPayload }, context);
+					if (handlerResult !== undefined) {
+						currentPayload = handlerResult;
+					}
+				} catch (error) {
+					this.emitError({
+						extensionPath: extension.path,
+						event: "before_provider_request",
+						error: error instanceof Error ? error.message : String(error),
+						stack: error instanceof Error ? error.stack : undefined,
+					});
+				}
+			}
+		}
+
+		return currentPayload;
+	}
+
+	async emitInput(text, images, source) {
+		const context = this.createContext();
+		let currentText = text;
+		let currentImages = images;
+
+		for (const extension of this.extensions) {
+			const handlers = extension.handlers.get("input") ?? [];
+			for (const handler of handlers) {
+				try {
+					const result = await handler({ type: "input", text: currentText, images: currentImages, source }, context);
+					if (result?.action === "handled") {
+						return result;
+					}
+					if (result?.action === "transform") {
+						currentText = result.text;
+						currentImages = result.images ?? currentImages;
+					}
+				} catch (error) {
+					this.emitError({
+						extensionPath: extension.path,
+						event: "input",
+						error: error instanceof Error ? error.message : String(error),
+						stack: error instanceof Error ? error.stack : undefined,
+					});
+				}
+			}
+		}
+
+		return currentText !== text || currentImages !== images
+			? { action: "transform", text: currentText, images: currentImages }
+			: { action: "continue" };
 	}
 
 	async emitResourcesDiscover(cwd, reason) {

@@ -117,6 +117,7 @@ impl CliResourceLoader {
             self.agent_dir.as_deref(),
             selected_tools,
             &self.resources,
+            None,
         )
     }
 
@@ -133,6 +134,12 @@ impl CliResourceLoader {
 pub struct ExtensionResourcePath {
     pub path: String,
     pub extension_path: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeToolMetadata {
+    pub snippets: BTreeMap<String, String>,
+    pub guidelines: BTreeMap<String, Vec<String>>,
 }
 
 pub fn load_cli_resources(
@@ -541,6 +548,7 @@ pub fn build_runtime_system_prompt(
     agent_dir: Option<&Path>,
     selected_tools: &[String],
     resources: &LoadedCliResources,
+    tool_metadata: Option<&RuntimeToolMetadata>,
 ) -> String {
     let (custom_prompt, append_system_prompt, context_files) = if let Some(agent_dir) = agent_dir {
         let resources_from_disk = load_system_prompt_resources(cwd, agent_dir);
@@ -569,11 +577,24 @@ pub fn build_runtime_system_prompt(
         )
     };
 
+    let mut prompt_tool_snippets = tool_snippets();
+    let mut prompt_guidelines = Vec::new();
+
+    if let Some(tool_metadata) = tool_metadata {
+        prompt_tool_snippets.extend(tool_metadata.snippets.clone());
+        for tool_name in selected_tools {
+            if let Some(guidelines) = tool_metadata.guidelines.get(tool_name) {
+                prompt_guidelines.extend(guidelines.clone());
+            }
+        }
+    }
+
     build_system_prompt(BuildSystemPromptOptions {
         custom_prompt,
         selected_tools: selected_tools.to_vec(),
         selected_tools_explicit: true,
-        tool_snippets: tool_snippets(),
+        tool_snippets: prompt_tool_snippets,
+        prompt_guidelines,
         append_system_prompt,
         cwd: Some(cwd.to_path_buf()),
         context_files,
