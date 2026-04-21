@@ -49,6 +49,15 @@ pub struct RpcExtensionResourcePath {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcExtensionShortcutInfo {
+    pub shortcut: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub extension_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct RpcExtensionDiagnostic {
     pub level: String,
     pub message: String,
@@ -90,6 +99,8 @@ pub struct RpcExtensionInitOutput {
     #[serde(default)]
     pub tools: Vec<RpcExtensionToolInfo>,
     #[serde(default)]
+    pub shortcuts: Vec<RpcExtensionShortcutInfo>,
+    #[serde(default)]
     pub skill_paths: Vec<RpcExtensionResourcePath>,
     #[serde(default)]
     pub prompt_paths: Vec<RpcExtensionResourcePath>,
@@ -105,6 +116,7 @@ pub struct RpcExtensionHostStartOptions {
     pub extension_paths: Vec<String>,
     pub no_extensions: bool,
     pub flag_values: Value,
+    pub keybindings: Value,
     pub state: Value,
     pub session_start_reason: String,
     pub previous_session_file: Option<String>,
@@ -126,6 +138,7 @@ pub struct RpcExtensionHost {
     inner: Arc<RpcExtensionHostInner>,
     commands: Arc<Vec<RpcExtensionCommandInfo>>,
     tools: Arc<Vec<RpcExtensionToolInfo>>,
+    shortcuts: Arc<Vec<RpcExtensionShortcutInfo>>,
 }
 
 struct RpcExtensionHostInner {
@@ -235,6 +248,7 @@ impl RpcExtensionHost {
             inner,
             commands: Arc::new(Vec::new()),
             tools: Arc::new(Vec::new()),
+            shortcuts: Arc::new(Vec::new()),
         };
         let init_value = host
             .request(
@@ -245,6 +259,7 @@ impl RpcExtensionHost {
                     "extensions": resolved_extension_paths,
                     "noExtensions": options.no_extensions,
                     "flagValues": options.flag_values,
+                    "keybindings": options.keybindings,
                     "state": options.state,
                     "sessionStartReason": options.session_start_reason,
                     "previousSessionFile": options.previous_session_file,
@@ -263,6 +278,7 @@ impl RpcExtensionHost {
             inner: host.inner,
             commands: Arc::new(init.commands.clone()),
             tools: Arc::new(init.tools.clone()),
+            shortcuts: Arc::new(init.shortcuts.clone()),
         };
         Ok(RpcExtensionHostStartResult {
             host: Some(host),
@@ -276,6 +292,10 @@ impl RpcExtensionHost {
 
     pub fn tools(&self) -> Vec<RpcExtensionToolInfo> {
         (*self.tools).clone()
+    }
+
+    pub fn shortcuts(&self) -> Vec<RpcExtensionShortcutInfo> {
+        (*self.shortcuts).clone()
     }
 
     pub fn set_app_request_handler<F, Fut>(&self, handler: F)
@@ -307,6 +327,21 @@ impl RpcExtensionHost {
                 json!({
                     "name": name,
                     "args": args,
+                }),
+            )
+            .await?;
+        Ok(value
+            .get("handled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
+    }
+
+    pub async fn execute_shortcut(&self, shortcut: &str) -> Result<bool, String> {
+        let value = self
+            .request(
+                "execute_shortcut",
+                json!({
+                    "shortcut": shortcut,
                 }),
             )
             .await?;

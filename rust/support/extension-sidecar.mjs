@@ -7,6 +7,9 @@ let appRequestCounter = 0;
 let commandActionPromises = null;
 let commandActionChain = null;
 let appRequestsReady = false;
+let resolvedKeybindings = {};
+let resolvedShortcuts = new Map();
+let shortcutExecutionChain = Promise.resolve();
 const pendingUiRequests = new Map();
 const pendingAppRequests = new Map();
 const runtimeState = {
@@ -555,6 +558,28 @@ function extensionTools() {
 	}));
 }
 
+function extensionShortcuts() {
+	return Array.from(resolvedShortcuts.values()).map((shortcut) => ({
+		shortcut: shortcut.shortcut,
+		description: shortcut.description,
+		extensionPath: shortcut.extensionPath,
+	}));
+}
+
+async function runTrackedHostAction(handler) {
+	const previousActionPromises = commandActionPromises;
+	const previousActionChain = commandActionChain;
+	commandActionPromises = [];
+	commandActionChain = Promise.resolve();
+	try {
+		await handler();
+		await Promise.all(commandActionPromises);
+	} finally {
+		commandActionPromises = previousActionPromises;
+		commandActionChain = previousActionChain;
+	}
+}
+
 function updateRuntimeToolStateFromExtensionTools(nextExtensionTools) {
 	const previousNames = new Set(runtimeState.allTools.map((tool) => tool?.name).filter(Boolean));
 	const builtInTools = runtimeState.allTools.filter((tool) => tool?.sourceInfo?.source === "builtin");
@@ -591,15 +616,22 @@ function updateRuntimeToolStateFromExtensionTools(nextExtensionTools) {
 
 async function handleInit(message) {
 	applyRuntimeState(message.state);
+	resolvedKeybindings = message.keybindings ?? {};
+	resolvedShortcuts = new Map();
 	const loaded = message.noExtensions
 		? { extensions: [], errors: [], runtime: { flagValues: new Map() } }
-		: await discoverAndLoadExtensions(message.extensions ?? [], message.cwd, message.agentDir);
+		: await discoverAndLoadExtensions(
+				message.extensions ?? [],
+				message.cwd,
+				message.agentDir ?? undefined,
+			);
 	const diagnostics = [...loadDiagnostics(loaded.errors)];
 	if (!loaded.extensions || loaded.extensions.length === 0) {
 		reply(message.id, {
 			extensionCount: 0,
 			commands: [],
 			tools: [],
+			shortcuts: [],
 			skillPaths: [],
 			promptPaths: [],
 			themePaths: [],
@@ -610,6 +642,8 @@ async function handleInit(message) {
 
 	diagnostics.push(...applyExtensionFlagValues(message.flagValues, loaded));
 	bindRunner(loaded, message.cwd);
+	resolvedShortcuts = runner.getShortcuts(resolvedKeybindings);
+	diagnostics.push(...runner.getShortcutDiagnostics().map(({ level, message: text }) => ({ level, message: text })));
 
 	const sessionStartEvent = {
 		type: "session_start",
@@ -627,11 +661,13 @@ async function handleInit(message) {
 		: { skillPaths: [], promptPaths: [], themePaths: [] };
 	const commands = extensionCommands();
 	const tools = extensionTools();
+	const shortcuts = extensionShortcuts();
 	runtimeState.commands = [...commands, ...(message.state?.commands ?? [])];
 	reply(message.id, {
 		extensionCount: loaded.extensions.length,
 		commands,
 		tools,
+		shortcuts,
 		skillPaths: resources.skillPaths,
 		promptPaths: resources.promptPaths,
 		themePaths: resources.themePaths,
@@ -650,19 +686,40 @@ async function handleExecuteCommand(message) {
 		reply(message.id, { handled: false });
 		return;
 	}
-	const previousActionPromises = commandActionPromises;
-	const previousActionChain = commandActionChain;
-	commandActionPromises = [];
-	commandActionChain = Promise.resolve();
 	try {
-		await command.handler(message.args ?? "", runner.createCommandContext());
-		await Promise.all(commandActionPromises);
+		await runTrackedHostAction(async () => {
+			await command.handler(message.args ?? "", runner.createCommandContext());
+		});
 		reply(message.id, { handled: true });
 	} catch (error) {
 		replyError(message.id, error instanceof Error ? error.message : String(error));
-	} finally {
-		commandActionPromises = previousActionPromises;
-		commandActionChain = previousActionChain;
+	}
+}
+
+async function handleExecuteShortcut(message) {
+	if (!runner) {
+		reply(message.id, { handled: false });
+		return;
+	}
+	const shortcutKey = typeof message.shortcut === "string" ? message.shortcut.toLowerCase() : "";
+	const shortcut = resolvedShortcuts.get(shortcutKey);
+	if (!shortcut) {
+		reply(message.id, { handled: false });
+		return;
+	}
+
+	const currentExecution = shortcutExecutionChain.then(() =>
+		runTrackedHostAction(async () => {
+			await shortcut.handler(runner.createContext());
+		}),
+	);
+	shortcutExecutionChain = currentExecution.catch(() => undefined);
+
+	try {
+		await currentExecution;
+		reply(message.id, { handled: true });
+	} catch (error) {
+		replyError(message.id, error instanceof Error ? error.message : String(error));
 	}
 }
 
@@ -834,6 +891,9 @@ async function handleMessage(rawLine) {
 				break;
 			case "execute_command":
 				await handleExecuteCommand(message);
+				break;
+			case "execute_shortcut":
+				await handleExecuteShortcut(message);
 				break;
 			case "before_switch":
 				await handleBeforeSwitch(message);

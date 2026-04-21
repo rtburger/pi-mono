@@ -85,8 +85,8 @@ use tokio::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rpc_extensions::{
     RpcExtensionCommandInfo, RpcExtensionHost, RpcExtensionHostStartOptions,
-    RpcExtensionInputResult, RpcExtensionToolInfo, RpcToolCallResult, RpcToolResultMutation,
-    should_start_extension_host,
+    RpcExtensionInputResult, RpcExtensionShortcutInfo, RpcExtensionToolInfo,
+    RpcToolCallResult, RpcToolResultMutation, should_start_extension_host,
 };
 use serde_json::{Value, json};
 
@@ -215,6 +215,8 @@ struct InteractiveSlashCommandContext {
     agent_dir: Option<PathBuf>,
     auth_operation_in_progress: Arc<AtomicBool>,
     viewport_size: Arc<Mutex<(usize, usize)>>,
+    extension_host: Option<RpcExtensionHost>,
+    extension_shortcuts: Vec<RpcExtensionShortcutInfo>,
 }
 
 struct InteractiveIterationOptions {
@@ -1717,7 +1719,7 @@ async fn run_interactive_iteration(
     });
     let shared_runtime_settings = Arc::new(Mutex::new(runtime_settings.clone()));
     eprint!("{}", render_settings_warnings(&runtime_settings.warnings));
-    let resources = load_cli_resources(&parsed, &cwd, agent_dir.as_deref());
+    let mut resources = load_cli_resources(&parsed, &cwd, agent_dir.as_deref());
     for warning in &resources.warnings {
         eprintln!("{warning}");
     }
@@ -1726,7 +1728,7 @@ async fn run_interactive_iteration(
     if let Some(error) = theme_result.error.as_deref() {
         eprintln!("Warning: {error}");
     }
-    let (selected_tool_names, selected_tools) = build_selected_tools(
+    let (mut selected_tool_names, selected_tools) = build_selected_tools(
         &parsed,
         &cwd,
         runtime_settings.settings.images.auto_resize_images,
@@ -1856,7 +1858,10 @@ async fn run_interactive_iteration(
         .map(|message| preprocess_prompt_text(message, &resources))
         .collect();
 
-    let overlay_auth = OverlayAuthSource::new(auth_source);
+    let auth_source_for_extensions = auth_source.clone();
+    let built_in_models_for_extensions = built_in_models.clone();
+    let stream_options_for_extensions = stream_options.clone();
+    let overlay_auth = OverlayAuthSource::new(auth_source.clone());
     if let Err(error) = apply_runtime_api_key_override(
         &parsed,
         &overlay_auth,
@@ -1978,6 +1983,11 @@ async fn run_interactive_iteration(
     let interactive_session_manager = session_support
         .as_ref()
         .map(|support| support.manager.clone());
+    let mut all_tools = build_all_rpc_tools(
+        &cwd,
+        runtime_settings.settings.images.auto_resize_images,
+    );
+    let mut tool_source_info = builtin_rpc_tool_source_info_map(&all_tools);
 
     let mut shell = StartupShellComponent::new(
         "Pi",
@@ -1993,14 +2003,6 @@ async fn run_interactive_iteration(
     shell.set_hide_thinking_blocks(runtime_settings.settings.hide_thinking_block);
     shell.set_input_padding_x(runtime_settings.settings.editor_padding_x);
     shell.set_autocomplete_max_visible(runtime_settings.settings.autocomplete_max_visible);
-    shell.set_autocomplete_provider(Arc::new(CombinedAutocompleteProvider::new(
-        build_interactive_slash_commands(
-            core.model_registry(),
-            interactive_scoped_models.clone(),
-            &resources,
-        ),
-        cwd.clone(),
-    )));
     if let Some(prefill_input) = prefill_input {
         shell.set_input_value(prefill_input.clone());
         shell.set_input_cursor(prefill_input.len());
@@ -2016,7 +2018,7 @@ async fn run_interactive_iteration(
     });
 
     let transition_request = Arc::new(Mutex::new(None::<InteractiveTransitionRequest>));
-    let footer_provider = FooterDataProvider::new(&cwd);
+    let footer_provider = Arc::new(FooterDataProvider::new(&cwd));
     let render_handle = tui.render_handle();
     let terminal_width = tui.terminal_mut().columns() as usize;
     let terminal_height = tui.terminal_mut().rows() as usize;
@@ -2029,15 +2031,7 @@ async fn run_interactive_iteration(
     }
     let interactive_host = terminal.external_editor_host(render_handle.clone());
     shell.set_extension_editor_host(interactive_host.clone());
-    let slash_command_context = InteractiveSlashCommandContext {
-        keybindings: keybindings.clone(),
-        runtime_settings: shared_runtime_settings.clone(),
-        cwd: cwd.clone(),
-        agent_dir: agent_dir.clone(),
-        auth_operation_in_progress: Arc::new(AtomicBool::new(false)),
-        viewport_size,
-    };
-    shell.bind_footer_data_provider_with_render_handle(&footer_provider, render_handle.clone());
+    shell.bind_footer_data_provider_with_render_handle(footer_provider.as_ref(), render_handle.clone());
     let binding = InteractiveCoreBinding::bind(core.clone(), &mut shell, render_handle.clone());
     let status_handle = shell.status_handle_with_render_handle(render_handle.clone());
     let footer_state_handle = shell.footer_state_handle_with_render_handle(render_handle.clone());
@@ -2049,6 +2043,249 @@ async fn run_interactive_iteration(
     footer_state_handle.update(|footer_state| {
         footer_state.auto_compact_enabled = runtime_settings.settings.compaction.enabled;
     });
+
+    let mut interactive_extension_host = None::<RpcExtensionHost>;
+    let mut interactive_extension_shortcuts = Vec::<RpcExtensionShortcutInfo>::new();
+    let mut interactive_extension_event_unsubscribe = None::<AgentUnsubscribe>;
+    if should_start_extension_host(
+        &cwd,
+        agent_dir.as_deref(),
+        parsed.extensions.as_deref().unwrap_or(&[]),
+        parsed.no_extensions,
+    ) {
+        let extension_host_holder = Arc::new(Mutex::new(None::<RpcExtensionHost>));
+        let extension_stdout_emitter = interactive_extension_output_emitter(
+            status_handle.clone(),
+            footer_provider.clone(),
+            extension_host_holder.clone(),
+        );
+        let extension_stderr_emitter: TextEmitter = Arc::new({
+            let status_handle = status_handle.clone();
+            move |text| {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    status_handle.set_message(trimmed.to_owned());
+                }
+            }
+        });
+
+        let start_result = match RpcExtensionHost::start(RpcExtensionHostStartOptions {
+            cwd: cwd.clone(),
+            agent_dir: agent_dir.clone(),
+            extension_paths: parsed.extensions.clone().unwrap_or_default(),
+            no_extensions: parsed.no_extensions,
+            flag_values: unknown_flags_to_json(&parsed.unknown_flags),
+            keybindings: keybindings_json(&keybindings),
+            state: rpc_extension_state_json(
+                &core,
+                interactive_session_manager.as_ref(),
+                &resources,
+                &all_tools,
+                &tool_source_info,
+                &[],
+            ),
+            session_start_reason: String::from("startup"),
+            previous_session_file: None,
+            stdout_emitter: extension_stdout_emitter,
+            stderr_emitter: extension_stderr_emitter.clone(),
+        })
+        .await
+        {
+            Ok(start_result) => start_result,
+            Err(error) => {
+                let _ = tui.stop();
+                eprintln!("Error: {error}");
+                drop(binding);
+                return InteractiveIterationOutcome {
+                    exit_code: 1,
+                    transition: None,
+                    session_context: None,
+                };
+            }
+        };
+
+        let init = start_result.init;
+        let started_extension_host = start_result.host;
+        let diagnostics_output = render_extension_diagnostics(&init.diagnostics);
+        if !diagnostics_output.is_empty() {
+            eprint!("{diagnostics_output}");
+        }
+        if init
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.level == "error")
+        {
+            if let Some(host) = started_extension_host {
+                let _ = host.shutdown().await;
+            }
+            let _ = tui.stop();
+            drop(binding);
+            return InteractiveIterationOutcome {
+                exit_code: 1,
+                transition: None,
+                session_context: None,
+            };
+        }
+
+        let skill_paths = init
+            .skill_paths
+            .into_iter()
+            .map(|entry| ExtensionResourcePath {
+                path: entry.path,
+                extension_path: entry.extension_path,
+            })
+            .collect::<Vec<_>>();
+        let prompt_paths = init
+            .prompt_paths
+            .into_iter()
+            .map(|entry| ExtensionResourcePath {
+                path: entry.path,
+                extension_path: entry.extension_path,
+            })
+            .collect::<Vec<_>>();
+        let theme_paths = init
+            .theme_paths
+            .into_iter()
+            .map(|entry| ExtensionResourcePath {
+                path: entry.path,
+                extension_path: entry.extension_path,
+            })
+            .collect::<Vec<_>>();
+        for warning in extend_cli_resources_from_extensions(
+            &mut resources,
+            &cwd,
+            &skill_paths,
+            &prompt_paths,
+            &theme_paths,
+        ) {
+            eprintln!("{warning}");
+        }
+        set_registered_themes(resources.themes.clone());
+
+        if let Some(host) = started_extension_host {
+            interactive_extension_shortcuts = host.shortcuts();
+            let extension_tool_infos = host.tools();
+            let extension_tools = build_rpc_extension_tools(&host, &extension_tool_infos);
+            for extension_tool in &extension_tools {
+                all_tools.retain(|tool| tool.definition.name != extension_tool.definition.name);
+            }
+            all_tools.extend(extension_tools);
+            for tool_info in &extension_tool_infos {
+                tool_source_info.insert(tool_info.name.clone(), tool_info.source_info.clone());
+                if !selected_tool_names.iter().any(|name| name == &tool_info.name) {
+                    selected_tool_names.push(tool_info.name.clone());
+                }
+            }
+            let tool_metadata = runtime_tool_metadata_for_extensions(&extension_tool_infos);
+
+            let extension_commands = host.commands();
+            let active_tools = collect_rpc_tools_by_name(&all_tools, &selected_tool_names);
+            let extension_system_prompt = build_runtime_system_prompt(
+                &default_system_prompt,
+                &parsed,
+                &cwd,
+                agent_dir.as_deref(),
+                &selected_tool_names,
+                &resources,
+                Some(&tool_metadata),
+            );
+            core.agent().update_state(move |state| {
+                state.tools = active_tools.clone();
+                state.system_prompt = extension_system_prompt.clone();
+            });
+            if let Err(error) = host
+                .update_state(rpc_extension_state_json(
+                    &core,
+                    interactive_session_manager.as_ref(),
+                    &resources,
+                    &all_tools,
+                    &tool_source_info,
+                    &extension_commands,
+                ))
+                .await
+            {
+                let _ = host.shutdown().await;
+                let _ = tui.stop();
+                eprintln!("Error: {error}");
+                drop(binding);
+                return InteractiveIterationOutcome {
+                    exit_code: 1,
+                    transition: None,
+                    session_context: None,
+                };
+            }
+
+            let noop_emitter: TextEmitter = Arc::new(|_text: String| {});
+            let shared = RpcShared {
+                options: Arc::new(RpcPreparedOptions {
+                    parsed: parsed.clone(),
+                    initial_stderr: String::new(),
+                    stdin_content: None,
+                    auth_source: auth_source_for_extensions.clone(),
+                    built_in_models: built_in_models_for_extensions.clone(),
+                    models_json_path: models_json_path.clone(),
+                    agent_dir: agent_dir.clone(),
+                    cwd: cwd.clone(),
+                    default_system_prompt: default_system_prompt.clone(),
+                    stream_options: stream_options_for_extensions.clone(),
+                }),
+                state: Arc::new(Mutex::new(RpcState {
+                    session: _session.clone(),
+                    core: core.clone(),
+                    session_manager: interactive_session_manager.clone(),
+                    cwd: cwd.clone(),
+                    scoped_models: interactive_scoped_models.clone(),
+                    runtime_settings: runtime_settings.clone(),
+                    resources: resources.clone(),
+                    all_tools: all_tools.clone(),
+                    tool_source_info: tool_source_info.clone(),
+                    tool_metadata: tool_metadata.clone(),
+                    extension_host: Some(host.clone()),
+                    auto_compaction_enabled: runtime_settings.settings.compaction.enabled,
+                    is_compacting: Arc::new(AtomicBool::new(false)),
+                    event_unsubscribe: None,
+                    bash_abort_tx: None,
+                })),
+                stdout_emitter: noop_emitter,
+                stderr_emitter: extension_stderr_emitter,
+                emit_session_events: false,
+            };
+            install_extension_host_app_request_handler(shared, &host);
+
+            *extension_host_holder
+                .lock()
+                .expect("interactive extension host mutex poisoned") = Some(host.clone());
+            let host_for_events = host.clone();
+            interactive_extension_event_unsubscribe = Some(_session.subscribe(move |event| {
+                let event_json = rpc_session_event_to_json(&event);
+                let host_for_event = host_for_events.clone();
+                tokio::spawn(async move {
+                    let _ = host_for_event.emit_event(event_json).await;
+                });
+            }));
+            interactive_extension_host = Some(host);
+        }
+    }
+
+    shell.set_autocomplete_provider(Arc::new(CombinedAutocompleteProvider::new(
+        build_interactive_slash_commands(
+            core.model_registry(),
+            interactive_scoped_models.clone(),
+            &resources,
+        ),
+        cwd.clone(),
+    )));
+
+    let slash_command_context = InteractiveSlashCommandContext {
+        keybindings: keybindings.clone(),
+        runtime_settings: shared_runtime_settings.clone(),
+        cwd: cwd.clone(),
+        agent_dir: agent_dir.clone(),
+        auth_operation_in_progress: Arc::new(AtomicBool::new(false)),
+        viewport_size,
+        extension_host: interactive_extension_host.clone(),
+        extension_shortcuts: interactive_extension_shortcuts.clone(),
+    };
     let auto_compaction_binding = install_interactive_auto_compaction(
         &core,
         interactive_session_manager.as_ref(),
@@ -2076,6 +2313,12 @@ async fn run_interactive_iteration(
 
     if let Err(error) = tui.start() {
         let _ = tui.stop();
+        if let Some(unsubscribe) = interactive_extension_event_unsubscribe.take() {
+            let _ = unsubscribe();
+        }
+        if let Some(extension_host) = interactive_extension_host.clone() {
+            let _ = extension_host.shutdown().await;
+        }
         eprintln!("Error: {error}");
         drop(auto_compaction_binding);
         drop(binding);
@@ -2103,6 +2346,12 @@ async fn run_interactive_iteration(
 
     core.abort();
     core.wait_for_idle().await;
+    if let Some(unsubscribe) = interactive_extension_event_unsubscribe.take() {
+        let _ = unsubscribe();
+    }
+    if let Some(extension_host) = interactive_extension_host {
+        let _ = extension_host.shutdown().await;
+    }
     let transition = transition_request
         .lock()
         .expect("interactive transition request mutex poisoned")
@@ -5781,6 +6030,7 @@ async fn build_rpc_state(
             extension_paths: options.parsed.extensions.clone().unwrap_or_default(),
             no_extensions: options.parsed.no_extensions,
             flag_values: unknown_flags_to_json(&options.parsed.unknown_flags),
+            keybindings: keybindings_json(&create_keybindings_manager(options.agent_dir.as_deref())),
             state: rpc_extension_state_json(
                 &core,
                 session_manager.as_ref(),
@@ -9424,7 +9674,110 @@ fn current_runtime_settings(context: &InteractiveSlashCommandContext) -> LoadedR
         .clone()
 }
 
+fn keybindings_json(keybindings: &KeybindingsManager) -> Value {
+    let mut object = serde_json::Map::new();
+    for (keybinding, keys) in keybindings.get_effective_config() {
+        object.insert(
+            keybinding,
+            Value::Array(
+                keys.into_iter()
+                    .map(|key| Value::String(key.to_string()))
+                    .collect(),
+            ),
+        );
+    }
+    Value::Object(object)
+}
+
+fn interactive_extension_output_emitter(
+    status_handle: StatusHandle,
+    footer_provider: Arc<FooterDataProvider>,
+    extension_host_holder: Arc<Mutex<Option<RpcExtensionHost>>>,
+) -> TextEmitter {
+    Arc::new(move |text| {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            handle_interactive_extension_output_line(
+                trimmed,
+                &status_handle,
+                footer_provider.as_ref(),
+                &extension_host_holder,
+            );
+        }
+    })
+}
+
+fn handle_interactive_extension_output_line(
+    line: &str,
+    status_handle: &StatusHandle,
+    footer_provider: &FooterDataProvider,
+    extension_host_holder: &Arc<Mutex<Option<RpcExtensionHost>>>,
+) {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+
+    match value.get("type").and_then(Value::as_str) {
+        Some("extension_error") => {
+            if let Some(error) = value.get("error").and_then(Value::as_str) {
+                status_handle.set_message(format!("Extension error: {error}"));
+            }
+        }
+        Some("extension_ui_request") => {
+            let request_id = value.get("id").and_then(Value::as_str).map(ToOwned::to_owned);
+            match value.get("method").and_then(Value::as_str) {
+                Some("notify") => {
+                    if let Some(message) = value.get("message").and_then(Value::as_str) {
+                        status_handle.set_message(message.to_owned());
+                    }
+                }
+                Some("setStatus") => {
+                    if let Some(key) = value.get("statusKey").and_then(Value::as_str) {
+                        let text = value
+                            .get("statusText")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned);
+                        footer_provider.set_extension_status(key.to_owned(), text);
+                    }
+                }
+                Some("input") | Some("select") | Some("confirm") | Some("editor") => {
+                    if let Some(request_id) = request_id
+                        && let Some(extension_host) = extension_host_holder
+                            .lock()
+                            .expect("interactive extension host mutex poisoned")
+                            .clone()
+                    {
+                        tokio::spawn(async move {
+                            let _ = extension_host
+                                .deliver_ui_response(json!({
+                                    "id": request_id,
+                                    "cancelled": true,
+                                }))
+                                .await;
+                        });
+                    }
+                    status_handle.set_message(
+                        "Extension dialogs are not supported in the Rust interactive CLI yet.",
+                    );
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
 fn render_hotkeys_text(keybindings: &KeybindingsManager) -> String {
+    render_hotkeys_text_with_extensions(keybindings, &[])
+}
+
+fn render_hotkeys_text_with_extensions(
+    keybindings: &KeybindingsManager,
+    extension_shortcuts: &[RpcExtensionShortcutInfo],
+) -> String {
     let mut output = String::new();
     push_line(&mut output, "Keyboard Shortcuts");
     push_line(&mut output, "");
@@ -9460,6 +9813,21 @@ fn render_hotkeys_text(keybindings: &KeybindingsManager) -> String {
             .as_deref()
             .unwrap_or(keybinding.as_str());
         push_line(&mut output, &format!("{keys}: {description}"));
+    }
+
+    if !extension_shortcuts.is_empty() {
+        let mut shortcuts = extension_shortcuts.to_vec();
+        shortcuts.sort_by(|left, right| left.shortcut.cmp(&right.shortcut));
+        push_line(&mut output, "");
+        push_line(&mut output, "Extensions");
+        for shortcut in shortcuts {
+            let keys = format_key_ids(&[pi_tui::KeyId::from(shortcut.shortcut.clone())]);
+            let description = shortcut
+                .description
+                .as_deref()
+                .unwrap_or(shortcut.extension_path.as_str());
+            push_line(&mut output, &format!("{keys}: {description}"));
+        }
     }
 
     output.trim_end().to_owned()
@@ -10942,9 +11310,32 @@ fn install_interactive_submit_handler(
     });
 
     let bash_controller = Arc::new(Mutex::new(InteractiveBashController::default()));
+    let extension_shortcuts = slash_command_context.extension_shortcuts.clone();
+    let extension_host = slash_command_context.extension_host.clone();
+    let extension_status_handle = status_handle.clone();
     let interrupt_keybindings = slash_command_context.keybindings.clone();
     let interrupt_bash_controller = bash_controller.clone();
     shell.set_on_extension_shortcut(move |data| {
+        if let Some(shortcut) = extension_shortcuts
+            .iter()
+            .find(|shortcut| matches_key(&data, &shortcut.shortcut))
+            && let Some(extension_host) = extension_host.clone()
+        {
+            let extension_status_handle = extension_status_handle.clone();
+            let shortcut_id = shortcut.shortcut.clone();
+            tokio::spawn(async move {
+                match extension_host.execute_shortcut(&shortcut_id).await {
+                    Ok(true) => {}
+                    Ok(false) => extension_status_handle
+                        .set_message(format!("Extension shortcut unavailable: {shortcut_id}")),
+                    Err(error) => {
+                        extension_status_handle.set_message(format!("Error: {error}"))
+                    }
+                }
+            });
+            return true;
+        }
+
         if !matches_shell_binding(&interrupt_keybindings, &data, "app.interrupt") {
             return false;
         }
@@ -11349,7 +11740,10 @@ fn handle_interactive_slash_command(
         append_transcript_custom_message(
             shell,
             "hotkeys",
-            render_hotkeys_text(&slash_command_context.keybindings),
+            render_hotkeys_text_with_extensions(
+                &slash_command_context.keybindings,
+                &slash_command_context.extension_shortcuts,
+            ),
         );
         return true;
     }
@@ -12002,6 +12396,8 @@ mod tests {
             agent_dir,
             auth_operation_in_progress: Arc::new(AtomicBool::new(false)),
             viewport_size: Arc::new(Mutex::new((100, 24))),
+            extension_host: None,
+            extension_shortcuts: Vec::new(),
         }
     }
 
@@ -13481,6 +13877,107 @@ mod tests {
             "output: {rendered}"
         );
         assert!(!rendered.contains("Edit tree label"), "output: {rendered}");
+    }
+
+    #[test]
+    fn hotkeys_text_includes_extension_shortcuts() {
+        let keybindings = create_keybindings_manager(None);
+        let rendered = render_hotkeys_text_with_extensions(
+            &keybindings,
+            &[RpcExtensionShortcutInfo {
+                shortcut: String::from("alt+x"),
+                description: Some(String::from("Send shortcut prompt")),
+                extension_path: String::from("/tmp/shortcut-extension.ts"),
+            }],
+        );
+
+        assert!(rendered.contains("Extensions"), "output: {rendered}");
+        assert!(
+            rendered.contains("Alt+X: Send shortcut prompt"),
+            "output: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_extension_shortcut_executes_handler() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "interactive-shortcut-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "interactive-shortcut-faux-1".into(),
+                name: Some("Interactive Shortcut Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        faux.set_responses(vec![FauxResponse::text("shortcut response")]);
+        let model = faux
+            .get_model(Some("interactive-shortcut-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("interactive-extension-shortcut-cwd");
+        let agent_dir = unique_temp_dir("interactive-extension-shortcut-agent");
+        fs::write(
+            agent_dir.join("keybindings.json"),
+            "{\n  \"app.model.cycleForward\": \"ctrl+n\"\n}\n",
+        )
+        .unwrap();
+        let extension_path = cwd.join("shortcut-extension.ts");
+        fs::write(
+            &extension_path,
+            r#"export default function (pi) {
+	pi.registerShortcut("ctrl+p", {
+		description: "Send shortcut prompt",
+		handler: async () => {
+			pi.sendUserMessage("hello from shortcut");
+		},
+	});
+}
+"#,
+        )
+        .unwrap();
+
+        let terminal = LifecycleScriptedTerminal::new(vec![
+            (Duration::from_millis(25), String::from("\x10")),
+            (Duration::from_millis(500), String::from("\x04")),
+        ]);
+        let inspector = terminal.clone();
+
+        let exit_code = timeout(
+            Duration::from_secs(10),
+            run_interactive_command_with_runtime(
+                RunCommandOptions {
+                    args: vec![
+                        String::from("--provider"),
+                        model.provider.clone(),
+                        String::from("--model"),
+                        model.id.clone(),
+                        String::from("--extension"),
+                        extension_path.to_string_lossy().into_owned(),
+                    ],
+                    stdin_is_tty: true,
+                    stdin_content: None,
+                    auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                        model.provider.as_str(),
+                        "token",
+                    )])),
+                    built_in_models: vec![model],
+                    models_json_path: None,
+                    agent_dir: Some(agent_dir),
+                    cwd: cwd.clone(),
+                    default_system_prompt: String::new(),
+                    version: String::from("0.1.0"),
+                    stream_options: StreamOptions::default(),
+                },
+                InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone()))),
+            ),
+        )
+        .await
+        .expect("interactive shortcut run should complete");
+
+        let output = strip_terminal_control_sequences(&inspector.output());
+        assert_eq!(exit_code, 0, "output: {output}");
+        assert!(output.contains("shortcut response"), "output: {output}");
+
+        faux.unregister();
     }
 
     #[test]
