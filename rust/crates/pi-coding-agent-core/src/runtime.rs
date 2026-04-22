@@ -471,6 +471,36 @@ impl AgentSession {
         })
     }
 
+    pub fn session_name(&self) -> Option<String> {
+        self.session_manager().and_then(|session_manager| {
+            session_manager
+                .lock()
+                .expect("session manager mutex poisoned")
+                .get_session_name()
+        })
+    }
+
+    pub fn leaf_id(&self) -> Option<String> {
+        self.session_manager().and_then(|session_manager| {
+            session_manager
+                .lock()
+                .expect("session manager mutex poisoned")
+                .get_leaf_id()
+                .map(ToOwned::to_owned)
+        })
+    }
+
+    pub fn session_tree(&self) -> Vec<crate::SessionTreeNode> {
+        self.session_manager()
+            .map(|session_manager| {
+                session_manager
+                    .lock()
+                    .expect("session manager mutex poisoned")
+                    .get_tree()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn subscribe<F>(&self, listener: F) -> AgentUnsubscribe
     where
         F: Fn(AgentSessionEvent) + Send + Sync + 'static,
@@ -680,6 +710,16 @@ impl AgentSession {
         let command = command.into();
         let session_manager = self.session_manager();
         let cwd = resolve_session_cwd(session_manager.as_ref())?;
+        self.execute_bash_in_cwd(&cwd, command, exclude_from_context)
+            .await
+    }
+
+    async fn execute_bash_in_cwd(
+        &self,
+        cwd: &Path,
+        command: String,
+        exclude_from_context: bool,
+    ) -> Result<BashResult, crate::CodingAgentCoreError> {
         let abort_rx = {
             let mut bash_state = self.inner.bash_state.lock().unwrap();
             if bash_state.abort_tx.is_some() {
@@ -692,7 +732,7 @@ impl AgentSession {
             abort_rx
         };
 
-        let execution = run_session_bash_command(&cwd, &command, abort_rx).await;
+        let execution = run_session_bash_command(cwd, &command, abort_rx).await;
         self.inner.bash_state.lock().unwrap().abort_tx = None;
         let result = execution?;
         self.record_bash_result(command, result.clone(), exclude_from_context)?;
@@ -2104,6 +2144,66 @@ impl AgentSessionRuntime {
         self.model_fallback_message.as_deref()
     }
 
+    pub fn session_id(&self) -> Option<String> {
+        self.session.session_id()
+    }
+
+    pub fn session_file(&self) -> Option<String> {
+        self.session.session_file()
+    }
+
+    pub fn session_name(&self) -> Option<String> {
+        self.session.session_name()
+    }
+
+    pub fn leaf_id(&self) -> Option<String> {
+        self.session.leaf_id()
+    }
+
+    pub fn session_tree(&self) -> Vec<crate::SessionTreeNode> {
+        self.session.session_tree()
+    }
+
+    pub fn session_stats(&self) -> SessionStats {
+        self.session.session_stats()
+    }
+
+    pub fn set_session_name(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<(), AgentSessionRuntimeError> {
+        self.session.set_session_name(name).map_err(Into::into)
+    }
+
+    pub async fn execute_bash(
+        &self,
+        command: impl Into<String>,
+        exclude_from_context: bool,
+    ) -> Result<BashResult, AgentSessionRuntimeError> {
+        let command = command.into();
+        let result = if self.session.session_manager().is_some() {
+            self.session
+                .execute_bash(command, exclude_from_context)
+                .await
+        } else {
+            self.session
+                .execute_bash_in_cwd(self.cwd(), command, exclude_from_context)
+                .await
+        };
+        result.map_err(Into::into)
+    }
+
+    pub async fn navigate_tree(
+        &self,
+        target_id: Option<&str>,
+        options: NavigateTreeOptions,
+    ) -> Result<TreeNavigationResult, AgentSessionRuntimeError> {
+        self.session
+            .navigate_tree(target_id, options)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn switch_session(
         &mut self,
         session_path: &str,
@@ -2435,6 +2535,8 @@ fn map_stream_options_to_simple_options(
         temperature: options.temperature,
         max_tokens: options.max_tokens,
         reasoning,
+        reasoning_summary: options.reasoning_summary,
+        text_verbosity: options.text_verbosity,
         thinking_budgets,
         tool_choice: options.tool_choice,
         service_tier: options.service_tier,

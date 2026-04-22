@@ -209,6 +209,8 @@ fn map_stream_options_to_simple_options(
         temperature: options.temperature,
         max_tokens: options.max_tokens,
         reasoning,
+        reasoning_summary: options.reasoning_summary,
+        text_verbosity: options.text_verbosity,
         thinking_budgets,
         tool_choice: options.tool_choice,
         service_tier: options.service_tier,
