@@ -102,8 +102,7 @@ impl ModelRegistry {
             None => CustomModelsResult::default(),
         };
 
-        let built_in_models =
-            self.load_built_in_models(&custom.overrides, &custom.model_overrides);
+        let built_in_models = self.load_built_in_models(&custom.overrides, &custom.model_overrides);
         let mut models = merge_custom_models(built_in_models, custom.models);
         let mut load_error = custom.error;
 
@@ -229,7 +228,12 @@ impl ModelRegistry {
                 .flatten()
         });
 
-        self.finalize_request_auth(model, provider_config.as_ref(), model_headers.as_ref(), api_key)
+        self.finalize_request_auth(
+            model,
+            provider_config.as_ref(),
+            model_headers.as_ref(),
+            api_key,
+        )
     }
 
     pub async fn get_api_key_and_headers_async(
@@ -255,13 +259,21 @@ impl ModelRegistry {
                 .transpose()?,
         };
 
-        self.finalize_request_auth(model, provider_config.as_ref(), model_headers.as_ref(), api_key)
+        self.finalize_request_auth(
+            model,
+            provider_config.as_ref(),
+            model_headers.as_ref(),
+            api_key,
+        )
     }
 
     fn request_config_for_model(
         &self,
         model: &Model,
-    ) -> (Option<ProviderRequestConfig>, Option<BTreeMap<String, String>>) {
+    ) -> (
+        Option<ProviderRequestConfig>,
+        Option<BTreeMap<String, String>>,
+    ) {
         let state = self
             .state
             .read()
@@ -301,8 +313,10 @@ impl ModelRegistry {
             provider_config.and_then(|config| config.headers.as_ref()),
             &format!("provider \"{}\"", model.provider),
         )?;
-        let model_headers =
-            resolve_headers_or_err(model_headers, &format!("model \"{}/{}\"", model.provider, model.id))?;
+        let model_headers = resolve_headers_or_err(
+            model_headers,
+            &format!("model \"{}/{}\"", model.provider, model.id),
+        )?;
 
         let mut headers = BTreeMap::new();
         if let Some(provider_headers) = provider_headers {
@@ -450,7 +464,10 @@ impl ModelRegistry {
         }
 
         if config.base_url.is_some() || config.headers.is_some() || config.auth_header.is_some() {
-            for model in models.iter_mut().filter(|model| model.provider == provider_name) {
+            for model in models
+                .iter_mut()
+                .filter(|model| model.provider == provider_name)
+            {
                 if let Some(base_url) = config.base_url.as_ref() {
                     model.base_url = base_url.clone();
                 }
@@ -836,7 +853,9 @@ fn store_model_headers(
     if let Some(headers) = headers
         && !headers.is_empty()
     {
-        build_state.model_request_headers.insert(key, headers.clone());
+        build_state
+            .model_request_headers
+            .insert(key, headers.clone());
     }
 }
 

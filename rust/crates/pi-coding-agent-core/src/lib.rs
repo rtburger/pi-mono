@@ -41,9 +41,7 @@ pub use messages::{
     convert_to_llm, create_bash_execution_message, create_branch_summary_message,
     create_compaction_summary_message, create_custom_message, filter_blocked_images,
 };
-pub use model_registry::{
-    ModelRegistry, ProviderConfigInput, ProviderModelInput, RequestAuth,
-};
+pub use model_registry::{ModelRegistry, ProviderConfigInput, ProviderModelInput, RequestAuth};
 pub use model_resolver::{
     DEFAULT_MODELS, DEFAULT_THINKING_LEVEL, InitialModelOptions, InitialModelResult, ModelCatalog,
     ParseModelPatternOptions, ParsedModelResult, ResolveCliModelResult, ResolveModelScopeResult,

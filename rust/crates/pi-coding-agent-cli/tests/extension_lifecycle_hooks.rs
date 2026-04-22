@@ -142,8 +142,11 @@ fn user_texts(context: &Context) -> Vec<String> {
 fn create_session_file(cwd: &PathBuf, prefix: &str) -> (PathBuf, String) {
     let session_dir = cwd.join(format!("{prefix}-sessions"));
     fs::create_dir_all(&session_dir).unwrap();
-    let mut manager = SessionManager::create(cwd.to_string_lossy().as_ref(), Some(session_dir.to_string_lossy().as_ref()))
-        .expect("expected session manager");
+    let mut manager = SessionManager::create(
+        cwd.to_string_lossy().as_ref(),
+        Some(session_dir.to_string_lossy().as_ref()),
+    )
+    .expect("expected session manager");
     let root_user_id = manager
         .append_message(Message::User {
             content: vec![UserContent::Text {
@@ -388,10 +391,13 @@ async fn fork_transition_runs_hooks_and_emits_session_start_for_new_host() {
     .await;
 
     assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
-    assert!(result.stdout.contains("before-fork"), "stdout: {}", result.stdout);
     assert!(
-        result.stdout.contains("\"method\":\"setTitle\"")
-            && result.stdout.contains("start:fork:"),
+        result.stdout.contains("before-fork"),
+        "stdout: {}",
+        result.stdout
+    );
+    assert!(
+        result.stdout.contains("\"method\":\"setTitle\"") && result.stdout.contains("start:fork:"),
         "stdout: {}",
         result.stdout
     );
@@ -521,7 +527,12 @@ async fn compact_command_uses_before_compact_hook_and_emits_session_compact() {
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .find(|value| value.get("command").and_then(Value::as_str) == Some("compact"))
         .and_then(|value| value.get("data").cloned())
-        .unwrap_or_else(|| panic!("expected compact response data\nstdout: {}\nstderr: {}", result.stdout, result.stderr));
+        .unwrap_or_else(|| {
+            panic!(
+                "expected compact response data\nstdout: {}\nstderr: {}",
+                result.stdout, result.stderr
+            )
+        });
     assert_eq!(
         response.get("summary").and_then(Value::as_str),
         Some("Hook compaction summary")

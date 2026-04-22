@@ -653,16 +653,20 @@ fn dynamic_provider_registration_replaces_models_and_unregister_restores_state()
         registry
             .get_available()
             .iter()
-            .any(|candidate| candidate.provider == "dynamic-proxy" && candidate.id == "dynamic-model")
+            .any(|candidate| candidate.provider == "dynamic-proxy"
+                && candidate.id == "dynamic-model")
     );
     assert_eq!(
         registry.get_api_key_and_headers(&model).unwrap(),
         RequestAuth {
             api_key: Some(String::from("dynamic-token")),
             headers: Some(
-                [(String::from("Authorization"), String::from("Bearer dynamic-token"))]
-                    .into_iter()
-                    .collect(),
+                [(
+                    String::from("Authorization"),
+                    String::from("Bearer dynamic-token")
+                )]
+                .into_iter()
+                .collect(),
             ),
         }
     );
@@ -709,7 +713,10 @@ fn dynamic_provider_override_updates_existing_models_and_unregister_restores_bas
             api_key: Some(String::from("override-token")),
             headers: Some(
                 [
-                    (String::from("Authorization"), String::from("Bearer override-token")),
+                    (
+                        String::from("Authorization"),
+                        String::from("Bearer override-token")
+                    ),
                     (String::from("X-Override"), String::from("true")),
                 ]
                 .into_iter()
