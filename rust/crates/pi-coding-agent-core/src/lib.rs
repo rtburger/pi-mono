@@ -59,11 +59,11 @@ pub use resource_loader::{
 pub use resource_types::{ResourceDiagnostic, SourceInfo};
 pub use runtime::{
     AgentSession, AgentSessionEvent, AgentSessionOptions, AgentSessionRuntime,
-    AgentSessionRuntimeError, AgentSessionRuntimeRequest, CodingAgentCore, CodingAgentCoreOptions,
-    CompactionReason, ContextUsage, CreateAgentSessionResult, CreateAgentSessionRuntimeFactory,
-    CreateAgentSessionRuntimeFuture, CreateCodingAgentCoreResult, ForkMessageCandidate,
-    NavigateTreeOptions, RetrySettings, SessionStats, SessionTokenUsage, create_agent_session,
-    create_agent_session_runtime, create_coding_agent_core,
+    AgentSessionRuntimeError, AgentSessionRuntimeRequest, BashResult, CodingAgentCore,
+    CodingAgentCoreOptions, CompactionReason, ContextUsage, CreateAgentSessionResult,
+    CreateAgentSessionRuntimeFactory, CreateAgentSessionRuntimeFuture, CreateCodingAgentCoreResult,
+    ForkMessageCandidate, NavigateTreeOptions, RetrySettings, SessionStats, SessionTokenUsage,
+    create_agent_session, create_agent_session_runtime, create_coding_agent_core,
 };
 pub use session_manager::{
     CURRENT_SESSION_VERSION, FileEntry, NewSessionOptions, SessionContext, SessionEntry,

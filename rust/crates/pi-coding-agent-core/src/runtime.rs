@@ -5,9 +5,9 @@ use crate::{
     bootstrap::ExistingSessionSelection,
     bootstrap::SessionBootstrapOptions,
     bootstrap_session, calculate_context_tokens, compact as run_compaction, convert_to_llm,
-    estimate_context_tokens, filter_blocked_images, generate_branch_summary_with_details,
-    get_latest_compaction_entry, latest_compaction_timestamp,
-    model_resolver::parse_thinking_level,
+    create_bash_execution_message, estimate_context_tokens, filter_blocked_images,
+    generate_branch_summary_with_details, get_latest_compaction_entry, latest_compaction_timestamp,
+    model_resolver::{parse_thinking_level, restore_model_from_session},
     prepare_compaction, should_compact,
     tree_navigation::{
         TreeNavigationResult, TreeNavigationSummary, apply_tree_navigation, prepare_tree_navigation,
@@ -21,22 +21,25 @@ use pi_agent::{
 };
 use pi_ai::{
     AiError, AssistantEventStream, SimpleStreamOptions, StreamOptions,
-    ThinkingLevel as AiThinkingLevel, is_context_overflow, stream_simple,
+    ThinkingLevel as AiThinkingLevel, is_context_overflow, stream_simple, supports_xhigh,
 };
-use pi_coding_agent_tools::create_coding_tools_with_read_auto_resize_flag;
+use pi_coding_agent_tools::{
+    TruncationOptions, create_coding_tools_with_read_auto_resize_flag, truncate_tail,
+};
 use pi_events::{AssistantMessage, Context, Message, Model, StopReason};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
+    process::Stdio,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{sync::watch, time::sleep};
+use tokio::{process::Command as TokioCommand, sync::watch, time::sleep};
 
 pub struct CodingAgentCoreOptions {
     pub auth_source: Arc<dyn AuthSource>,
@@ -160,6 +163,17 @@ pub struct SessionStats {
     pub tokens: SessionTokenUsage,
     pub cost: f64,
     pub context_usage: Option<ContextUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BashResult {
+    pub output: String,
+    pub exit_code: Option<i64>,
+    pub cancelled: bool,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_output_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +311,12 @@ struct SessionQueueState {
     follow_up: Vec<String>,
 }
 
+#[derive(Debug, Default)]
+struct SessionBashState {
+    abort_tx: Option<watch::Sender<bool>>,
+    pending_messages: Vec<AgentMessage>,
+}
+
 impl Default for SessionAutomationState {
     fn default() -> Self {
         Self {
@@ -318,6 +338,7 @@ struct AgentSessionInner {
     next_session_listener_id: AtomicUsize,
     automation: Arc<Mutex<SessionAutomationState>>,
     queue_state: Arc<Mutex<SessionQueueState>>,
+    bash_state: Arc<Mutex<SessionBashState>>,
     _agent_subscription: Arc<SessionPersistenceSubscription>,
 }
 
@@ -372,18 +393,21 @@ impl AgentSession {
         let session_event_listeners = Arc::new(Mutex::new(BTreeMap::new()));
         let automation = Arc::new(Mutex::new(SessionAutomationState::default()));
         let queue_state = Arc::new(Mutex::new(SessionQueueState::default()));
+        let bash_state = Arc::new(Mutex::new(SessionBashState::default()));
         let unsubscribe = core.agent().subscribe({
             let core = core.clone();
             let session_manager = session_manager.clone();
             let session_event_listeners = session_event_listeners.clone();
             let automation = automation.clone();
             let queue_state = queue_state.clone();
+            let bash_state = bash_state.clone();
             move |event, _signal| {
                 let core = core.clone();
                 let session_manager = session_manager.clone();
                 let session_event_listeners = session_event_listeners.clone();
                 let automation = automation.clone();
                 let queue_state = queue_state.clone();
+                let bash_state = bash_state.clone();
                 Box::pin(async move {
                     handle_agent_session_event(
                         core,
@@ -391,6 +415,7 @@ impl AgentSession {
                         session_event_listeners,
                         automation,
                         queue_state,
+                        bash_state,
                         event,
                     )
                     .await;
@@ -406,6 +431,7 @@ impl AgentSession {
                 next_session_listener_id: AtomicUsize::new(1),
                 automation,
                 queue_state,
+                bash_state,
                 _agent_subscription: Arc::new(SessionPersistenceSubscription::new(unsubscribe)),
             }),
         })
@@ -646,6 +672,102 @@ impl AgentSession {
         self.inner.core.wait_for_idle().await;
     }
 
+    pub async fn execute_bash(
+        &self,
+        command: impl Into<String>,
+        exclude_from_context: bool,
+    ) -> Result<BashResult, crate::CodingAgentCoreError> {
+        let command = command.into();
+        let session_manager = self.session_manager();
+        let cwd = resolve_session_cwd(session_manager.as_ref())?;
+        let abort_rx = {
+            let mut bash_state = self.inner.bash_state.lock().unwrap();
+            if bash_state.abort_tx.is_some() {
+                return Err(crate::CodingAgentCoreError::Message(String::from(
+                    "A bash command is already running",
+                )));
+            }
+            let (abort_tx, abort_rx) = watch::channel(false);
+            bash_state.abort_tx = Some(abort_tx);
+            abort_rx
+        };
+
+        let execution = run_session_bash_command(&cwd, &command, abort_rx).await;
+        self.inner.bash_state.lock().unwrap().abort_tx = None;
+        let result = execution?;
+        self.record_bash_result(command, result.clone(), exclude_from_context)?;
+        Ok(result)
+    }
+
+    pub fn record_bash_result(
+        &self,
+        command: impl Into<String>,
+        result: BashResult,
+        exclude_from_context: bool,
+    ) -> Result<(), crate::CodingAgentCoreError> {
+        let message = create_bash_execution_message(
+            command,
+            result.output,
+            result.exit_code,
+            result.cancelled,
+            result.truncated,
+            result.full_output_path,
+            exclude_from_context,
+            now_ms(),
+        );
+
+        if self.state().is_streaming {
+            self.inner
+                .bash_state
+                .lock()
+                .unwrap()
+                .pending_messages
+                .push(message);
+            return Ok(());
+        }
+
+        append_bash_message(&self.inner.core, self.session_manager().as_ref(), message)
+    }
+
+    pub fn abort_bash(&self) {
+        if let Some(abort_tx) = self.inner.bash_state.lock().unwrap().abort_tx.clone() {
+            let _ = abort_tx.send(true);
+        }
+    }
+
+    pub fn is_bash_running(&self) -> bool {
+        self.inner.bash_state.lock().unwrap().abort_tx.is_some()
+    }
+
+    pub fn has_pending_bash_messages(&self) -> bool {
+        !self
+            .inner
+            .bash_state
+            .lock()
+            .unwrap()
+            .pending_messages
+            .is_empty()
+    }
+
+    pub fn set_label(
+        &self,
+        entry_id: &str,
+        label: Option<String>,
+    ) -> Result<(), crate::CodingAgentCoreError> {
+        let Some(session_manager) = self.session_manager() else {
+            return Err(crate::CodingAgentCoreError::Message(String::from(
+                "Session history is unavailable",
+            )));
+        };
+
+        session_manager
+            .lock()
+            .expect("session manager mutex poisoned")
+            .append_label_change(entry_id, label)
+            .map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))?;
+        Ok(())
+    }
+
     pub fn set_session_name(
         &self,
         name: impl Into<String>,
@@ -740,10 +862,9 @@ impl AgentSession {
             (session_manager.build_session_context(), navigation)
         };
 
-        let next_messages = session_context.messages;
-        self.agent().update_state(move |state| {
-            state.messages = next_messages.clone();
-        });
+        let model_registry = self.model_registry();
+        let _ =
+            apply_session_context_state(&self.inner.core, model_registry.as_ref(), session_context);
 
         Ok(navigation)
     }
@@ -1002,6 +1123,7 @@ async fn handle_agent_session_event(
     listeners: Arc<Mutex<BTreeMap<usize, SessionEventListener>>>,
     automation: Arc<Mutex<SessionAutomationState>>,
     queue_state: Arc<Mutex<SessionQueueState>>,
+    bash_state: Arc<Mutex<SessionBashState>>,
     event: AgentEvent,
 ) {
     if let AgentEvent::MessageStart { message } = &event
@@ -1047,6 +1169,8 @@ async fn handle_agent_session_event(
     if !matches!(event, AgentEvent::AgentEnd { .. }) {
         return;
     }
+
+    flush_pending_bash_messages(&core, session_manager.as_ref(), &bash_state);
 
     let assistant = {
         let mut automation = automation.lock().unwrap();
@@ -1169,6 +1293,231 @@ fn persist_session_message(
         }
         _ => {}
     }
+}
+
+fn append_bash_message(
+    core: &CodingAgentCore,
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
+    message: AgentMessage,
+) -> Result<(), crate::CodingAgentCoreError> {
+    let message_for_state = message.clone();
+    core.agent().update_state(move |state| {
+        state.messages.push(message_for_state.clone());
+    });
+
+    if let Some(session_manager) = session_manager {
+        session_manager
+            .lock()
+            .expect("session manager mutex poisoned")
+            .append_message(message)
+            .map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))?;
+    }
+
+    Ok(())
+}
+
+fn flush_pending_bash_messages(
+    core: &CodingAgentCore,
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
+    bash_state: &Arc<Mutex<SessionBashState>>,
+) {
+    let pending_messages = {
+        let mut bash_state = bash_state.lock().unwrap();
+        std::mem::take(&mut bash_state.pending_messages)
+    };
+
+    if pending_messages.is_empty() {
+        return;
+    }
+
+    let messages_for_state = pending_messages.clone();
+    core.agent().update_state(move |state| {
+        state.messages.extend(messages_for_state.clone());
+    });
+
+    if let Some(session_manager) = session_manager {
+        let mut session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        for message in pending_messages {
+            let _ = session_manager.append_message(message);
+        }
+    }
+}
+
+fn resolve_session_cwd(
+    session_manager: Option<&Arc<Mutex<SessionManager>>>,
+) -> Result<PathBuf, crate::CodingAgentCoreError> {
+    if let Some(session_manager) = session_manager {
+        return Ok(PathBuf::from(
+            session_manager
+                .lock()
+                .expect("session manager mutex poisoned")
+                .get_cwd(),
+        ));
+    }
+
+    env::current_dir().map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))
+}
+
+async fn run_session_bash_command(
+    cwd: &Path,
+    command: &str,
+    mut abort_rx: watch::Receiver<bool>,
+) -> Result<BashResult, crate::CodingAgentCoreError> {
+    if !cwd.exists() {
+        return Err(crate::CodingAgentCoreError::Message(format!(
+            "Working directory does not exist: {}",
+            cwd.display()
+        )));
+    }
+
+    if *abort_rx.borrow() {
+        return Ok(BashResult {
+            output: String::new(),
+            exit_code: None,
+            cancelled: true,
+            truncated: false,
+            full_output_path: None,
+        });
+    }
+
+    let shell = env::var("SHELL").unwrap_or_else(|_| String::from("sh"));
+    let wrapped_command = format!("{{\n{command}\n}} 2>&1");
+
+    let mut command_builder = TokioCommand::new(shell);
+    command_builder
+        .arg("-lc")
+        .arg(wrapped_command)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let output_future = command_builder
+        .spawn()
+        .map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))?
+        .wait_with_output();
+    tokio::pin!(output_future);
+
+    let abort_future = async {
+        while abort_rx.changed().await.is_ok() {
+            if *abort_rx.borrow() {
+                return;
+            }
+        }
+    };
+    tokio::pin!(abort_future);
+
+    let output = tokio::select! {
+        output = &mut output_future => output.map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))?,
+        _ = &mut abort_future => {
+            return Ok(BashResult {
+                output: String::new(),
+                exit_code: None,
+                cancelled: true,
+                truncated: false,
+                full_output_path: None,
+            });
+        }
+    };
+
+    let mut full_output = String::from_utf8_lossy(&output.stdout).into_owned();
+    full_output.push_str(&String::from_utf8_lossy(&output.stderr));
+    let full_output = strip_bash_output(&full_output).replace('\r', "");
+    let truncation = truncate_tail(&full_output, TruncationOptions::default());
+    let full_output_path = if truncation.truncated {
+        Some(write_bash_output(&full_output)?)
+    } else {
+        None
+    };
+
+    Ok(BashResult {
+        output: if truncation.truncated {
+            truncation.content
+        } else {
+            full_output
+        },
+        exit_code: output.status.code().map(i64::from),
+        cancelled: false,
+        truncated: truncation.truncated,
+        full_output_path,
+    })
+}
+
+fn strip_bash_output(output: &str) -> String {
+    let mut result = String::new();
+    let bytes = output.as_bytes();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] == 0x1b {
+            match bytes.get(index + 1).copied() {
+                Some(b'[') => {
+                    index += 2;
+                    while index < bytes.len() {
+                        let byte = bytes[index];
+                        index += 1;
+                        if (0x40..=0x7e).contains(&byte) {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Some(b']') | Some(b'_') => {
+                    index += 2;
+                    while index < bytes.len() {
+                        if bytes[index] == 0x07 {
+                            index += 1;
+                            break;
+                        }
+                        if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'\\') {
+                            index += 2;
+                            break;
+                        }
+                        index += 1;
+                    }
+                    continue;
+                }
+                _ => {
+                    index += 1;
+                    continue;
+                }
+            }
+        }
+
+        let character = output[index..]
+            .chars()
+            .next()
+            .expect("bash output should contain a character");
+        index += character.len_utf8();
+
+        if character == '\r' || (character.is_control() && character != '\n' && character != '\t') {
+            continue;
+        }
+
+        result.push(character);
+    }
+
+    result
+}
+
+fn write_bash_output(output: &str) -> Result<String, crate::CodingAgentCoreError> {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("pi-bash-{}-{unique}.log", std::process::id()));
+    fs::write(&path, output)
+        .map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))?;
+    Ok(path.display().to_string())
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn agent_message_to_assistant(message: &AgentMessage) -> Option<AssistantMessage> {
@@ -1724,6 +2073,21 @@ pub struct AgentSessionRuntime {
 }
 
 impl AgentSessionRuntime {
+    pub fn from_session(
+        session: AgentSession,
+        cwd: PathBuf,
+        create_runtime: CreateAgentSessionRuntimeFactory,
+    ) -> Self {
+        let resolved_cwd = current_runtime_cwd(&session, &cwd);
+        Self {
+            session,
+            cwd: resolved_cwd,
+            diagnostics: Vec::new(),
+            model_fallback_message: None,
+            create_runtime,
+        }
+    }
+
     pub fn session(&self) -> AgentSession {
         self.session.clone()
     }
@@ -1869,12 +2233,25 @@ impl AgentSessionRuntime {
         self.replace_runtime(cwd, Some(session_manager)).await
     }
 
+    pub async fn reload(&mut self) -> Result<(), AgentSessionRuntimeError> {
+        let session_manager = self.ensure_runtime_session_manager();
+        let cwd = {
+            let session_manager = session_manager
+                .lock()
+                .expect("session manager mutex poisoned");
+            PathBuf::from(session_manager.get_cwd())
+        };
+        self.replace_runtime(cwd, Some(session_manager)).await
+    }
+
     pub fn dispose(self) {}
 
     fn ensure_runtime_session_manager(&self) -> Arc<Mutex<SessionManager>> {
         self.session.session_manager().unwrap_or_else(|| {
-            Arc::new(Mutex::new(SessionManager::in_memory(
+            let state = self.session.state();
+            Arc::new(Mutex::new(snapshot_runtime_session_manager(
                 &self.cwd.to_string_lossy(),
+                &state,
             )))
         })
     }
@@ -2129,6 +2506,61 @@ fn current_runtime_cwd(session: &AgentSession, fallback_cwd: &Path) -> PathBuf {
             )
         })
         .unwrap_or_else(|| fallback_cwd.to_path_buf())
+}
+
+fn apply_session_context_state(
+    core: &CodingAgentCore,
+    model_registry: &crate::ModelRegistry,
+    session_context: crate::SessionContext,
+) -> Option<String> {
+    let current_state = core.state();
+    let restore_result = session_context.model.as_ref().map(|saved_model| {
+        restore_model_from_session(
+            &model_registry.catalog(),
+            &saved_model.provider,
+            &saved_model.model_id,
+            Some(&current_state.model),
+        )
+    });
+    let next_model = restore_result
+        .as_ref()
+        .and_then(|result| result.model.clone())
+        .unwrap_or_else(|| current_state.model.clone());
+    let next_thinking_level = clamp_session_thinking_level(
+        parse_thinking_level(&session_context.thinking_level).unwrap_or(ThinkingLevel::Off),
+        &next_model,
+    );
+    let next_messages = session_context.messages;
+
+    core.agent().update_state(move |state| {
+        state.messages = next_messages.clone();
+        state.model = next_model.clone();
+        state.thinking_level = next_thinking_level;
+    });
+
+    restore_result.and_then(|result| result.fallback_message)
+}
+
+fn clamp_session_thinking_level(level: ThinkingLevel, model: &Model) -> ThinkingLevel {
+    if !model.reasoning {
+        return ThinkingLevel::Off;
+    }
+
+    if level == ThinkingLevel::XHigh && !supports_xhigh(model) {
+        return ThinkingLevel::High;
+    }
+
+    level
+}
+
+fn snapshot_runtime_session_manager(cwd: &str, state: &AgentState) -> SessionManager {
+    let mut manager = SessionManager::in_memory(cwd);
+    let _ = manager.append_model_change(state.model.provider.clone(), state.model.id.clone());
+    let _ = manager.append_thinking_level_change(thinking_level_label(state.thinking_level));
+    for message in &state.messages {
+        let _ = manager.append_message(message.clone());
+    }
+    manager
 }
 
 fn resolve_runtime_path(base: &Path, path: &str) -> PathBuf {

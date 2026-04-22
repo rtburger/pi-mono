@@ -32,17 +32,18 @@ use pi_ai::{
 #[cfg(test)]
 use pi_coding_agent_core::create_coding_agent_core;
 use pi_coding_agent_core::{
-    AgentSession, AgentSessionEvent, AgentSessionOptions, AuthSource, BootstrapDiagnosticLevel,
-    BranchSummaryDetails, BranchSummaryOptions, CodingAgentCore, CodingAgentCoreError,
-    CodingAgentCoreOptions, CompactionResult, CompactionSettings, ContextUsageEstimate,
-    CustomMessage, CustomMessageContent, ExistingSessionSelection, FooterDataProvider,
-    ModelRegistry, NewSessionOptions, ScopedModel, SessionBootstrapOptions, SessionEntry,
-    SessionHeader, SessionInfo, SessionManager, SourceInfo, TreeNavigationSummary,
-    apply_tree_navigation, build_default_pi_system_prompt, calculate_context_tokens, compact,
-    create_agent_session, create_bash_execution_message, estimate_context_tokens,
-    find_exact_model_reference_match, generate_branch_summary_with_details,
-    get_default_session_dir, parse_thinking_level, prepare_compaction, prepare_tree_navigation,
-    resolve_cli_model, resolve_model_scope, restore_model_from_session, should_compact,
+    AgentSession, AgentSessionEvent, AgentSessionOptions, AgentSessionRuntime,
+    AgentSessionRuntimeError, AgentSessionRuntimeRequest, AuthSource, BootstrapDiagnosticLevel,
+    CodingAgentCore, CodingAgentCoreError, CodingAgentCoreOptions, CompactionResult,
+    CompactionSettings, ContextUsageEstimate, CreateAgentSessionResult,
+    CreateAgentSessionRuntimeFactory, CustomMessage, CustomMessageContent,
+    ExistingSessionSelection, FooterDataProvider, ModelRegistry, NavigateTreeOptions,
+    NewSessionOptions, ScopedModel, SessionBootstrapOptions, SessionEntry, SessionHeader,
+    SessionInfo, SessionManager, SourceInfo, apply_tree_navigation, build_default_pi_system_prompt,
+    calculate_context_tokens, compact, create_agent_session, create_agent_session_runtime,
+    estimate_context_tokens, find_exact_model_reference_match, get_default_session_dir,
+    parse_thinking_level, prepare_compaction, prepare_tree_navigation, resolve_cli_model,
+    resolve_model_scope, restore_model_from_session, should_compact,
 };
 #[cfg(test)]
 use pi_coding_agent_tui::PlainKeyHintStyler;
@@ -77,7 +78,6 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    process::Command as TokioCommand,
     sync::{oneshot, watch},
     time::sleep,
 };
@@ -395,15 +395,16 @@ fn resolve_path_from_cwd(cwd: &Path, path: &str) -> String {
     }
 }
 
-fn build_session_support(session_manager: SessionManager) -> SessionSupport {
-    let header = session_manager.get_header().clone();
+fn existing_session_selection_from_manager(
+    session_manager: &SessionManager,
+) -> ExistingSessionSelection {
     let restored_context = session_manager.build_session_context();
     let has_existing_messages = !restored_context.messages.is_empty();
     let has_thinking_entry = session_manager
         .get_branch(session_manager.get_leaf_id())
         .iter()
         .any(|entry| matches!(entry, SessionEntry::ThinkingLevelChange { .. }));
-    let existing_session = ExistingSessionSelection {
+    ExistingSessionSelection {
         has_messages: has_existing_messages,
         saved_model_provider: restored_context
             .model
@@ -415,11 +416,27 @@ fn build_session_support(session_manager: SessionManager) -> SessionSupport {
             .map(|model| model.model_id.clone()),
         saved_thinking_level: parse_thinking_level(&restored_context.thinking_level),
         has_thinking_entry,
+    }
+}
+
+fn build_session_support(session_manager: SessionManager) -> SessionSupport {
+    build_session_support_from_arc(Arc::new(Mutex::new(session_manager)))
+}
+
+fn build_session_support_from_arc(session_manager: Arc<Mutex<SessionManager>>) -> SessionSupport {
+    let (header, existing_session, session_id) = {
+        let session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        (
+            session_manager.get_header().clone(),
+            existing_session_selection_from_manager(&session_manager),
+            session_manager.get_session_id().to_owned(),
+        )
     };
-    let session_id = session_manager.get_session_id().to_owned();
 
     SessionSupport {
-        manager: Arc::new(Mutex::new(session_manager)),
+        manager: session_manager,
         header,
         existing_session,
         session_id,
@@ -1659,12 +1676,22 @@ async fn run_interactive_command_with_runtime(
             return outcome.exit_code;
         };
 
-        let plan = match resolve_interactive_transition(
+        let transition_environment = InteractiveTransitionEnvironment {
+            parsed: sanitize_interactive_follow_up_args(&parsed),
+            auth_source: auth_source.clone(),
+            built_in_models: built_in_models.clone(),
+            models_json_path: models_json_path.clone(),
+            agent_dir: agent_dir.clone(),
+            default_system_prompt: default_system_prompt.clone(),
+            stream_options: stream_options.clone(),
+        };
+        let plan = match resolve_interactive_transition_with_environment(
             transition,
             outcome.session_context,
             &current_cwd,
             agent_dir.as_deref(),
             &runtime,
+            Some(&transition_environment),
         )
         .await
         {
@@ -2304,6 +2331,7 @@ async fn run_interactive_iteration(
     );
     install_interactive_submit_handler(
         &mut shell,
+        _session.clone(),
         core.clone(),
         core.model_registry(),
         interactive_scoped_models.clone(),
@@ -2573,6 +2601,17 @@ struct PreservedInteractiveContext {
     runtime_settings: LoadedRuntimeSettings,
 }
 
+#[derive(Clone)]
+struct InteractiveTransitionEnvironment {
+    parsed: Args,
+    auth_source: Arc<dyn AuthSource>,
+    built_in_models: Vec<Model>,
+    models_json_path: Option<PathBuf>,
+    agent_dir: Option<PathBuf>,
+    default_system_prompt: String,
+    stream_options: StreamOptions,
+}
+
 fn preserve_interactive_context(
     session_context: Option<InteractiveSessionContext>,
     current_cwd: &Path,
@@ -2603,6 +2642,695 @@ fn preserve_interactive_context(
             scoped_models: Vec::new(),
             runtime_settings: LoadedRuntimeSettings::default(),
         }),
+    }
+}
+
+fn load_runtime_settings_for_cwd_or_fallback(
+    agent_dir: Option<&Path>,
+    cwd: &Path,
+    fallback: &LoadedRuntimeSettings,
+) -> LoadedRuntimeSettings {
+    agent_dir
+        .map(|agent_dir| load_runtime_settings(cwd, agent_dir))
+        .unwrap_or_else(|| fallback.clone())
+}
+
+fn create_interactive_transition_runtime_factory(
+    environment: InteractiveTransitionEnvironment,
+    fallback_runtime_settings: LoadedRuntimeSettings,
+    scoped_models: Vec<ScopedModel>,
+    bootstrap_defaults: Option<BootstrapDefaults>,
+) -> CreateAgentSessionRuntimeFactory {
+    Arc::new(move |request| {
+        let environment = environment.clone();
+        let fallback_runtime_settings = fallback_runtime_settings.clone();
+        let scoped_models = scoped_models.clone();
+        let bootstrap_defaults = bootstrap_defaults.clone();
+        Box::pin(async move {
+            create_interactive_session_for_transition(
+                environment,
+                request,
+                fallback_runtime_settings,
+                scoped_models,
+                bootstrap_defaults,
+            )
+            .await
+        })
+    })
+}
+
+async fn create_interactive_session_for_transition(
+    environment: InteractiveTransitionEnvironment,
+    request: AgentSessionRuntimeRequest,
+    fallback_runtime_settings: LoadedRuntimeSettings,
+    scoped_models: Vec<ScopedModel>,
+    bootstrap_defaults: Option<BootstrapDefaults>,
+) -> Result<CreateAgentSessionResult, AgentSessionRuntimeError> {
+    let AgentSessionRuntimeRequest {
+        cwd,
+        session_manager,
+    } = request;
+    let runtime_settings = load_runtime_settings_for_cwd_or_fallback(
+        environment.agent_dir.as_deref(),
+        &cwd,
+        &fallback_runtime_settings,
+    );
+    let resources = load_cli_resources(&environment.parsed, &cwd, environment.agent_dir.as_deref());
+    let (selected_tool_names, selected_tools) = build_selected_tools(
+        &environment.parsed,
+        &cwd,
+        runtime_settings.settings.images.auto_resize_images,
+    );
+    let overlay_auth = OverlayAuthSource::new(environment.auth_source.clone());
+    apply_runtime_api_key_override(
+        &environment.parsed,
+        &overlay_auth,
+        &environment.built_in_models,
+        environment.models_json_path.as_deref(),
+        &scoped_models,
+    )
+    .map_err(AgentSessionRuntimeError::Message)?;
+
+    let existing_session = session_manager
+        .as_ref()
+        .map(|session_manager| {
+            let session_manager = session_manager
+                .lock()
+                .expect("interactive transition session manager mutex poisoned");
+            existing_session_selection_from_manager(&session_manager)
+        })
+        .unwrap_or_default();
+    let mut stream_options = environment.stream_options.clone();
+    if let Some(session_manager) = session_manager.as_ref() {
+        stream_options.session_id = Some(
+            session_manager
+                .lock()
+                .expect("interactive transition session manager mutex poisoned")
+                .get_session_id()
+                .to_owned(),
+        );
+    }
+    apply_runtime_transport_preference(&mut stream_options, &environment.parsed, &runtime_settings);
+
+    let default_system_prompt = resolve_interactive_default_system_prompt(
+        &environment.default_system_prompt,
+        &cwd,
+        environment.agent_dir.as_deref(),
+        &environment.parsed,
+    );
+    let created = create_agent_session(AgentSessionOptions {
+        core: CodingAgentCoreOptions {
+            auth_source: Arc::new(overlay_auth),
+            built_in_models: environment.built_in_models.clone(),
+            models_json_path: environment.models_json_path.clone(),
+            cwd: Some(cwd.clone()),
+            tools: Some(selected_tools),
+            system_prompt: build_runtime_system_prompt(
+                &default_system_prompt,
+                &environment.parsed,
+                &cwd,
+                environment.agent_dir.as_deref(),
+                &selected_tool_names,
+                &resources,
+                None,
+            ),
+            bootstrap: SessionBootstrapOptions {
+                cli_provider: environment.parsed.provider.clone(),
+                cli_model: environment.parsed.model.clone(),
+                cli_thinking_level: environment.parsed.thinking,
+                scoped_models: scoped_models.clone(),
+                default_provider: bootstrap_defaults
+                    .as_ref()
+                    .map(|defaults| defaults.provider.clone()),
+                default_model_id: bootstrap_defaults
+                    .as_ref()
+                    .map(|defaults| defaults.model_id.clone()),
+                default_thinking_level: bootstrap_defaults
+                    .as_ref()
+                    .map(|defaults| defaults.thinking_level),
+                existing_session,
+            },
+            stream_options,
+        },
+        session_manager,
+    })
+    .map_err(|error| match error {
+        CodingAgentCoreError::NoModelAvailable => AgentSessionRuntimeError::Message(
+            render_no_models_message(environment.models_json_path.as_deref())
+                .trim()
+                .to_owned(),
+        ),
+        other => AgentSessionRuntimeError::Message(format!("Error: {other}")),
+    })?;
+
+    let session = created.session.clone();
+    let core = session.core();
+    core.set_auto_resize_images(runtime_settings.settings.images.auto_resize_images);
+    core.set_block_images(runtime_settings.settings.images.block_images);
+    core.set_thinking_budgets(map_thinking_budgets(
+        &runtime_settings.settings.thinking_budgets,
+    ));
+    session.set_compaction_settings(runtime_compaction_settings(&runtime_settings));
+    let mut retry_settings = session.retry_settings();
+    retry_settings.enabled = true;
+    session.set_retry_settings(retry_settings);
+
+    Ok(created)
+}
+
+async fn create_interactive_transition_runtime_from_context(
+    environment: &InteractiveTransitionEnvironment,
+    session_context: InteractiveSessionContext,
+    bootstrap_defaults: Option<BootstrapDefaults>,
+) -> Result<AgentSessionRuntime, String> {
+    let request = AgentSessionRuntimeRequest {
+        cwd: PathBuf::from(&session_context.cwd),
+        session_manager: Some(Arc::new(Mutex::new(restore_session_manager_from_parts(
+            session_context.manager,
+            session_context.session_file,
+            session_context.session_dir,
+            &session_context.cwd,
+        )?))),
+    };
+    let factory = create_interactive_transition_runtime_factory(
+        environment.clone(),
+        session_context.runtime_settings,
+        session_context.scoped_models,
+        bootstrap_defaults,
+    );
+    create_agent_session_runtime(factory, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn take_interactive_transition_runtime_manager(
+    runtime: AgentSessionRuntime,
+) -> Result<SessionManager, String> {
+    let session_manager = {
+        let session = runtime.session();
+        session
+            .session_manager()
+            .ok_or_else(|| String::from("Session data unavailable"))?
+    };
+    drop(runtime);
+    Arc::try_unwrap(session_manager)
+        .map_err(|_| String::from("Failed to recover transition session manager"))?
+        .into_inner()
+        .map_err(|_| String::from("Transition session manager mutex poisoned"))
+}
+
+async fn resolve_interactive_transition_with_environment(
+    transition: InteractiveTransitionRequest,
+    session_context: Option<InteractiveSessionContext>,
+    current_cwd: &Path,
+    agent_dir: Option<&Path>,
+    runtime: &InteractiveRuntime,
+    environment: Option<&InteractiveTransitionEnvironment>,
+) -> Result<InteractiveTransitionPlan, String> {
+    match transition {
+        InteractiveTransitionRequest::NewSession => {
+            let Some(environment) = environment else {
+                return resolve_interactive_transition(
+                    InteractiveTransitionRequest::NewSession,
+                    session_context,
+                    current_cwd,
+                    agent_dir,
+                    runtime,
+                )
+                .await;
+            };
+            let session_context =
+                session_context.ok_or_else(|| String::from("Session data unavailable"))?;
+            let defaults = BootstrapDefaults::from_model(
+                &session_context.model,
+                session_context.thinking_level,
+            );
+            let scoped_models = session_context.scoped_models.clone();
+            let fallback_runtime_settings = session_context.runtime_settings.clone();
+            let mut transition_runtime = create_interactive_transition_runtime_from_context(
+                environment,
+                session_context,
+                Some(defaults.clone()),
+            )
+            .await?;
+            transition_runtime
+                .new_session(NewSessionOptions::default())
+                .await
+                .map_err(|error| error.to_string())?;
+            let next_cwd = transition_runtime.cwd().to_path_buf();
+            let next_runtime_settings = load_runtime_settings_for_cwd_or_fallback(
+                environment.agent_dir.as_deref(),
+                &next_cwd,
+                &fallback_runtime_settings,
+            );
+            Ok(InteractiveTransitionPlan {
+                cwd: next_cwd,
+                manager: Some(take_interactive_transition_runtime_manager(
+                    transition_runtime,
+                )?),
+                prefill_input: None,
+                initial_status_message: Some(String::from("New session started")),
+                bootstrap_defaults: Some(defaults),
+                scoped_models,
+                runtime_settings: next_runtime_settings,
+            })
+        }
+        InteractiveTransitionRequest::ResumePicker => {
+            let Some(environment) = environment else {
+                return resolve_interactive_transition(
+                    InteractiveTransitionRequest::ResumePicker,
+                    session_context,
+                    current_cwd,
+                    agent_dir,
+                    runtime,
+                )
+                .await;
+            };
+            let current_context = session_context;
+            let current_cwd_string = current_context
+                .as_ref()
+                .map(|context| context.cwd.clone())
+                .unwrap_or_else(|| current_cwd.to_string_lossy().into_owned());
+            let current_runtime_settings = current_context
+                .as_ref()
+                .map(|context| context.runtime_settings.clone())
+                .unwrap_or_default();
+            let current_scoped_models = current_context
+                .as_ref()
+                .map(|context| context.scoped_models.clone())
+                .unwrap_or_default();
+            let session_dir = current_context
+                .as_ref()
+                .and_then(|context| context.session_dir.clone());
+            let current_sessions =
+                SessionManager::list(&current_cwd_string, session_dir.as_deref());
+            let agent_dir_string =
+                agent_dir.map(|agent_dir| agent_dir.to_string_lossy().into_owned());
+            let all_sessions = SessionManager::list_all(agent_dir_string.as_deref());
+            let keybindings = create_keybindings_manager(agent_dir);
+            let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
+            let mut tui = Tui::new(terminal);
+
+            match select_resume_session(&mut tui, &keybindings, current_sessions, all_sessions)
+                .await?
+            {
+                Some(path) => match current_context {
+                    Some(context) => {
+                        let mut transition_runtime =
+                            create_interactive_transition_runtime_from_context(
+                                environment,
+                                context,
+                                None,
+                            )
+                            .await?;
+                        transition_runtime
+                            .switch_session(&path, None)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        let next_cwd = transition_runtime.cwd().to_path_buf();
+                        let runtime_settings = load_runtime_settings_for_cwd_or_fallback(
+                            environment.agent_dir.as_deref(),
+                            &next_cwd,
+                            &current_runtime_settings,
+                        );
+                        Ok(InteractiveTransitionPlan {
+                            cwd: next_cwd,
+                            manager: Some(take_interactive_transition_runtime_manager(
+                                transition_runtime,
+                            )?),
+                            prefill_input: None,
+                            initial_status_message: Some(String::from("Resumed session")),
+                            bootstrap_defaults: None,
+                            scoped_models: current_scoped_models,
+                            runtime_settings,
+                        })
+                    }
+                    None => {
+                        let manager = SessionManager::open(&path, None, None)
+                            .map_err(|error| error.to_string())?;
+                        let next_cwd = PathBuf::from(manager.get_cwd());
+                        let runtime_settings = load_runtime_settings_for_cwd_or_fallback(
+                            environment.agent_dir.as_deref(),
+                            &next_cwd,
+                            &current_runtime_settings,
+                        );
+                        Ok(InteractiveTransitionPlan {
+                            cwd: next_cwd,
+                            manager: Some(manager),
+                            prefill_input: None,
+                            initial_status_message: Some(String::from("Resumed session")),
+                            bootstrap_defaults: None,
+                            scoped_models: current_scoped_models,
+                            runtime_settings,
+                        })
+                    }
+                },
+                None => {
+                    let (manager, cwd, scoped_models, runtime_settings) = match current_context {
+                        Some(context) => {
+                            let cwd = PathBuf::from(&context.cwd);
+                            (
+                                Some(restore_session_manager_from_parts(
+                                    context.manager,
+                                    context.session_file,
+                                    context.session_dir,
+                                    &context.cwd,
+                                )?),
+                                cwd,
+                                context.scoped_models,
+                                context.runtime_settings,
+                            )
+                        }
+                        None => (
+                            None,
+                            current_cwd.to_path_buf(),
+                            Vec::new(),
+                            LoadedRuntimeSettings::default(),
+                        ),
+                    };
+                    Ok(InteractiveTransitionPlan {
+                        cwd,
+                        manager,
+                        prefill_input: None,
+                        initial_status_message: None,
+                        bootstrap_defaults: None,
+                        scoped_models,
+                        runtime_settings,
+                    })
+                }
+            }
+        }
+        InteractiveTransitionRequest::ForkPicker => {
+            let Some(environment) = environment else {
+                return resolve_interactive_transition(
+                    InteractiveTransitionRequest::ForkPicker,
+                    session_context,
+                    current_cwd,
+                    agent_dir,
+                    runtime,
+                )
+                .await;
+            };
+            let session_context =
+                session_context.ok_or_else(|| String::from("Session data unavailable"))?;
+            let defaults = BootstrapDefaults::from_model(
+                &session_context.model,
+                session_context.thinking_level,
+            );
+            let scoped_models = session_context.scoped_models.clone();
+            let runtime_settings = session_context.runtime_settings.clone();
+            let manager = restore_session_manager_from_parts(
+                session_context.manager,
+                session_context.session_file,
+                session_context.session_dir,
+                &session_context.cwd,
+            )?;
+            let candidates = collect_fork_candidates(&manager);
+            if candidates.is_empty() {
+                return Ok(InteractiveTransitionPlan {
+                    cwd: PathBuf::from(manager.get_cwd()),
+                    manager: Some(manager),
+                    prefill_input: None,
+                    initial_status_message: Some(String::from("No messages to fork from")),
+                    bootstrap_defaults: None,
+                    scoped_models,
+                    runtime_settings,
+                });
+            }
+
+            let keybindings = create_keybindings_manager(agent_dir);
+            let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
+            let mut tui = Tui::new(terminal);
+            let selected_entry_id =
+                match select_fork_message(&mut tui, &keybindings, candidates.clone()).await? {
+                    Some(entry_id) => entry_id,
+                    None => {
+                        return Ok(InteractiveTransitionPlan {
+                            cwd: PathBuf::from(manager.get_cwd()),
+                            manager: Some(manager),
+                            prefill_input: None,
+                            initial_status_message: None,
+                            bootstrap_defaults: None,
+                            scoped_models,
+                            runtime_settings,
+                        });
+                    }
+                };
+            let transition_context = InteractiveSessionContext {
+                manager: Some(manager),
+                session_file: None,
+                session_dir: None,
+                cwd: session_context.cwd,
+                model: session_context.model,
+                thinking_level: session_context.thinking_level,
+                scoped_models: scoped_models.clone(),
+                available_models: session_context.available_models,
+                runtime_settings: runtime_settings.clone(),
+            };
+            let mut transition_runtime = create_interactive_transition_runtime_from_context(
+                environment,
+                transition_context,
+                Some(defaults.clone()),
+            )
+            .await?;
+            let selected_text = transition_runtime
+                .fork(&selected_entry_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .unwrap_or_default();
+            let next_cwd = transition_runtime.cwd().to_path_buf();
+            let next_runtime_settings = load_runtime_settings_for_cwd_or_fallback(
+                environment.agent_dir.as_deref(),
+                &next_cwd,
+                &runtime_settings,
+            );
+            let next_manager = take_interactive_transition_runtime_manager(transition_runtime)?;
+            let bootstrap_defaults = if next_manager.get_entries().is_empty() {
+                Some(defaults)
+            } else {
+                None
+            };
+            Ok(InteractiveTransitionPlan {
+                cwd: next_cwd,
+                manager: Some(next_manager),
+                prefill_input: Some(selected_text),
+                initial_status_message: Some(String::from("Branched to new session")),
+                bootstrap_defaults,
+                scoped_models,
+                runtime_settings: next_runtime_settings,
+            })
+        }
+        InteractiveTransitionRequest::TreePicker => {
+            let Some(environment) = environment else {
+                return resolve_interactive_transition(
+                    InteractiveTransitionRequest::TreePicker,
+                    session_context,
+                    current_cwd,
+                    agent_dir,
+                    runtime,
+                )
+                .await;
+            };
+            let session_context =
+                session_context.ok_or_else(|| String::from("Session data unavailable"))?;
+            let scoped_models = session_context.scoped_models.clone();
+            let runtime_settings = session_context.runtime_settings.clone();
+            let manager = restore_session_manager_from_parts(
+                session_context.manager,
+                session_context.session_file,
+                session_context.session_dir,
+                &session_context.cwd,
+            )?;
+            if manager.get_entries().is_empty() {
+                return Ok(InteractiveTransitionPlan {
+                    cwd: PathBuf::from(manager.get_cwd()),
+                    manager: Some(manager),
+                    prefill_input: None,
+                    initial_status_message: Some(String::from("No entries in session")),
+                    bootstrap_defaults: None,
+                    scoped_models,
+                    runtime_settings,
+                });
+            }
+
+            let current_selection = manager.get_leaf_id().map(ToOwned::to_owned);
+            let keybindings = create_keybindings_manager(agent_dir);
+            let terminal = LiveInteractiveTerminal::new((runtime.terminal_factory)());
+            let mut tui = Tui::new(terminal);
+            let tree_result = select_tree_entry(
+                &mut tui,
+                &keybindings,
+                manager.get_tree(),
+                current_selection.clone(),
+                current_selection.as_deref(),
+                tree_filter_mode_from_runtime_setting(&runtime_settings.settings.tree_filter_mode),
+            )
+            .await?;
+
+            let transition_context = InteractiveSessionContext {
+                manager: Some(manager),
+                session_file: None,
+                session_dir: None,
+                cwd: session_context.cwd,
+                model: session_context.model,
+                thinking_level: session_context.thinking_level,
+                scoped_models: scoped_models.clone(),
+                available_models: session_context.available_models,
+                runtime_settings: runtime_settings.clone(),
+            };
+            let transition_runtime = create_interactive_transition_runtime_from_context(
+                environment,
+                transition_context,
+                None,
+            )
+            .await?;
+            let transition_session = transition_runtime.session();
+            for (entry_id, label) in &tree_result.label_changes {
+                transition_session
+                    .set_label(entry_id, label.clone())
+                    .map_err(|error| error.to_string())?;
+            }
+
+            let (prefill_input, initial_status_message) = match tree_result.selected_entry_id {
+                Some(selected_entry)
+                    if current_selection
+                        .as_deref()
+                        .is_some_and(|current_selection| current_selection == selected_entry) =>
+                {
+                    (None, Some(String::from("Already at this point")))
+                }
+                Some(selected_entry) => {
+                    let navigation = transition_session
+                        .navigate_tree(
+                            Some(selected_entry.as_str()),
+                            NavigateTreeOptions::default(),
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    (
+                        navigation.editor_text,
+                        Some(String::from("Navigated to selected point")),
+                    )
+                }
+                None => (None, None),
+            };
+            drop(transition_session);
+
+            Ok(InteractiveTransitionPlan {
+                cwd: transition_runtime.cwd().to_path_buf(),
+                manager: Some(take_interactive_transition_runtime_manager(
+                    transition_runtime,
+                )?),
+                prefill_input,
+                initial_status_message,
+                bootstrap_defaults: None,
+                scoped_models,
+                runtime_settings,
+            })
+        }
+        InteractiveTransitionRequest::ImportSession { input_path } => {
+            let Some(environment) = environment else {
+                return resolve_interactive_transition(
+                    InteractiveTransitionRequest::ImportSession { input_path },
+                    session_context,
+                    current_cwd,
+                    agent_dir,
+                    runtime,
+                )
+                .await;
+            };
+            let session_context =
+                session_context.ok_or_else(|| String::from("Session data unavailable"))?;
+            let current_runtime_settings = session_context.runtime_settings.clone();
+            let current_scoped_models = session_context.scoped_models.clone();
+            let resolved_path = PathBuf::from(resolve_session_path(current_cwd, &input_path));
+            if !resolved_path.exists() {
+                return Err(format!("File not found: {}", resolved_path.display()));
+            }
+            let mut transition_runtime = create_interactive_transition_runtime_from_context(
+                environment,
+                session_context,
+                None,
+            )
+            .await?;
+            transition_runtime
+                .import_from_jsonl(&input_path, None)
+                .await
+                .map_err(|error| error.to_string())?;
+            let next_cwd = transition_runtime.cwd().to_path_buf();
+            let next_runtime_settings = load_runtime_settings_for_cwd_or_fallback(
+                environment.agent_dir.as_deref(),
+                &next_cwd,
+                &current_runtime_settings,
+            );
+            Ok(InteractiveTransitionPlan {
+                cwd: next_cwd,
+                manager: Some(take_interactive_transition_runtime_manager(
+                    transition_runtime,
+                )?),
+                prefill_input: None,
+                initial_status_message: Some(format!(
+                    "Session imported from: {}",
+                    resolved_path.display()
+                )),
+                bootstrap_defaults: None,
+                scoped_models: current_scoped_models,
+                runtime_settings: next_runtime_settings,
+            })
+        }
+        InteractiveTransitionRequest::Reload => {
+            let Some(environment) = environment else {
+                return resolve_interactive_transition(
+                    InteractiveTransitionRequest::Reload,
+                    session_context,
+                    current_cwd,
+                    agent_dir,
+                    runtime,
+                )
+                .await;
+            };
+            let session_context =
+                session_context.ok_or_else(|| String::from("Session data unavailable"))?;
+            let defaults = BootstrapDefaults::from_model(
+                &session_context.model,
+                session_context.thinking_level,
+            );
+            let scoped_models = session_context.scoped_models.clone();
+            let runtime_settings = session_context.runtime_settings.clone();
+            let mut transition_runtime = create_interactive_transition_runtime_from_context(
+                environment,
+                session_context,
+                Some(defaults.clone()),
+            )
+            .await?;
+            transition_runtime
+                .reload()
+                .await
+                .map_err(|error| error.to_string())?;
+            let next_cwd = transition_runtime.cwd().to_path_buf();
+            let next_runtime_settings = load_runtime_settings_for_cwd_or_fallback(
+                environment.agent_dir.as_deref(),
+                &next_cwd,
+                &runtime_settings,
+            );
+            Ok(InteractiveTransitionPlan {
+                cwd: next_cwd,
+                manager: Some(take_interactive_transition_runtime_manager(
+                    transition_runtime,
+                )?),
+                prefill_input: None,
+                initial_status_message: Some(String::from(
+                    "Reloaded keybindings, skills, prompts, and settings",
+                )),
+                bootstrap_defaults: Some(defaults),
+                scoped_models,
+                runtime_settings: next_runtime_settings,
+            })
+        }
+        other => {
+            resolve_interactive_transition(other, session_context, current_cwd, agent_dir, runtime)
+                .await
+        }
     }
 }
 
@@ -5299,6 +6027,7 @@ impl RpcShared {
             if let Some(unsubscribe) = state.event_unsubscribe.take() {
                 let _ = unsubscribe();
             }
+            state.session.abort_bash();
             if let Some(bash_abort_tx) = state.bash_abort_tx.take() {
                 let _ = bash_abort_tx.send(true);
             }
@@ -5328,6 +6057,7 @@ impl RpcShared {
     fn abort_active(&self) {
         let snapshot = self.snapshot();
         snapshot.core.abort();
+        snapshot.session.abort_bash();
         if let Some(bash_abort_tx) = self
             .state
             .lock()
@@ -5888,6 +6618,208 @@ fn resolve_rpc_scoped_models(
     }
 
     Vec::new()
+}
+
+fn load_rpc_runtime_settings_for_cwd(
+    options: &RpcPreparedOptions,
+    cwd: &Path,
+    fallback: &LoadedRuntimeSettings,
+) -> LoadedRuntimeSettings {
+    options
+        .agent_dir
+        .as_deref()
+        .map(|agent_dir| load_runtime_settings(cwd, agent_dir))
+        .unwrap_or_else(|| fallback.clone())
+}
+
+fn create_rpc_runtime_factory(
+    options: Arc<RpcPreparedOptions>,
+    fallback_runtime_settings: LoadedRuntimeSettings,
+    scoped_models: Vec<ScopedModel>,
+    bootstrap_defaults: Option<BootstrapDefaults>,
+) -> CreateAgentSessionRuntimeFactory {
+    Arc::new(move |request| {
+        let options = options.clone();
+        let fallback_runtime_settings = fallback_runtime_settings.clone();
+        let scoped_models = scoped_models.clone();
+        let bootstrap_defaults = bootstrap_defaults.clone();
+        Box::pin(async move {
+            create_rpc_session_for_runtime(
+                options,
+                request,
+                fallback_runtime_settings,
+                scoped_models,
+                bootstrap_defaults,
+            )
+            .await
+        })
+    })
+}
+
+async fn create_rpc_session_for_runtime(
+    options: Arc<RpcPreparedOptions>,
+    request: AgentSessionRuntimeRequest,
+    fallback_runtime_settings: LoadedRuntimeSettings,
+    scoped_models: Vec<ScopedModel>,
+    bootstrap_defaults: Option<BootstrapDefaults>,
+) -> Result<CreateAgentSessionResult, AgentSessionRuntimeError> {
+    let AgentSessionRuntimeRequest {
+        cwd,
+        session_manager,
+    } = request;
+    let runtime_settings =
+        load_rpc_runtime_settings_for_cwd(options.as_ref(), &cwd, &fallback_runtime_settings);
+    let resources = load_cli_resources(&options.parsed, &cwd, options.agent_dir.as_deref());
+    let (selected_tool_names, selected_tools) = build_selected_tools(
+        &options.parsed,
+        &cwd,
+        runtime_settings.settings.images.auto_resize_images,
+    );
+    let overlay_auth = OverlayAuthSource::new(options.auth_source.clone());
+    apply_runtime_api_key_override(
+        &options.parsed,
+        &overlay_auth,
+        &options.built_in_models,
+        options.models_json_path.as_deref(),
+        &scoped_models,
+    )
+    .map_err(AgentSessionRuntimeError::Message)?;
+
+    let existing_session = session_manager
+        .as_ref()
+        .map(|session_manager| {
+            let session_manager = session_manager
+                .lock()
+                .expect("rpc session manager mutex poisoned");
+            existing_session_selection_from_manager(&session_manager)
+        })
+        .unwrap_or_default();
+    let mut stream_options = options.stream_options.clone();
+    if let Some(session_manager) = session_manager.as_ref() {
+        stream_options.session_id = Some(
+            session_manager
+                .lock()
+                .expect("rpc session manager mutex poisoned")
+                .get_session_id()
+                .to_owned(),
+        );
+    }
+    apply_runtime_transport_preference(&mut stream_options, &options.parsed, &runtime_settings);
+
+    let default_system_prompt = resolve_interactive_default_system_prompt(
+        &options.default_system_prompt,
+        &cwd,
+        options.agent_dir.as_deref(),
+        &options.parsed,
+    );
+    let created = create_agent_session(AgentSessionOptions {
+        core: CodingAgentCoreOptions {
+            auth_source: Arc::new(overlay_auth),
+            built_in_models: options.built_in_models.clone(),
+            models_json_path: options.models_json_path.clone(),
+            cwd: Some(cwd.clone()),
+            tools: Some(selected_tools),
+            system_prompt: build_runtime_system_prompt(
+                &default_system_prompt,
+                &options.parsed,
+                &cwd,
+                options.agent_dir.as_deref(),
+                &selected_tool_names,
+                &resources,
+                None,
+            ),
+            bootstrap: SessionBootstrapOptions {
+                cli_provider: options.parsed.provider.clone(),
+                cli_model: options.parsed.model.clone(),
+                cli_thinking_level: options.parsed.thinking,
+                scoped_models: scoped_models.clone(),
+                default_provider: bootstrap_defaults
+                    .as_ref()
+                    .map(|defaults| defaults.provider.clone()),
+                default_model_id: bootstrap_defaults
+                    .as_ref()
+                    .map(|defaults| defaults.model_id.clone()),
+                default_thinking_level: bootstrap_defaults
+                    .as_ref()
+                    .map(|defaults| defaults.thinking_level),
+                existing_session,
+            },
+            stream_options,
+        },
+        session_manager,
+    })
+    .map_err(|error| match error {
+        CodingAgentCoreError::NoModelAvailable => AgentSessionRuntimeError::Message(
+            render_no_models_message(options.models_json_path.as_deref())
+                .trim()
+                .to_owned(),
+        ),
+        other => AgentSessionRuntimeError::Message(format!("Error: {other}")),
+    })?;
+
+    let session = created.session.clone();
+    let core = session.core();
+    core.set_auto_resize_images(runtime_settings.settings.images.auto_resize_images);
+    core.set_block_images(runtime_settings.settings.images.block_images);
+    core.set_thinking_budgets(map_thinking_budgets(
+        &runtime_settings.settings.thinking_budgets,
+    ));
+    session.set_compaction_settings(runtime_compaction_settings(&runtime_settings));
+    let mut retry_settings = session.retry_settings();
+    retry_settings.enabled = true;
+    session.set_retry_settings(retry_settings);
+
+    Ok(created)
+}
+
+fn create_rpc_transition_runtime(
+    shared: &RpcShared,
+    snapshot: &RpcSnapshot,
+    bootstrap_defaults: Option<BootstrapDefaults>,
+) -> AgentSessionRuntime {
+    AgentSessionRuntime::from_session(
+        snapshot.session.clone(),
+        snapshot.cwd.clone(),
+        create_rpc_runtime_factory(
+            shared.options.clone(),
+            snapshot.runtime_settings.clone(),
+            snapshot.scoped_models.clone(),
+            bootstrap_defaults,
+        ),
+    )
+}
+
+async fn build_rpc_state_from_transition_runtime(
+    shared: &RpcShared,
+    snapshot: &RpcSnapshot,
+    runtime: &AgentSessionRuntime,
+    bootstrap_defaults: Option<BootstrapDefaults>,
+    session_start_reason: &str,
+) -> Result<(RpcState, String), String> {
+    let session_manager = runtime
+        .session()
+        .session_manager()
+        .ok_or_else(|| String::from("Session data unavailable"))?;
+    let next_cwd = runtime.cwd().to_path_buf();
+    let runtime_settings = load_rpc_runtime_settings_for_cwd(
+        shared.options.as_ref(),
+        &next_cwd,
+        &snapshot.runtime_settings,
+    );
+    build_rpc_state(
+        &shared.options,
+        &next_cwd,
+        runtime_settings,
+        snapshot.scoped_models.clone(),
+        Some(build_session_support_from_arc(session_manager)),
+        None,
+        bootstrap_defaults,
+        session_start_reason.to_owned(),
+        current_rpc_session_file(snapshot.session_manager.as_ref()),
+        shared.stdout_emitter.clone(),
+        shared.stderr_emitter.clone(),
+    )
+    .await
 }
 
 async fn build_rpc_state(
@@ -6534,33 +7466,28 @@ async fn handle_rpc_input_line(
                 }
             }
             let parent_session = optional_string_field(command, "parentSession");
-            let mut manager = match recreate_session_manager_from_rpc(&snapshot) {
-                Ok(manager) => manager,
-                Err(error) => {
-                    shared.emit_error(id.as_deref(), "new_session", error);
-                    return;
-                }
-            };
-            manager.new_session(NewSessionOptions {
-                id: None,
-                parent_session,
-            });
-            let next_cwd = PathBuf::from(manager.get_cwd());
-            match build_rpc_state(
-                &shared.options,
-                &next_cwd,
-                snapshot.runtime_settings.clone(),
-                snapshot.scoped_models.clone(),
-                None,
-                Some(manager),
-                Some(BootstrapDefaults::from_model(
-                    &snapshot.core.state().model,
-                    snapshot.core.state().thinking_level,
-                )),
-                String::from("new"),
-                current_rpc_session_file(snapshot.session_manager.as_ref()),
-                shared.stdout_emitter.clone(),
-                shared.stderr_emitter.clone(),
+            let bootstrap_defaults = Some(BootstrapDefaults::from_model(
+                &snapshot.core.state().model,
+                snapshot.core.state().thinking_level,
+            ));
+            let mut runtime =
+                create_rpc_transition_runtime(&shared, &snapshot, bootstrap_defaults.clone());
+            if let Err(error) = runtime
+                .new_session(NewSessionOptions {
+                    id: None,
+                    parent_session,
+                })
+                .await
+            {
+                shared.emit_error(id.as_deref(), "new_session", error.to_string());
+                return;
+            }
+            match build_rpc_state_from_transition_runtime(
+                &shared,
+                &snapshot,
+                &runtime,
+                bootstrap_defaults,
+                "new",
             )
             .await
             {
@@ -6820,50 +7747,18 @@ async fn handle_rpc_input_line(
                     return;
                 }
             };
-            let cwd = shared.snapshot().cwd;
-            let abort_rx = {
-                let mut state = shared.state.lock().expect("rpc state mutex poisoned");
-                if state.bash_abort_tx.is_some() {
-                    shared.emit_error(id.as_deref(), "bash", "A bash command is already running");
-                    return;
-                }
-                let (abort_tx, abort_rx) = tokio::sync::watch::channel(false);
-                state.bash_abort_tx = Some(abort_tx);
-                abort_rx
-            };
-
-            let tool = pi_coding_agent_tools::create_bash_tool(cwd);
-            let result = tool
-                .execute(
-                    String::from("rpc-bash"),
-                    json!({ "command": command_text }),
-                    Some(abort_rx),
-                )
-                .await;
-            shared
-                .state
-                .lock()
-                .expect("rpc state mutex poisoned")
-                .bash_abort_tx = None;
-            match result {
+            let session = shared.current_session();
+            match session.execute_bash(command_text, false).await {
                 Ok(result) => shared.emit_response(
                     id.as_deref(),
                     "bash",
-                    Some(agent_tool_result_to_rpc_bash_json(&result)),
+                    Some(bash_result_to_rpc_json(&result)),
                 ),
                 Err(error) => shared.emit_error(id.as_deref(), "bash", error.to_string()),
             }
         }
         "abort_bash" => {
-            if let Some(abort_tx) = shared
-                .state
-                .lock()
-                .expect("rpc state mutex poisoned")
-                .bash_abort_tx
-                .clone()
-            {
-                let _ = abort_tx.send(true);
-            }
+            shared.current_session().abort_bash();
             shared.emit_response(id.as_deref(), "abort_bash", None);
         }
         "get_session_stats" => {
@@ -6911,40 +7806,16 @@ async fn handle_rpc_input_line(
                     return;
                 }
             };
-            let session_dir = snapshot
-                .session_manager
-                .as_ref()
-                .and_then(current_rpc_session_dir);
-            let manager = match SessionManager::open(
-                &resolve_session_path(&snapshot.cwd, &session_path),
-                session_dir.as_deref(),
-                None,
-            ) {
-                Ok(manager) => manager,
-                Err(error) => {
-                    shared.emit_error(id.as_deref(), "switch_session", error.to_string());
-                    return;
-                }
-            };
-            let next_cwd = PathBuf::from(manager.get_cwd());
-            let next_runtime_settings = shared
-                .options
-                .agent_dir
-                .as_deref()
-                .map(|agent_dir| load_runtime_settings(&next_cwd, agent_dir))
-                .unwrap_or(snapshot.runtime_settings.clone());
-            match build_rpc_state(
-                &shared.options,
-                &next_cwd,
-                next_runtime_settings,
-                snapshot.scoped_models.clone(),
-                None,
-                Some(manager),
-                None,
-                String::from("resume"),
-                current_rpc_session_file(snapshot.session_manager.as_ref()),
-                shared.stdout_emitter.clone(),
-                shared.stderr_emitter.clone(),
+            let mut runtime = create_rpc_transition_runtime(&shared, &snapshot, None);
+            if let Err(error) = runtime
+                .switch_session(&resolve_session_path(&snapshot.cwd, &session_path), None)
+                .await
+            {
+                shared.emit_error(id.as_deref(), "switch_session", error.to_string());
+                return;
+            }
+            match build_rpc_state_from_transition_runtime(
+                &shared, &snapshot, &runtime, None, "resume",
             )
             .await
             {
@@ -6979,50 +7850,26 @@ async fn handle_rpc_input_line(
                     return;
                 }
             };
-            let mut manager = match recreate_session_manager_from_rpc(&snapshot) {
-                Ok(manager) => manager,
+            let bootstrap_defaults = Some(BootstrapDefaults::from_model(
+                &snapshot.core.state().model,
+                snapshot.core.state().thinking_level,
+            ));
+            let mut runtime =
+                create_rpc_transition_runtime(&shared, &snapshot, bootstrap_defaults.clone());
+            let selected_text = match runtime.fork(&entry_id).await {
+                Ok(Some(selected_text)) => selected_text,
+                Ok(None) => String::new(),
                 Err(error) => {
-                    shared.emit_error(id.as_deref(), "fork", error);
-                    return;
-                }
-            };
-            let candidates = collect_fork_candidates(&manager);
-            let Some(selected) = candidates
-                .into_iter()
-                .find(|candidate| candidate.entry_id == entry_id)
-            else {
-                shared.emit_error(id.as_deref(), "fork", "Invalid entry ID for forking");
-                return;
-            };
-            let bootstrap_defaults = if let Some(parent_id) = selected.parent_id.as_deref() {
-                if let Err(error) = manager.create_branched_session(parent_id) {
                     shared.emit_error(id.as_deref(), "fork", error.to_string());
                     return;
                 }
-                None
-            } else {
-                manager.new_session(NewSessionOptions {
-                    id: None,
-                    parent_session: manager.get_session_file().map(ToOwned::to_owned),
-                });
-                Some(BootstrapDefaults::from_model(
-                    &snapshot.core.state().model,
-                    snapshot.core.state().thinking_level,
-                ))
             };
-            let next_cwd = PathBuf::from(manager.get_cwd());
-            match build_rpc_state(
-                &shared.options,
-                &next_cwd,
-                snapshot.runtime_settings.clone(),
-                snapshot.scoped_models.clone(),
-                None,
-                Some(manager),
+            match build_rpc_state_from_transition_runtime(
+                &shared,
+                &snapshot,
+                &runtime,
                 bootstrap_defaults,
-                String::from("fork"),
-                current_rpc_session_file(snapshot.session_manager.as_ref()),
-                shared.stdout_emitter.clone(),
-                shared.stderr_emitter.clone(),
+                "fork",
             )
             .await
             {
@@ -7034,7 +7881,7 @@ async fn handle_rpc_input_line(
                     shared.emit_response(
                         id.as_deref(),
                         "fork",
-                        Some(json!({ "text": selected.text, "cancelled": false })),
+                        Some(json!({ "text": selected_text, "cancelled": false })),
                     );
                 }
                 Err(error) => shared.emit_error(id.as_deref(), "fork", error.trim()),
@@ -7086,19 +7933,7 @@ async fn handle_rpc_input_line(
                 }
             };
             let snapshot = shared.snapshot();
-            let Some(session_manager) = snapshot.session_manager.as_ref() else {
-                shared.emit_error(
-                    id.as_deref(),
-                    "set_session_name",
-                    "Session naming is unavailable",
-                );
-                return;
-            };
-            let append_result = session_manager
-                .lock()
-                .expect("rpc session manager mutex poisoned")
-                .append_session_info(&name);
-            match append_result {
+            match snapshot.session.set_session_name(&name) {
                 Ok(_) => {
                     sync_rpc_extension_state(&shared).await;
                     shared.emit_response(id.as_deref(), "set_session_name", None)
@@ -7222,13 +8057,9 @@ async fn handle_extension_host_app_request(
                 return Err(String::from("Session name cannot be empty"));
             }
             let snapshot = shared.snapshot();
-            let Some(session_manager) = snapshot.session_manager.as_ref() else {
-                return Err(String::from("Session naming is unavailable"));
-            };
-            session_manager
-                .lock()
-                .expect("rpc session manager mutex poisoned")
-                .append_session_info(&name)
+            snapshot
+                .session
+                .set_session_name(&name)
                 .map_err(|error| error.to_string())?;
             sync_rpc_extension_state(&shared).await;
             Ok(Value::Null)
@@ -7315,27 +8146,25 @@ async fn handle_extension_host_app_request(
                 .get("options")
                 .and_then(Value::as_object)
                 .and_then(|options| optional_string_field(options, "parentSession"));
-            let mut manager = recreate_session_manager_from_rpc(&snapshot)?;
-            manager.new_session(NewSessionOptions {
-                id: None,
-                parent_session,
-            });
-            let next_cwd = PathBuf::from(manager.get_cwd());
-            let (next_state, bootstrap_output) = build_rpc_state(
-                &shared.options,
-                &next_cwd,
-                snapshot.runtime_settings.clone(),
-                snapshot.scoped_models.clone(),
-                None,
-                Some(manager),
-                Some(BootstrapDefaults::from_model(
-                    &snapshot.core.state().model,
-                    snapshot.core.state().thinking_level,
-                )),
-                String::from("new"),
-                current_rpc_session_file(snapshot.session_manager.as_ref()),
-                shared.stdout_emitter.clone(),
-                shared.stderr_emitter.clone(),
+            let bootstrap_defaults = Some(BootstrapDefaults::from_model(
+                &snapshot.core.state().model,
+                snapshot.core.state().thinking_level,
+            ));
+            let mut runtime =
+                create_rpc_transition_runtime(&shared, &snapshot, bootstrap_defaults.clone());
+            runtime
+                .new_session(NewSessionOptions {
+                    id: None,
+                    parent_session,
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            let (next_state, bootstrap_output) = build_rpc_state_from_transition_runtime(
+                &shared,
+                &snapshot,
+                &runtime,
+                bootstrap_defaults,
+                "new",
             )
             .await?;
             if !bootstrap_output.is_empty() {
@@ -7355,31 +8184,13 @@ async fn handle_extension_host_app_request(
                 &snapshot.cwd,
                 &required_string_field(request, "sessionPath")?,
             );
-            let session_dir = snapshot
-                .session_manager
-                .as_ref()
-                .and_then(current_rpc_session_dir);
-            let manager = SessionManager::open(&session_path, session_dir.as_deref(), None)
+            let mut runtime = create_rpc_transition_runtime(&shared, &snapshot, None);
+            runtime
+                .switch_session(&session_path, None)
+                .await
                 .map_err(|error| error.to_string())?;
-            let next_cwd = PathBuf::from(manager.get_cwd());
-            let runtime_settings = shared
-                .options
-                .agent_dir
-                .as_deref()
-                .map(|agent_dir| load_runtime_settings(&next_cwd, agent_dir))
-                .unwrap_or(snapshot.runtime_settings.clone());
-            let (next_state, bootstrap_output) = build_rpc_state(
-                &shared.options,
-                &next_cwd,
-                runtime_settings,
-                snapshot.scoped_models.clone(),
-                None,
-                Some(manager),
-                None,
-                String::from("resume"),
-                current_rpc_session_file(snapshot.session_manager.as_ref()),
-                shared.stdout_emitter.clone(),
-                shared.stderr_emitter.clone(),
+            let (next_state, bootstrap_output) = build_rpc_state_from_transition_runtime(
+                &shared, &snapshot, &runtime, None, "resume",
             )
             .await?;
             if !bootstrap_output.is_empty() {
@@ -7394,42 +8205,22 @@ async fn handle_extension_host_app_request(
                 return Err(String::from("Cannot fork while a request is running"));
             }
             let entry_id = required_string_field(request, "entryId")?;
-            let mut manager = recreate_session_manager_from_rpc(&snapshot)?;
-            let candidates = collect_fork_candidates(&manager);
-            let Some(selected) = candidates
-                .into_iter()
-                .find(|candidate| candidate.entry_id == entry_id)
-            else {
-                return Err(String::from("Invalid entry ID for forking"));
-            };
-            let bootstrap_defaults = if let Some(parent_id) = selected.parent_id.as_deref() {
-                manager
-                    .create_branched_session(parent_id)
-                    .map_err(|error| error.to_string())?;
-                None
-            } else {
-                manager.new_session(NewSessionOptions {
-                    id: None,
-                    parent_session: manager.get_session_file().map(ToOwned::to_owned),
-                });
-                Some(BootstrapDefaults::from_model(
-                    &snapshot.core.state().model,
-                    snapshot.core.state().thinking_level,
-                ))
-            };
-            let next_cwd = PathBuf::from(manager.get_cwd());
-            let (next_state, bootstrap_output) = build_rpc_state(
-                &shared.options,
-                &next_cwd,
-                snapshot.runtime_settings.clone(),
-                snapshot.scoped_models.clone(),
-                None,
-                Some(manager),
+            let bootstrap_defaults = Some(BootstrapDefaults::from_model(
+                &snapshot.core.state().model,
+                snapshot.core.state().thinking_level,
+            ));
+            let mut runtime =
+                create_rpc_transition_runtime(&shared, &snapshot, bootstrap_defaults.clone());
+            runtime
+                .fork(&entry_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            let (next_state, bootstrap_output) = build_rpc_state_from_transition_runtime(
+                &shared,
+                &snapshot,
+                &runtime,
                 bootstrap_defaults,
-                String::from("fork"),
-                current_rpc_session_file(snapshot.session_manager.as_ref()),
-                shared.stdout_emitter.clone(),
-                shared.stderr_emitter.clone(),
+                "fork",
             )
             .await?;
             if !bootstrap_output.is_empty() {
@@ -7446,9 +8237,6 @@ async fn handle_extension_host_app_request(
                 ));
             }
             let target_id = required_string_field(request, "targetId")?;
-            let Some(session_manager) = snapshot.session_manager.as_ref() else {
-                return Err(String::from("Session tree navigation is unavailable"));
-            };
             let options = request.get("options").and_then(Value::as_object);
             let summarize = options
                 .and_then(|options| options.get("summarize"))
@@ -7464,9 +8252,7 @@ async fn handle_extension_host_app_request(
                 .and_then(|options| optional_string_field(options, "label"))
                 .filter(|label| !label.trim().is_empty());
             let result = switch_interactive_tree_branch_with_options(
-                &snapshot.core,
-                snapshot.core.model_registry().as_ref(),
-                session_manager,
+                &snapshot.session,
                 &snapshot.runtime_settings,
                 &target_id,
                 summarize,
@@ -7486,26 +8272,10 @@ async fn handle_extension_host_app_request(
             if snapshot.core.state().is_streaming {
                 return Err(String::from("Cannot reload while a request is running"));
             }
-            let manager = recreate_session_manager_from_rpc(&snapshot)?;
-            let next_cwd = PathBuf::from(manager.get_cwd());
-            let runtime_settings = shared
-                .options
-                .agent_dir
-                .as_deref()
-                .map(|agent_dir| load_runtime_settings(&next_cwd, agent_dir))
-                .unwrap_or(snapshot.runtime_settings.clone());
-            let (next_state, bootstrap_output) = build_rpc_state(
-                &shared.options,
-                &next_cwd,
-                runtime_settings,
-                snapshot.scoped_models.clone(),
-                None,
-                Some(manager),
-                None,
-                String::from("reload"),
-                current_rpc_session_file(snapshot.session_manager.as_ref()),
-                shared.stdout_emitter.clone(),
-                shared.stderr_emitter.clone(),
+            let mut runtime = create_rpc_transition_runtime(&shared, &snapshot, None);
+            runtime.reload().await.map_err(|error| error.to_string())?;
+            let (next_state, bootstrap_output) = build_rpc_state_from_transition_runtime(
+                &shared, &snapshot, &runtime, None, "reload",
             )
             .await?;
             if !bootstrap_output.is_empty() {
@@ -7562,15 +8332,10 @@ fn execute_extension_set_label(
     label: Option<String>,
 ) -> Result<(), String> {
     let snapshot = shared.snapshot();
-    let Some(session_manager) = snapshot.session_manager.as_ref() else {
-        return Err(String::from("Session history is unavailable"));
-    };
-    session_manager
-        .lock()
-        .expect("rpc session manager mutex poisoned")
-        .append_label_change(entry_id, label)
-        .map_err(|error| error.to_string())?;
-    Ok(())
+    snapshot
+        .session
+        .set_label(entry_id, label)
+        .map_err(|error| error.to_string())
 }
 
 async fn execute_extension_send_message(
@@ -8312,42 +9077,6 @@ fn cycle_rpc_thinking_level(
     Ok(Some(next_level))
 }
 
-fn recreate_session_manager_from_rpc(snapshot: &RpcSnapshot) -> Result<SessionManager, String> {
-    if let Some(session_manager) = snapshot.session_manager.as_ref() {
-        let (session_file, session_dir, cwd) = {
-            let session_manager = session_manager
-                .lock()
-                .expect("rpc session manager mutex poisoned");
-            (
-                session_manager.get_session_file().map(str::to_owned),
-                (!session_manager.get_session_dir().is_empty())
-                    .then(|| session_manager.get_session_dir().to_owned()),
-                session_manager.get_cwd().to_owned(),
-            )
-        };
-
-        if let Some(session_file) = session_file {
-            return SessionManager::open(&session_file, session_dir.as_deref(), None)
-                .map_err(|error| error.to_string());
-        }
-
-        return Ok(snapshot_session_manager(&cwd, &snapshot.core.state()));
-    }
-
-    Ok(snapshot_session_manager(
-        &snapshot.cwd.to_string_lossy(),
-        &snapshot.core.state(),
-    ))
-}
-
-fn current_rpc_session_dir(session_manager: &Arc<Mutex<SessionManager>>) -> Option<String> {
-    let session_manager = session_manager
-        .lock()
-        .expect("rpc session manager mutex poisoned");
-    (!session_manager.get_session_dir().is_empty())
-        .then(|| session_manager.get_session_dir().to_owned())
-}
-
 fn rpc_success_response(id: Option<&str>, command: &str, data: Option<Value>) -> Value {
     let mut response = serde_json::Map::new();
     if let Some(id) = id {
@@ -8411,68 +9140,8 @@ fn rpc_session_state_json(snapshot: &RpcSnapshot) -> Value {
 }
 
 fn rpc_session_stats_json(snapshot: &RpcSnapshot) -> Value {
-    let state = snapshot.core.state();
-    let mut user_messages = 0usize;
-    let mut assistant_messages = 0usize;
-    let mut tool_results = 0usize;
-    let mut tool_calls = 0usize;
-    let mut total_input = 0u64;
-    let mut total_output = 0u64;
-    let mut total_cache_read = 0u64;
-    let mut total_cache_write = 0u64;
-    let mut total_cost = 0.0f64;
-
-    for agent_message in &state.messages {
-        let Some(message) = agent_message.as_standard_message() else {
-            continue;
-        };
-        match message {
-            Message::User { .. } => user_messages += 1,
-            Message::Assistant { content, usage, .. } => {
-                assistant_messages += 1;
-                tool_calls += content
-                    .iter()
-                    .filter(|content| matches!(content, AssistantContent::ToolCall { .. }))
-                    .count();
-                total_input += usage.input;
-                total_output += usage.output;
-                total_cache_read += usage.cache_read;
-                total_cache_write += usage.cache_write;
-                total_cost += usage.cost.total;
-            }
-            Message::ToolResult { .. } => tool_results += 1,
-        }
-    }
-
-    json!({
-        "sessionFile": snapshot.session_manager.as_ref().and_then(|session_manager| {
-            session_manager
-                .lock()
-                .expect("rpc session manager mutex poisoned")
-                .get_session_file()
-                .map(str::to_owned)
-        }),
-        "sessionId": snapshot.session_manager.as_ref().map(|session_manager| {
-            session_manager
-                .lock()
-                .expect("rpc session manager mutex poisoned")
-                .get_session_id()
-                .to_owned()
-        }).or_else(|| snapshot.core.agent().session_id()).unwrap_or_else(|| String::from("In-memory")),
-        "userMessages": user_messages,
-        "assistantMessages": assistant_messages,
-        "toolCalls": tool_calls,
-        "toolResults": tool_results,
-        "totalMessages": state.messages.len(),
-        "tokens": {
-            "input": total_input,
-            "output": total_output,
-            "cacheRead": total_cache_read,
-            "cacheWrite": total_cache_write,
-            "total": total_input + total_output + total_cache_read + total_cache_write,
-        },
-        "cost": total_cost,
-    })
+    serde_json::to_value(snapshot.session.session_stats())
+        .expect("rpc session stats serialization must succeed")
 }
 
 fn model_to_rpc_json(model: &Model) -> Value {
@@ -8508,28 +9177,8 @@ fn compaction_reason_json(reason: &pi_coding_agent_core::CompactionReason) -> &'
     }
 }
 
-fn agent_tool_result_to_rpc_bash_json(result: &pi_agent::AgentToolResult) -> Value {
-    let output = result
-        .content
-        .iter()
-        .filter_map(|content| match content {
-            UserContent::Text { text } => Some(text.as_str()),
-            UserContent::Image { .. } => None,
-        })
-        .collect::<Vec<_>>()
-        .join("");
-    let full_output_path = result
-        .details
-        .get("fullOutputPath")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
-    json!({
-        "output": output,
-        "exitCode": 0,
-        "cancelled": false,
-        "truncated": full_output_path.is_some(),
-        "fullOutputPath": full_output_path,
-    })
+fn bash_result_to_rpc_json(result: &pi_coding_agent_core::BashResult) -> Value {
+    serde_json::to_value(result).expect("rpc bash result serialization must succeed")
 }
 
 fn rpc_session_event_to_json(event: &AgentSessionEvent) -> Value {
@@ -10495,9 +11144,7 @@ fn switch_interactive_tree_branch(
 }
 
 async fn switch_interactive_tree_branch_with_options(
-    core: &CodingAgentCore,
-    model_registry: &ModelRegistry,
-    session_manager: &Arc<Mutex<SessionManager>>,
+    session: &AgentSession,
     runtime_settings: &LoadedRuntimeSettings,
     branch_ref: &str,
     summarize: bool,
@@ -10507,6 +11154,9 @@ async fn switch_interactive_tree_branch_with_options(
 ) -> Result<InteractiveTreeSwitchResult, String> {
     let target_id = (!branch_ref.eq_ignore_ascii_case("root")).then_some(branch_ref);
     let is_noop = {
+        let Some(session_manager) = session.session_manager() else {
+            return Err(String::from("Session tree navigation is unavailable"));
+        };
         let session_manager = session_manager
             .lock()
             .expect("session manager mutex poisoned");
@@ -10523,73 +11173,26 @@ async fn switch_interactive_tree_branch_with_options(
         });
     }
 
-    let preparation = {
-        let session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
-        prepare_tree_navigation(&session_manager, target_id).map_err(|error| error.to_string())?
-    };
-
-    let summary = if summarize && !preparation.entries_to_summarize.is_empty() {
-        let model = core.state().model;
-        let auth = model_registry
-            .get_api_key_and_headers_async(&model)
-            .await
-            .map_err(|error| error.to_string())?;
-        let api_key = auth
-            .api_key
-            .ok_or_else(|| format!("No API key found for {}.", model.provider))?;
-        let generated = generate_branch_summary_with_details(
-            &preparation.entries_to_summarize,
-            &model,
-            &api_key,
-            auth.headers,
-            BranchSummaryOptions {
-                reserve_tokens: runtime_settings.settings.branch_summary.reserve_tokens,
+    let navigation = session
+        .navigate_tree(
+            target_id,
+            NavigateTreeOptions {
+                summarize,
                 custom_instructions: custom_instructions.map(ToOwned::to_owned),
                 replace_instructions,
+                reserve_tokens: Some(runtime_settings.settings.branch_summary.reserve_tokens),
+                label: label.map(ToOwned::to_owned),
             },
         )
         .await
         .map_err(|error| error.to_string())?;
-        Some(TreeNavigationSummary {
-            summary: generated.summary,
-            details: Some(
-                serde_json::to_value(BranchSummaryDetails {
-                    read_files: generated.read_files,
-                    modified_files: generated.modified_files,
-                })
-                .expect("branch summary details should serialize"),
-            ),
-            from_hook: None,
-        })
-    } else {
-        None
-    };
 
-    let (session_context, leaf_id, editor_text) = {
-        let mut session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
-        let navigation = apply_tree_navigation(&mut session_manager, &preparation, summary, label)
-            .map_err(|error| error.to_string())?;
-        (
-            session_manager.build_session_context(),
-            session_manager.get_leaf_id().map(str::to_owned),
-            navigation.editor_text,
-        )
-    };
-
-    let fallback_message = apply_interactive_session_context(core, model_registry, session_context);
-
-    let mut message = format!("Switched to {}", leaf_id.as_deref().unwrap_or("root"));
-    if let Some(fallback_message) = fallback_message {
-        message.push_str(". ");
-        message.push_str(&fallback_message);
-    }
     Ok(InteractiveTreeSwitchResult {
-        message,
-        editor_text,
+        message: format!(
+            "Switched to {}",
+            navigation.new_leaf_id.as_deref().unwrap_or("root")
+        ),
+        editor_text: navigation.editor_text,
     })
 }
 
@@ -11021,20 +11624,6 @@ struct InteractiveModelCycleResult {
     thinking_level: ThinkingLevel,
 }
 
-#[derive(Debug, Clone)]
-struct InteractiveBashResult {
-    output: String,
-    exit_code: Option<i32>,
-    cancelled: bool,
-    truncated: bool,
-    full_output_path: Option<String>,
-}
-
-#[derive(Default)]
-struct InteractiveBashController {
-    abort_tx: Option<watch::Sender<bool>>,
-}
-
 fn matches_shell_binding(keybindings: &KeybindingsManager, data: &str, keybinding: &str) -> bool {
     keybindings
         .get_keys(keybinding)
@@ -11042,216 +11631,16 @@ fn matches_shell_binding(keybindings: &KeybindingsManager, data: &str, keybindin
         .any(|key| matches_key(data, key.as_str()))
 }
 
-async fn execute_interactive_bash_command(
-    cwd: &Path,
-    command: &str,
-    mut abort_rx: watch::Receiver<bool>,
-) -> Result<InteractiveBashResult, String> {
-    if !cwd.exists() {
-        return Err(format!(
-            "Working directory does not exist: {}",
-            cwd.display()
-        ));
-    }
-
-    if *abort_rx.borrow() {
-        return Ok(InteractiveBashResult {
-            output: String::new(),
-            exit_code: None,
-            cancelled: true,
-            truncated: false,
-            full_output_path: None,
-        });
-    }
-
-    let shell = env::var("SHELL").unwrap_or_else(|_| String::from("sh"));
-    let wrapped_command = format!("{{\n{command}\n}} 2>&1");
-
-    let mut command_builder = TokioCommand::new(shell);
-    command_builder
-        .arg("-lc")
-        .arg(wrapped_command)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    let output_future = command_builder
-        .spawn()
-        .map_err(|error| error.to_string())?
-        .wait_with_output();
-    tokio::pin!(output_future);
-
-    let abort_future = async {
-        while abort_rx.changed().await.is_ok() {
-            if *abort_rx.borrow() {
-                return;
-            }
-        }
-    };
-    tokio::pin!(abort_future);
-
-    let output = tokio::select! {
-        output = &mut output_future => output.map_err(|error| error.to_string())?,
-        _ = &mut abort_future => {
-            return Ok(InteractiveBashResult {
-                output: String::new(),
-                exit_code: None,
-                cancelled: true,
-                truncated: false,
-                full_output_path: None,
-            });
-        }
-    };
-
-    let mut full_output = String::from_utf8_lossy(&output.stdout).into_owned();
-    full_output.push_str(&String::from_utf8_lossy(&output.stderr));
-    let full_output = strip_interactive_bash_output(&full_output).replace('\r', "");
-    let truncation = pi_coding_agent_tools::truncate_tail(
-        &full_output,
-        pi_coding_agent_tools::TruncationOptions::default(),
-    );
-    let full_output_path = if truncation.truncated {
-        Some(write_interactive_bash_output(&full_output)?)
-    } else {
-        None
-    };
-
-    Ok(InteractiveBashResult {
-        output: if truncation.truncated {
-            truncation.content
-        } else {
-            full_output
-        },
-        exit_code: output.status.code(),
-        cancelled: false,
-        truncated: truncation.truncated,
-        full_output_path,
-    })
-}
-
-fn strip_interactive_bash_output(output: &str) -> String {
-    let mut result = String::new();
-    let bytes = output.as_bytes();
-    let mut index = 0usize;
-
-    while index < bytes.len() {
-        if bytes[index] == 0x1b {
-            match bytes.get(index + 1).copied() {
-                Some(b'[') => {
-                    index += 2;
-                    while index < bytes.len() {
-                        let byte = bytes[index];
-                        index += 1;
-                        if (0x40..=0x7e).contains(&byte) {
-                            break;
-                        }
-                    }
-                    continue;
-                }
-                Some(b']') | Some(b'_') => {
-                    index += 2;
-                    while index < bytes.len() {
-                        if bytes[index] == 0x07 {
-                            index += 1;
-                            break;
-                        }
-                        if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'\\') {
-                            index += 2;
-                            break;
-                        }
-                        index += 1;
-                    }
-                    continue;
-                }
-                _ => {
-                    index += 1;
-                    continue;
-                }
-            }
-        }
-
-        let character = output[index..]
-            .chars()
-            .next()
-            .expect("interactive bash output should contain a character");
-        index += character.len_utf8();
-
-        if character == '\r' || (character.is_control() && character != '\n' && character != '\t') {
-            continue;
-        }
-
-        result.push(character);
-    }
-
-    result
-}
-
-fn write_interactive_bash_output(output: &str) -> Result<String, String> {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("pi-bash-{}-{unique}.log", std::process::id()));
-    fs::write(&path, output).map_err(|error| error.to_string())?;
-    Ok(path.display().to_string())
-}
-
-async fn record_interactive_bash_result(
-    core: &CodingAgentCore,
-    session_manager: Option<&Arc<Mutex<SessionManager>>>,
-    command: &str,
-    result: &InteractiveBashResult,
-    exclude_from_context: bool,
-) -> Result<(), String> {
-    if core.state().is_streaming {
-        core.wait_for_idle().await;
-    }
-
-    let message = create_bash_execution_message(
-        command.to_owned(),
-        result.output.clone(),
-        result.exit_code.map(i64::from),
-        result.cancelled,
-        result.truncated,
-        result.full_output_path.clone(),
-        exclude_from_context,
-        now_ms(),
-    );
-    let message_for_state = message.clone();
-    core.agent().update_state(move |state| {
-        state.messages.push(message_for_state.clone());
-    });
-
-    if let Some(session_manager) = session_manager {
-        session_manager
-            .lock()
-            .expect("session manager mutex poisoned")
-            .append_message(message)
-            .map_err(|error| error.to_string())?;
-    }
-
-    Ok(())
-}
-
 fn submit_interactive_bash_command(
     shell: &mut StartupShellComponent,
     command: &str,
     exclude_from_context: bool,
-    core: &CodingAgentCore,
-    session_manager: Option<&Arc<Mutex<SessionManager>>>,
-    cwd: &Path,
+    session: &AgentSession,
     keybindings: &KeybindingsManager,
     status_handle: &StatusHandle,
     render_handle: &RenderHandle,
-    bash_controller: &Arc<Mutex<InteractiveBashController>>,
 ) {
-    if bash_controller
-        .lock()
-        .expect("interactive bash controller mutex poisoned")
-        .abort_tx
-        .is_some()
-    {
+    if session.is_bash_running() {
         let raw_command = if exclude_from_context {
             format!("!!{command}")
         } else {
@@ -11269,47 +11658,27 @@ fn submit_interactive_bash_command(
     let component_handle =
         shell.start_bash_execution(command, exclude_from_context, render_handle.clone());
 
-    let (abort_tx, abort_rx) = watch::channel(false);
-    bash_controller
-        .lock()
-        .expect("interactive bash controller mutex poisoned")
-        .abort_tx = Some(abort_tx);
-
-    let core = core.clone();
-    let session_manager = session_manager.cloned();
-    let cwd = cwd.to_path_buf();
+    let session = session.clone();
     let command = command.to_owned();
     let status_handle = status_handle.clone();
-    let bash_controller = bash_controller.clone();
     tokio::spawn(async move {
-        let result = execute_interactive_bash_command(&cwd, &command, abort_rx).await;
-        bash_controller
-            .lock()
-            .expect("interactive bash controller mutex poisoned")
-            .abort_tx = None;
-
-        match result {
+        match session
+            .execute_bash(command.clone(), exclude_from_context)
+            .await
+        {
             Ok(result) => {
                 component_handle.set_output(&result.output);
                 component_handle.set_complete(
-                    result.exit_code,
+                    result
+                        .exit_code
+                        .and_then(|exit_code| i32::try_from(exit_code).ok()),
                     result.cancelled,
                     result.truncated,
                     result.full_output_path.clone(),
                 );
-                if let Err(error) = record_interactive_bash_result(
-                    &core,
-                    session_manager.as_ref(),
-                    &command,
-                    &result,
-                    exclude_from_context,
-                )
-                .await
-                {
-                    status_handle.set_message(format!("Error: {error}"));
-                }
             }
             Err(error) => {
+                let error = error.to_string();
                 component_handle.set_error(error.clone());
                 status_handle.set_message(format!("Error: {error}"));
             }
@@ -11319,6 +11688,7 @@ fn submit_interactive_bash_command(
 
 fn install_interactive_submit_handler(
     shell: &mut StartupShellComponent,
+    session: AgentSession,
     core: CodingAgentCore,
     model_registry: Arc<ModelRegistry>,
     scoped_models: Vec<ScopedModel>,
@@ -11497,13 +11867,12 @@ fn install_interactive_submit_handler(
         ));
     });
 
-    let bash_controller = Arc::new(Mutex::new(InteractiveBashController::default()));
     let extension_shortcuts = slash_command_context.extension_shortcuts.clone();
     let extension_host = slash_command_context.extension_host.clone();
     let extension_command_host = slash_command_context.extension_host.clone();
     let extension_status_handle = status_handle.clone();
     let interrupt_keybindings = slash_command_context.keybindings.clone();
-    let interrupt_bash_controller = bash_controller.clone();
+    let interrupt_session = session.clone();
     shell.set_on_extension_shortcut(move |data| {
         if let Some(shortcut) = extension_shortcuts
             .iter()
@@ -11527,13 +11896,8 @@ fn install_interactive_submit_handler(
             return false;
         }
 
-        let abort_tx = interrupt_bash_controller
-            .lock()
-            .expect("interactive bash controller mutex poisoned")
-            .abort_tx
-            .clone();
-        if let Some(abort_tx) = abort_tx {
-            let _ = abort_tx.send(true);
+        if interrupt_session.is_bash_running() {
+            interrupt_session.abort_bash();
             return true;
         }
 
@@ -11585,13 +11949,10 @@ fn install_interactive_submit_handler(
                 shell,
                 command,
                 true,
-                &core,
-                session_manager.as_ref(),
-                &slash_command_context.cwd,
+                &session,
                 &slash_command_context.keybindings,
                 &status_handle,
                 &render_handle,
-                &bash_controller,
             );
             return;
         }
@@ -11603,13 +11964,10 @@ fn install_interactive_submit_handler(
                 shell,
                 command,
                 false,
-                &core,
-                session_manager.as_ref(),
-                &slash_command_context.cwd,
+                &session,
                 &slash_command_context.keybindings,
                 &status_handle,
                 &render_handle,
-                &bash_controller,
             );
             return;
         }
@@ -12607,6 +12965,29 @@ mod tests {
     fn oauth_registry_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn test_interactive_transition_environment(
+        model: &Model,
+        agent_dir: Option<PathBuf>,
+    ) -> InteractiveTransitionEnvironment {
+        InteractiveTransitionEnvironment {
+            parsed: parse_args(&vec![
+                String::from("--provider"),
+                model.provider.clone(),
+                String::from("--model"),
+                model.id.clone(),
+            ]),
+            auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                model.provider.as_str(),
+                "token",
+            )])),
+            built_in_models: vec![model.clone()],
+            models_json_path: None,
+            agent_dir,
+            default_system_prompt: String::new(),
+            stream_options: StreamOptions::default(),
+        }
     }
 
     #[derive(Debug)]
@@ -13974,6 +14355,158 @@ mod tests {
                 .any(|message| message == "imported session"),
             "messages: {imported_messages:?}"
         );
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn import_transition_runtime_uses_agent_session_runtime() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "import-transition-runtime-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "import-transition-runtime-faux-1".into(),
+                name: Some("Import Transition Runtime Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("import-transition-runtime-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("import-transition-runtime-cwd");
+        let imported_cwd = unique_temp_dir("import-transition-runtime-imported-cwd");
+        let mut imported_manager = SessionManager::in_memory(imported_cwd.to_str().unwrap());
+        imported_manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("runtime imported session"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        let import_path = cwd.join("runtime-imported.jsonl");
+        imported_manager.export_branch_jsonl(&import_path).unwrap();
+
+        let plan = resolve_interactive_transition_with_environment(
+            InteractiveTransitionRequest::ImportSession {
+                input_path: String::from("runtime-imported.jsonl"),
+            },
+            Some(InteractiveSessionContext {
+                manager: Some(SessionManager::in_memory(cwd.to_str().unwrap())),
+                session_file: None,
+                session_dir: None,
+                cwd: cwd.to_string_lossy().into_owned(),
+                model: model.clone(),
+                thinking_level: ThinkingLevel::Off,
+                scoped_models: Vec::new(),
+                available_models: Vec::new(),
+                runtime_settings: LoadedRuntimeSettings::default(),
+            }),
+            &cwd,
+            None,
+            &InteractiveRuntime::new(Arc::new(|| {
+                Box::new(LifecycleScriptedTerminal::new(Vec::new()))
+            })),
+            Some(&test_interactive_transition_environment(&model, None)),
+        )
+        .await
+        .expect("expected import transition runtime plan");
+
+        assert_eq!(plan.cwd, imported_cwd);
+        let imported_manager = plan.manager.expect("expected imported session manager");
+        let imported_messages = imported_manager
+            .build_session_context()
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                pi_agent::AgentMessage::Standard(Message::User { content, .. }) => {
+                    Some(extract_user_text(content))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            imported_messages
+                .iter()
+                .any(|message| message == "runtime imported session"),
+            "messages: {imported_messages:?}"
+        );
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn reload_transition_runtime_preserves_in_memory_session_state() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "reload-transition-runtime-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "reload-transition-runtime-faux-1".into(),
+                name: Some("Reload Transition Runtime Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("reload-transition-runtime-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("reload-transition-runtime-cwd");
+        let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
+        manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("reload runtime session"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+
+        let plan = resolve_interactive_transition_with_environment(
+            InteractiveTransitionRequest::Reload,
+            Some(InteractiveSessionContext {
+                manager: Some(manager),
+                session_file: None,
+                session_dir: None,
+                cwd: cwd.to_string_lossy().into_owned(),
+                model: model.clone(),
+                thinking_level: ThinkingLevel::Off,
+                scoped_models: Vec::new(),
+                available_models: Vec::new(),
+                runtime_settings: LoadedRuntimeSettings::default(),
+            }),
+            &cwd,
+            None,
+            &InteractiveRuntime::new(Arc::new(|| {
+                Box::new(LifecycleScriptedTerminal::new(Vec::new()))
+            })),
+            Some(&test_interactive_transition_environment(&model, None)),
+        )
+        .await
+        .expect("expected reload transition runtime plan");
+
+        let manager = plan.manager.expect("expected reloaded session manager");
+        let user_messages = manager
+            .build_session_context()
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                pi_agent::AgentMessage::Standard(Message::User { content, .. }) => {
+                    Some(extract_user_text(content))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            user_messages
+                .iter()
+                .any(|message| message == "reload runtime session"),
+            "messages: {user_messages:?}"
+        );
+        let defaults = plan
+            .bootstrap_defaults
+            .expect("expected preserved bootstrap defaults");
+        assert_eq!(defaults.provider, model.provider);
+        assert_eq!(defaults.model_id, model.id);
+        assert_eq!(defaults.thinking_level, ThinkingLevel::Off);
 
         faux.unregister();
     }
@@ -15907,6 +16440,102 @@ mod tests {
         )
         .await
         .expect("expected tree transition plan");
+
+        let manager = plan.manager.expect("expected session manager");
+        assert_eq!(manager.get_leaf_id(), None);
+        assert_eq!(plan.prefill_input.as_deref(), Some("root"));
+        assert_eq!(
+            plan.initial_status_message.as_deref(),
+            Some("Navigated to selected point")
+        );
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn tree_picker_transition_runtime_uses_agent_session_runtime() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "tree-picker-transition-runtime-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "tree-picker-transition-runtime-faux-1".into(),
+                name: Some("Tree Picker Transition Runtime Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("tree-picker-transition-runtime-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("tree-picker-transition-runtime-cwd");
+        let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
+        let root_user_id = manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("root"),
+                }],
+                timestamp: 1,
+            })
+            .unwrap();
+        manager
+            .append_message(Message::Assistant {
+                content: vec![AssistantContent::Text {
+                    text: String::from("assistant root"),
+                    text_signature: None,
+                }],
+                api: String::from("faux:test"),
+                provider: String::from("tree-picker-transition-runtime-faux"),
+                model: String::from("tree-picker-transition-runtime-faux-1"),
+                response_id: None,
+                usage: Default::default(),
+                stop_reason: pi_events::StopReason::Stop,
+                error_message: None,
+                timestamp: 2,
+            })
+            .unwrap();
+        let _primary_user_id = manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("primary branch"),
+                }],
+                timestamp: 3,
+            })
+            .unwrap();
+        manager.branch(&root_user_id).unwrap();
+        manager
+            .append_message(Message::User {
+                content: vec![UserContent::Text {
+                    text: String::from("alternate branch"),
+                }],
+                timestamp: 4,
+            })
+            .unwrap();
+
+        let terminal = LifecycleScriptedTerminal::new(vec![
+            (Duration::from_millis(5), String::from("\x1b[A")),
+            (Duration::from_millis(5), String::from("\r")),
+        ]);
+        let runtime = InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone())));
+
+        let plan = resolve_interactive_transition_with_environment(
+            InteractiveTransitionRequest::TreePicker,
+            Some(InteractiveSessionContext {
+                manager: Some(manager),
+                session_file: None,
+                session_dir: None,
+                cwd: cwd.to_string_lossy().into_owned(),
+                model: model.clone(),
+                thinking_level: ThinkingLevel::Off,
+                scoped_models: Vec::new(),
+                available_models: Vec::new(),
+                runtime_settings: LoadedRuntimeSettings::default(),
+            }),
+            &cwd,
+            None,
+            &runtime,
+            Some(&test_interactive_transition_environment(&model, None)),
+        )
+        .await
+        .expect("expected tree transition runtime plan");
 
         let manager = plan.manager.expect("expected session manager");
         assert_eq!(manager.get_leaf_id(), None);
