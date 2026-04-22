@@ -342,6 +342,28 @@ async fn simple_openai_responses_passes_service_tier_into_request_body() {
 }
 
 #[tokio::test]
+async fn simple_openai_codex_passes_reasoning_summary_and_text_verbosity_into_request_body() {
+    let payload = capture_simple_payload_with_context(
+        openai_codex_model("http://127.0.0.1:9".into(), 128_000),
+        base_context(),
+        SimpleStreamOptions {
+            reasoning: Some(ThinkingLevel::Low),
+            reasoning_summary: Some("detailed".into()),
+            text_verbosity: Some("high".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert_eq!(payload.get("text"), Some(&json!({ "verbosity": "high" })));
+    assert_eq!(payload.pointer("/reasoning/effort"), Some(&json!("low")));
+    assert_eq!(
+        payload.pointer("/reasoning/summary"),
+        Some(&json!("detailed"))
+    );
+}
+
+#[tokio::test]
 async fn simple_anthropic_maps_function_tool_choice_to_named_tool() {
     let payload = capture_simple_payload_with_context(
         anthropic_model("http://127.0.0.1:9".into(), 40_000),

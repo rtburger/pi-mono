@@ -185,6 +185,10 @@ pub struct SimpleStreamOptions {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
     pub reasoning: Option<ThinkingLevel>,
+    /// OpenAI Responses/Codex reasoning summary mode.
+    pub reasoning_summary: Option<String>,
+    /// OpenAI Codex Responses text verbosity ("low", "medium", or "high").
+    pub text_verbosity: Option<String>,
     pub thinking_budgets: ThinkingBudgets,
     pub tool_choice: Option<crate::openai_completions::OpenAiCompletionsToolChoice>,
     pub service_tier: Option<crate::openai_responses::OpenAiResponsesServiceTier>,
@@ -330,6 +334,8 @@ fn map_simple_stream_options(model: &Model, options: SimpleStreamOptions) -> Str
         temperature,
         max_tokens,
         reasoning,
+        reasoning_summary,
+        text_verbosity,
         thinking_budgets,
         tool_choice,
         service_tier,
@@ -376,8 +382,8 @@ fn map_simple_stream_options(model: &Model, options: SimpleStreamOptions) -> Str
         temperature,
         max_tokens: resolved_max_tokens,
         reasoning_effort,
-        reasoning_summary: None,
-        text_verbosity: None,
+        reasoning_summary,
+        text_verbosity,
         tool_choice,
         service_tier,
     }
