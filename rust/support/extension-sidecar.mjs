@@ -559,8 +559,21 @@ function bindRunner(loaded, cwd, providerMutations, diagnostics) {
 			getContextUsage() {
 				return runtimeState.contextUsage;
 			},
-			compact() {
-				emitUnsupported("compact");
+			compact(options) {
+				const promise = requestHost("compact", {
+					customInstructions: options?.customInstructions,
+				})
+					.then((result) => {
+						options?.onComplete?.(result);
+						return result;
+					})
+					.catch((error) => {
+						const resolvedError = error instanceof Error ? error : new Error(String(error));
+						options?.onError?.(resolvedError);
+						emitRuntimeError("compact", resolvedError.message);
+						return undefined;
+					});
+				trackCommandAction(promise);
 			},
 			getSystemPrompt() {
 				return runtimeState.systemPrompt;
@@ -625,23 +638,59 @@ function bindRunner(loaded, cwd, providerMutations, diagnostics) {
 			await requestHost("wait_for_idle");
 		},
 		async newSession(options) {
-			const result = await requestHost("new_session", { options });
-			return result ?? { cancelled: false };
+			const before = runner?.hasHandlers("session_before_switch")
+				? await runner.emit({ type: "session_before_switch", reason: "new" })
+				: undefined;
+			if (before?.cancel) {
+				return { cancelled: true };
+			}
+			const result = (await requestHost("new_session", { options })) ?? { cancelled: false };
+			if (!result?.cancelled && runner?.hasHandlers("session_shutdown")) {
+				await runner.emit({ type: "session_shutdown" });
+			}
+			return result;
 		},
 		async fork(entryId) {
-			const result = await requestHost("fork", { entryId });
-			return result ?? { cancelled: false };
+			const before = runner?.hasHandlers("session_before_fork")
+				? await runner.emit({ type: "session_before_fork", entryId })
+				: undefined;
+			if (before?.cancel) {
+				return { cancelled: true };
+			}
+			const result = (await requestHost("fork", { entryId })) ?? { cancelled: false };
+			if (!result?.cancelled && runner?.hasHandlers("session_shutdown")) {
+				await runner.emit({ type: "session_shutdown" });
+			}
+			return result;
 		},
 		async navigateTree(targetId, options) {
 			const result = await requestHost("navigate_tree", { targetId, options });
 			return result ?? { cancelled: false };
 		},
 		async switchSession(sessionPath) {
-			const result = await requestHost("switch_session", { sessionPath });
-			return result ?? { cancelled: false };
+			const before = runner?.hasHandlers("session_before_switch")
+				? await runner.emit({
+						type: "session_before_switch",
+						reason: "resume",
+						targetSessionFile: sessionPath,
+					})
+				: undefined;
+			if (before?.cancel) {
+				return { cancelled: true };
+			}
+			const result = (await requestHost("switch_session", { sessionPath })) ?? {
+				cancelled: false,
+			};
+			if (!result?.cancelled && runner?.hasHandlers("session_shutdown")) {
+				await runner.emit({ type: "session_shutdown" });
+			}
+			return result;
 		},
 		async reload() {
 			await requestHost("reload");
+			if (runner?.hasHandlers("session_shutdown")) {
+				await runner.emit({ type: "session_shutdown" });
+			}
 		},
 	});
 	runner.setUIContext(createUiContext());
@@ -860,6 +909,22 @@ async function handleBeforeSwitch(message) {
 	}
 }
 
+async function handleBeforeFork(message) {
+	if (!runner || !runner.hasHandlers("session_before_fork")) {
+		reply(message.id, null);
+		return;
+	}
+	try {
+		const result = await runner.emit({
+			type: "session_before_fork",
+			entryId: message.entryId,
+		});
+		reply(message.id, result ?? null);
+	} catch (error) {
+		replyError(message.id, error instanceof Error ? error.message : String(error));
+	}
+}
+
 async function handleToolCall(message) {
 	if (!runner || !runner.hasHandlers("tool_call")) {
 		reply(message.id, null);
@@ -931,6 +996,64 @@ async function handleInput(message) {
 	try {
 		const result = await runner.emitInput(message.text ?? "", message.images, message.source ?? "rpc");
 		reply(message.id, result);
+	} catch (error) {
+		replyError(message.id, error instanceof Error ? error.message : String(error));
+	}
+}
+
+async function handleBeforeAgentStart(message) {
+	if (!runner || !runner.hasHandlers("before_agent_start")) {
+		reply(message.id, null);
+		return;
+	}
+	try {
+		const result = await runner.emitBeforeAgentStart(
+			message.prompt ?? "",
+			message.images ?? [],
+			message.systemPrompt ?? runtimeState.systemPrompt ?? "",
+		);
+		reply(message.id, result ? {
+			messages: result.messages ?? [],
+			systemPrompt: result.systemPrompt,
+		} : null);
+	} catch (error) {
+		replyError(message.id, error instanceof Error ? error.message : String(error));
+	}
+}
+
+async function handleBeforeCompact(message) {
+	if (!runner || !runner.hasHandlers("session_before_compact")) {
+		reply(message.id, null);
+		return;
+	}
+	try {
+		const controller = new AbortController();
+		const result = await runner.emit({
+			type: "session_before_compact",
+			preparation: message.preparation,
+			branchEntries: message.branchEntries ?? [],
+			customInstructions: message.customInstructions,
+			signal: controller.signal,
+		});
+		reply(message.id, result ?? null);
+	} catch (error) {
+		replyError(message.id, error instanceof Error ? error.message : String(error));
+	}
+}
+
+async function handleBeforeTree(message) {
+	if (!runner || !runner.hasHandlers("session_before_tree")) {
+		reply(message.id, null);
+		return;
+	}
+	try {
+		const controller = new AbortController();
+		const result = await runner.emit({
+			type: "session_before_tree",
+			preparation: message.preparation,
+			signal: controller.signal,
+		});
+		reply(message.id, result ?? null);
 	} catch (error) {
 		replyError(message.id, error instanceof Error ? error.message : String(error));
 	}
@@ -1018,6 +1141,9 @@ async function handleMessage(rawLine) {
 			case "before_switch":
 				await handleBeforeSwitch(message);
 				break;
+			case "before_fork":
+				await handleBeforeFork(message);
+				break;
 			case "tool_call":
 				await handleToolCall(message);
 				break;
@@ -1029,6 +1155,15 @@ async function handleMessage(rawLine) {
 				break;
 			case "input":
 				await handleInput(message);
+				break;
+			case "before_agent_start":
+				await handleBeforeAgentStart(message);
+				break;
+			case "before_compact":
+				await handleBeforeCompact(message);
+				break;
+			case "before_tree":
+				await handleBeforeTree(message);
 				break;
 			case "before_provider_request":
 				await handleBeforeProviderRequest(message);

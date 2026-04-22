@@ -34,16 +34,18 @@ use pi_coding_agent_core::create_coding_agent_core;
 use pi_coding_agent_core::{
     AgentSession, AgentSessionEvent, AgentSessionOptions, AgentSessionRuntime,
     AgentSessionRuntimeError, AgentSessionRuntimeRequest, AuthSource, BootstrapDiagnosticLevel,
-    CodingAgentCore, CodingAgentCoreError, CodingAgentCoreOptions, CompactionResult,
-    CompactionSettings, ContextUsageEstimate, CreateAgentSessionResult,
-    CreateAgentSessionRuntimeFactory, CustomMessage, CustomMessageContent,
-    ExistingSessionSelection, FooterDataProvider, ModelRegistry, NavigateTreeOptions,
-    NewSessionOptions, ScopedModel, SessionBootstrapOptions, SessionEntry, SessionHeader,
-    SessionInfo, SessionManager, SourceInfo, apply_tree_navigation, build_default_pi_system_prompt,
+    BranchSummaryDetails, BranchSummaryOptions, CodingAgentCore, CodingAgentCoreError,
+    CodingAgentCoreOptions, CompactionResult, CompactionSettings, ContextUsageEstimate,
+    CreateAgentSessionResult, CreateAgentSessionRuntimeFactory, CustomMessage,
+    CustomMessageContent, ExistingSessionSelection, FooterDataProvider,
+    ModelRegistry, NavigateTreeOptions, NewSessionOptions, ScopedModel,
+    SessionBootstrapOptions, SessionEntry, SessionHeader, SessionInfo, SessionManager,
+    SourceInfo, apply_tree_navigation, build_default_pi_system_prompt,
     calculate_context_tokens, compact, create_agent_session, create_agent_session_runtime,
-    estimate_context_tokens, find_exact_model_reference_match, get_default_session_dir,
-    parse_thinking_level, prepare_compaction, prepare_tree_navigation, resolve_cli_model,
-    resolve_model_scope, restore_model_from_session, should_compact,
+    estimate_context_tokens, find_exact_model_reference_match,
+    generate_branch_summary_with_details, get_default_session_dir, parse_thinking_level,
+    prepare_compaction, prepare_tree_navigation, resolve_cli_model, resolve_model_scope,
+    restore_model_from_session, should_compact,
 };
 #[cfg(test)]
 use pi_coding_agent_tui::PlainKeyHintStyler;
@@ -84,6 +86,7 @@ use tokio::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rpc_extensions::{
+    RpcBeforeAgentStartResult, RpcBeforeForkResult, RpcCompactionResult,
     RpcExtensionCommandInfo, RpcExtensionHost, RpcExtensionHostStartOptions,
     RpcExtensionInputResult, RpcExtensionProviderMutation, RpcExtensionShortcutInfo,
     RpcExtensionToolInfo, RpcToolCallResult, RpcToolResultMutation,
@@ -6589,7 +6592,13 @@ async fn execute_extension_aware_print_prompt(
     };
 
     let prepared = preprocess_prompt_text(&message, &snapshot.resources);
-    prompt_rpc_session(&snapshot.session, prepared, images).await
+    prompt_session_with_before_agent_start(
+        &snapshot.session,
+        snapshot.extension_host.clone(),
+        prepared,
+        images,
+    )
+    .await
 }
 
 fn resolve_rpc_scoped_models(
@@ -7333,7 +7342,13 @@ async fn handle_rpc_input_line(
                 return;
             }
 
-            let task = spawn_rpc_prompt_task(shared.clone(), id.clone(), prepared_message, images);
+            let task = spawn_rpc_prompt_task(
+                shared.clone(),
+                id.clone(),
+                prepared_message,
+                images,
+                snapshot.extension_host.clone(),
+            );
             if let Some(background_tasks) = background_tasks {
                 background_tasks.push(task);
             }
@@ -7704,18 +7719,23 @@ async fn handle_rpc_input_line(
                 return;
             }
             let custom_instructions = optional_string_field(command, "customInstructions");
-            let result = snapshot
-                .session
-                .compact(custom_instructions.as_deref())
-                .await;
+            let result = run_extension_aware_compaction(
+                &snapshot.session,
+                snapshot.extension_host.clone(),
+                custom_instructions,
+            )
+            .await;
             snapshot.is_compacting.store(false, Ordering::Relaxed);
             match result {
-                Ok(result) => shared.emit_response(
-                    id.as_deref(),
-                    "compact",
-                    Some(compaction_result_to_json(&result)),
-                ),
-                Err(error) => shared.emit_error(id.as_deref(), "compact", error.to_string()),
+                Ok(result) => {
+                    sync_rpc_extension_state(&shared).await;
+                    shared.emit_response(
+                        id.as_deref(),
+                        "compact",
+                        Some(compaction_result_to_json(&result)),
+                    )
+                }
+                Err(error) => shared.emit_error(id.as_deref(), "compact", error),
             }
         }
         "set_auto_compaction" => {
@@ -7817,11 +7837,29 @@ async fn handle_rpc_input_line(
                     return;
                 }
             };
+            let resolved_session_path = resolve_session_path(&snapshot.cwd, &session_path);
+            if let Some(extension_host) = snapshot.extension_host.clone() {
+                match extension_host
+                    .before_switch("resume", Some(resolved_session_path.clone()))
+                    .await
+                {
+                    Ok(true) => {
+                        shared.emit_response(
+                            id.as_deref(),
+                            "switch_session",
+                            Some(json!({ "cancelled": true })),
+                        );
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        shared.emit_error(id.as_deref(), "switch_session", error);
+                        return;
+                    }
+                }
+            }
             let mut runtime = create_rpc_transition_runtime(&shared, &snapshot, None);
-            if let Err(error) = runtime
-                .switch_session(&resolve_session_path(&snapshot.cwd, &session_path), None)
-                .await
-            {
+            if let Err(error) = runtime.switch_session(&resolved_session_path, None).await {
                 shared.emit_error(id.as_deref(), "switch_session", error.to_string());
                 return;
             }
@@ -7861,6 +7899,23 @@ async fn handle_rpc_input_line(
                     return;
                 }
             };
+            if let Some(extension_host) = snapshot.extension_host.clone() {
+                match extension_host.before_fork(&entry_id).await {
+                    Ok(RpcBeforeForkResult { cancel: true, .. }) => {
+                        shared.emit_response(
+                            id.as_deref(),
+                            "fork",
+                            Some(json!({ "cancelled": true, "text": "" })),
+                        );
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        shared.emit_error(id.as_deref(), "fork", error);
+                        return;
+                    }
+                }
+            }
             let bootstrap_defaults = Some(BootstrapDefaults::from_model(
                 &snapshot.core.state().model,
                 snapshot.core.state().thinking_level,
@@ -8027,6 +8082,21 @@ async fn handle_extension_host_app_request(
         "wait_for_idle" => {
             shared.current_core().wait_for_idle().await;
             Ok(Value::Null)
+        }
+        "compact" => {
+            let snapshot = shared.snapshot();
+            let custom_instructions = request
+                .get("customInstructions")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            let result = run_extension_aware_compaction(
+                &snapshot.session,
+                snapshot.extension_host.clone(),
+                custom_instructions,
+            )
+            .await?;
+            sync_rpc_extension_state(&shared).await;
+            Ok(compaction_result_to_json(&result))
         }
         "send_user_message" => {
             let content = request
@@ -8288,6 +8358,7 @@ async fn handle_extension_host_app_request(
                 .filter(|label| !label.trim().is_empty());
             let result = switch_interactive_tree_branch_with_options(
                 &snapshot.session,
+                snapshot.extension_host.clone(),
                 &snapshot.runtime_settings,
                 &target_id,
                 summarize,
@@ -8298,7 +8369,7 @@ async fn handle_extension_host_app_request(
             .await?;
             sync_rpc_extension_state(&shared).await;
             Ok(json!({
-                "cancelled": false,
+                "cancelled": result.message == "Navigation cancelled",
                 "editorText": result.editor_text,
             }))
         }
@@ -8471,7 +8542,13 @@ async fn execute_extension_send_user_message(
         return Ok(());
     }
 
-    let result = prompt_rpc_session(&snapshot.session, text, images).await;
+    let result = prompt_session_with_before_agent_start(
+        &snapshot.session,
+        snapshot.extension_host.clone(),
+        text,
+        images,
+    )
+    .await;
     if result.is_ok() {
         sync_rpc_extension_state(shared).await;
     }
@@ -8606,6 +8683,376 @@ fn build_rpc_user_message(text: String, images: Vec<UserContent>) -> Message {
     }
 }
 
+async fn wait_for_session_retry(session: &AgentSession) {
+    loop {
+        session.wait_for_idle().await;
+        if !session.is_retrying() {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn prompt_session_with_before_agent_start(
+    session: &AgentSession,
+    extension_host: Option<RpcExtensionHost>,
+    text: String,
+    images: Vec<UserContent>,
+) -> Result<(), String> {
+    let base_system_prompt = session.state().system_prompt;
+    let mut prompt_messages = vec![build_rpc_user_message(text.clone(), images.clone()).into()];
+    let mut override_system_prompt = None::<String>;
+
+    if let Some(extension_host) = extension_host {
+        if let Some(RpcBeforeAgentStartResult {
+            messages,
+            system_prompt,
+        }) = extension_host
+            .before_agent_start(&text, &images, &base_system_prompt)
+            .await?
+        {
+            override_system_prompt = system_prompt;
+            for message in messages {
+                prompt_messages.push(message.into_agent_message(now_ms()));
+            }
+        }
+    }
+
+    if let Some(system_prompt) = override_system_prompt.clone() {
+        session.agent().update_state(move |state| {
+            state.system_prompt = system_prompt.clone();
+        });
+    }
+
+    let prompt_result = session
+        .agent()
+        .prompt(prompt_messages)
+        .await
+        .map_err(|error| error.to_string());
+
+    if prompt_result.is_ok() {
+        wait_for_session_retry(session).await;
+    }
+
+    if override_system_prompt.is_some() {
+        session.agent().update_state(move |state| {
+            state.system_prompt = base_system_prompt.clone();
+        });
+    }
+
+    prompt_result
+}
+
+fn rpc_compaction_result_to_core(result: RpcCompactionResult) -> CompactionResult {
+    CompactionResult {
+        summary: result.summary,
+        first_kept_entry_id: result.first_kept_entry_id,
+        tokens_before: result.tokens_before,
+        details: result.details,
+    }
+}
+
+fn compaction_preparation_to_json(
+    preparation: &pi_coding_agent_core::CompactionPreparation,
+) -> Value {
+    json!({
+        "firstKeptEntryId": preparation.first_kept_entry_id,
+        "messagesToSummarize": preparation
+            .messages_to_summarize
+            .iter()
+            .map(rpc_agent_message_to_json)
+            .collect::<Vec<_>>(),
+        "turnPrefixMessages": preparation
+            .turn_prefix_messages
+            .iter()
+            .map(rpc_agent_message_to_json)
+            .collect::<Vec<_>>(),
+        "isSplitTurn": preparation.is_split_turn,
+        "tokensBefore": preparation.tokens_before,
+        "previousSummary": preparation.previous_summary,
+        "fileOps": {
+            "readFiles": preparation.read_files,
+            "modifiedFiles": preparation.modified_files,
+        },
+        "settings": {
+            "enabled": preparation.settings.enabled,
+            "reserveTokens": preparation.settings.reserve_tokens,
+            "keepRecentTokens": preparation.settings.keep_recent_tokens,
+        },
+    })
+}
+
+async fn run_extension_aware_compaction(
+    session: &AgentSession,
+    extension_host: Option<RpcExtensionHost>,
+    custom_instructions: Option<String>,
+) -> Result<CompactionResult, String> {
+    let core = session.core();
+    let Some(session_manager) = session.session_manager() else {
+        return Err(String::from("Session compaction is unavailable"));
+    };
+
+    let model = core.state().model;
+    let auth = core
+        .model_registry()
+        .get_api_key_and_headers(&model)
+        .map_err(|error| error.to_string())?;
+    let Some(api_key) = auth.api_key else {
+        return Err(format!("No API key found for {}.", model.provider));
+    };
+
+    let path_entries = {
+        let session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        let leaf_id = session_manager.get_leaf_id().map(str::to_owned);
+        session_manager.get_branch(leaf_id.as_deref())
+    };
+
+    let settings = session.compaction_settings();
+    let Some(preparation) = prepare_compaction(&path_entries, settings) else {
+        let message = match path_entries.last() {
+            Some(SessionEntry::Compaction { .. }) => String::from("Already compacted"),
+            _ => String::from("Nothing to compact (session too small)"),
+        };
+        return Err(message);
+    };
+
+    let mut result = None::<CompactionResult>;
+    let mut from_extension = false;
+    if let Some(extension_host) = extension_host.clone() {
+        let before = extension_host
+            .before_compact(
+                compaction_preparation_to_json(&preparation),
+                Value::Array(path_entries.iter().map(session_entry_to_json).collect()),
+                custom_instructions.clone(),
+            )
+            .await?;
+        if before.cancel {
+            return Err(String::from("Compaction cancelled"));
+        }
+        if let Some(compaction) = before.compaction {
+            result = Some(rpc_compaction_result_to_core(compaction));
+            from_extension = true;
+        }
+    }
+
+    let result = match result {
+        Some(result) => result,
+        None => compact(
+            &preparation,
+            &model,
+            &api_key,
+            auth.headers,
+            custom_instructions.as_deref(),
+        )
+        .await
+        .map_err(|error| error.to_string())?,
+    };
+
+    let (saved_entry, next_messages) = {
+        let mut session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        let entry_id = session_manager
+            .append_compaction(
+                result.summary.clone(),
+                result.first_kept_entry_id.clone(),
+                result.tokens_before,
+                result.details.clone(),
+                from_extension.then_some(true),
+            )
+            .map_err(|error| error.to_string())?;
+        let saved_entry = session_manager.get_entry(&entry_id).cloned();
+        let next_messages = session_manager.build_session_context().messages;
+        (saved_entry, next_messages)
+    };
+
+    core.agent().update_state(move |state| {
+        state.messages = next_messages.clone();
+    });
+
+    if let Some(extension_host) = extension_host
+        && let Some(saved_entry) = saved_entry
+    {
+        let _ = extension_host
+            .emit_event(json!({
+                "type": "session_compact",
+                "compactionEntry": session_entry_to_json(&saved_entry),
+                "fromExtension": from_extension,
+            }))
+            .await;
+    }
+
+    Ok(result)
+}
+
+fn tree_preparation_to_json(
+    preparation: &pi_coding_agent_core::TreeNavigationPreparation,
+    summarize: bool,
+    custom_instructions: Option<&str>,
+    replace_instructions: bool,
+    label: Option<&str>,
+) -> Value {
+    json!({
+        "targetId": preparation.target_id,
+        "oldLeafId": preparation.old_leaf_id,
+        "commonAncestorId": preparation.common_ancestor_id,
+        "entriesToSummarize": preparation
+            .entries_to_summarize
+            .iter()
+            .map(session_entry_to_json)
+            .collect::<Vec<_>>(),
+        "userWantsSummary": summarize,
+        "customInstructions": custom_instructions,
+        "replaceInstructions": replace_instructions,
+        "label": label,
+    })
+}
+
+async fn navigate_tree_with_extension_hooks(
+    session: &AgentSession,
+    extension_host: Option<RpcExtensionHost>,
+    runtime_settings: &LoadedRuntimeSettings,
+    branch_ref: &str,
+    summarize: bool,
+    custom_instructions: Option<String>,
+    replace_instructions: bool,
+    label: Option<String>,
+) -> Result<Option<ExtensionAwareTreeNavigationResult>, String> {
+    let target_id = (!branch_ref.eq_ignore_ascii_case("root")).then_some(branch_ref);
+    let Some(session_manager) = session.session_manager() else {
+        return Err(String::from("Session tree navigation is unavailable"));
+    };
+
+    let preparation = {
+        let session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        prepare_tree_navigation(&session_manager, target_id).map_err(|error| error.to_string())?
+    };
+
+    let mut custom_instructions = custom_instructions;
+    let mut replace_instructions = replace_instructions;
+    let mut label = label;
+    let mut summary = None::<pi_coding_agent_core::TreeNavigationSummary>;
+    let mut from_extension = false;
+
+    if let Some(extension_host) = extension_host.clone() {
+        let before = extension_host
+            .before_tree(tree_preparation_to_json(
+                &preparation,
+                summarize,
+                custom_instructions.as_deref(),
+                replace_instructions,
+                label.as_deref(),
+            ))
+            .await?;
+        if before.cancel {
+            return Ok(None);
+        }
+        if let Some(hook_summary) = before.summary
+            && summarize
+        {
+            summary = Some(pi_coding_agent_core::TreeNavigationSummary {
+                summary: hook_summary.summary,
+                details: hook_summary.details,
+                from_hook: Some(true),
+            });
+            from_extension = true;
+        }
+        if before.custom_instructions.is_some() {
+            custom_instructions = before.custom_instructions;
+        }
+        if let Some(next_replace_instructions) = before.replace_instructions {
+            replace_instructions = next_replace_instructions;
+        }
+        if before.label.is_some() {
+            label = before.label;
+        }
+    }
+
+    if summary.is_none() && summarize && !preparation.entries_to_summarize.is_empty() {
+        let model = session.state().model;
+        let auth = session
+            .model_registry()
+            .get_api_key_and_headers_async(&model)
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(api_key) = auth.api_key else {
+            return Err(format!("No API key found for {}.", model.provider));
+        };
+
+        let generated = generate_branch_summary_with_details(
+            &preparation.entries_to_summarize,
+            &model,
+            &api_key,
+            auth.headers,
+            BranchSummaryOptions {
+                reserve_tokens: runtime_settings.settings.branch_summary.reserve_tokens,
+                custom_instructions: custom_instructions.clone(),
+                replace_instructions,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+        summary = Some(pi_coding_agent_core::TreeNavigationSummary {
+            summary: generated.summary,
+            details: Some(
+                serde_json::to_value(BranchSummaryDetails {
+                    read_files: generated.read_files,
+                    modified_files: generated.modified_files,
+                })
+                .expect("branch summary details should serialize"),
+            ),
+            from_hook: None,
+        });
+    }
+
+    let (navigation, summary_entry, session_context) = {
+        let mut session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        let navigation = apply_tree_navigation(
+            &mut session_manager,
+            &preparation,
+            summary,
+            label.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+        let summary_entry = navigation
+            .summary_entry_id
+            .as_deref()
+            .and_then(|summary_entry_id| session_manager.get_entry(summary_entry_id).cloned());
+        let session_context = session_manager.build_session_context();
+        (navigation, summary_entry, session_context)
+    };
+
+    let _ = apply_interactive_session_context(
+        &session.core(),
+        session.model_registry().as_ref(),
+        session_context,
+    );
+
+    if let Some(extension_host) = extension_host.clone() {
+        let _ = extension_host
+            .emit_event(json!({
+                "type": "session_tree",
+                "newLeafId": navigation.new_leaf_id,
+                "oldLeafId": navigation.old_leaf_id,
+                "summaryEntry": summary_entry.as_ref().map(session_entry_to_json),
+                "fromExtension": from_extension.then_some(true),
+            }))
+            .await;
+    }
+
+    Ok(Some(ExtensionAwareTreeNavigationResult {
+        new_leaf_id: navigation.new_leaf_id,
+        editor_text: navigation.editor_text,
+    }))
+}
+
 async fn apply_rpc_extension_input(
     extension_host: Option<RpcExtensionHost>,
     text: String,
@@ -8633,24 +9080,6 @@ async fn apply_rpc_extension_input(
     }
 }
 
-async fn prompt_rpc_session(
-    session: &AgentSession,
-    text: String,
-    images: Vec<UserContent>,
-) -> Result<(), String> {
-    if images.is_empty() {
-        session
-            .prompt_text(text)
-            .await
-            .map_err(|error| error.to_string())
-    } else {
-        session
-            .prompt_message(build_rpc_user_message(text, images))
-            .await
-            .map_err(|error| error.to_string())
-    }
-}
-
 fn queue_rpc_message(session: &AgentSession, kind: &str, text: String, images: Vec<UserContent>) {
     let message = build_rpc_user_message(text, images);
     if kind == "follow_up" {
@@ -8665,10 +9094,12 @@ fn spawn_rpc_prompt_task(
     id: Option<String>,
     message: String,
     images: Vec<UserContent>,
+    extension_host: Option<RpcExtensionHost>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let session = shared.current_session();
-        let result = prompt_rpc_session(&session, message, images).await;
+        let result =
+            prompt_session_with_before_agent_start(&session, extension_host, message, images).await;
         if let Err(error) = result {
             shared.emit_error(id.as_deref(), "prompt", error);
         }
@@ -9425,6 +9856,145 @@ fn rpc_agent_message_to_json(message: &pi_agent::AgentMessage) -> Value {
             "role": message.role,
             "payload": message.payload,
             "timestamp": message.timestamp,
+        }),
+    }
+}
+
+fn session_entry_to_json(entry: &SessionEntry) -> Value {
+    match entry {
+        SessionEntry::Message {
+            id,
+            parent_id,
+            timestamp,
+            message,
+        } => json!({
+            "type": "message",
+            "id": id,
+            "parentId": parent_id,
+            "timestamp": timestamp,
+            "message": rpc_agent_message_to_json(message),
+        }),
+        SessionEntry::ThinkingLevelChange {
+            id,
+            parent_id,
+            timestamp,
+            thinking_level,
+        } => json!({
+            "type": "thinking_level_change",
+            "id": id,
+            "parentId": parent_id,
+            "timestamp": timestamp,
+            "thinkingLevel": thinking_level,
+        }),
+        SessionEntry::ModelChange {
+            id,
+            parent_id,
+            timestamp,
+            provider,
+            model_id,
+        } => json!({
+            "type": "model_change",
+            "id": id,
+            "parentId": parent_id,
+            "timestamp": timestamp,
+            "provider": provider,
+            "modelId": model_id,
+        }),
+        SessionEntry::Compaction {
+            id,
+            parent_id,
+            timestamp,
+            summary,
+            first_kept_entry_id,
+            tokens_before,
+            details,
+            from_hook,
+        } => json!({
+            "type": "compaction",
+            "id": id,
+            "parentId": parent_id,
+            "timestamp": timestamp,
+            "summary": summary,
+            "firstKeptEntryId": first_kept_entry_id,
+            "tokensBefore": tokens_before,
+            "details": details,
+            "fromHook": from_hook,
+        }),
+        SessionEntry::BranchSummary {
+            id,
+            parent_id,
+            timestamp,
+            from_id,
+            summary,
+            details,
+            from_hook,
+        } => json!({
+            "type": "branch_summary",
+            "id": id,
+            "parentId": parent_id,
+            "timestamp": timestamp,
+            "fromId": from_id,
+            "summary": summary,
+            "details": details,
+            "fromHook": from_hook,
+        }),
+        SessionEntry::Custom {
+            id,
+            parent_id,
+            timestamp,
+            custom_type,
+            data,
+        } => json!({
+            "type": "custom",
+            "id": id,
+            "parentId": parent_id,
+            "timestamp": timestamp,
+            "customType": custom_type,
+            "data": data,
+        }),
+        SessionEntry::CustomMessage {
+            id,
+            parent_id,
+            timestamp,
+            custom_type,
+            content,
+            details,
+            display,
+        } => json!({
+            "type": "custom_message",
+            "id": id,
+            "parentId": parent_id,
+            "timestamp": timestamp,
+            "customType": custom_type,
+            "content": content,
+            "details": details,
+            "display": display,
+        }),
+        SessionEntry::Label {
+            id,
+            parent_id,
+            timestamp,
+            target_id,
+            label,
+        } => json!({
+            "type": "label",
+            "id": id,
+            "parentId": parent_id,
+            "timestamp": timestamp,
+            "targetId": target_id,
+            "label": label,
+        }),
+        SessionEntry::SessionInfo {
+            id,
+            parent_id,
+            timestamp,
+            name,
+        } => json!({
+            "type": "session_info",
+            "id": id,
+            "parentId": parent_id,
+            "timestamp": timestamp,
+            "name": name,
         }),
     }
 }
@@ -11163,6 +11733,12 @@ struct InteractiveTreeSwitchResult {
     editor_text: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ExtensionAwareTreeNavigationResult {
+    new_leaf_id: Option<String>,
+    editor_text: Option<String>,
+}
+
 fn apply_interactive_session_context(
     core: &CodingAgentCore,
     model_registry: &ModelRegistry,
@@ -11250,6 +11826,7 @@ fn switch_interactive_tree_branch(
 
 async fn switch_interactive_tree_branch_with_options(
     session: &AgentSession,
+    extension_host: Option<RpcExtensionHost>,
     runtime_settings: &LoadedRuntimeSettings,
     branch_ref: &str,
     summarize: bool,
@@ -11278,19 +11855,23 @@ async fn switch_interactive_tree_branch_with_options(
         });
     }
 
-    let navigation = session
-        .navigate_tree(
-            target_id,
-            NavigateTreeOptions {
-                summarize,
-                custom_instructions: custom_instructions.map(ToOwned::to_owned),
-                replace_instructions,
-                reserve_tokens: Some(runtime_settings.settings.branch_summary.reserve_tokens),
-                label: label.map(ToOwned::to_owned),
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+    let Some(navigation) = navigate_tree_with_extension_hooks(
+        session,
+        extension_host,
+        runtime_settings,
+        branch_ref,
+        summarize,
+        custom_instructions.map(ToOwned::to_owned),
+        replace_instructions,
+        label.map(ToOwned::to_owned),
+    )
+    .await?
+    else {
+        return Ok(InteractiveTreeSwitchResult {
+            message: String::from("Navigation cancelled"),
+            editor_text: None,
+        });
+    };
 
     Ok(InteractiveTreeSwitchResult {
         message: format!(
@@ -11975,6 +12556,7 @@ fn install_interactive_submit_handler(
     let extension_shortcuts = slash_command_context.extension_shortcuts.clone();
     let extension_host = slash_command_context.extension_host.clone();
     let extension_command_host = slash_command_context.extension_host.clone();
+    let prompt_extension_host = slash_command_context.extension_host.clone();
     let extension_status_handle = status_handle.clone();
     let interrupt_keybindings = slash_command_context.keybindings.clone();
     let interrupt_session = session.clone();
@@ -12078,11 +12660,36 @@ fn install_interactive_submit_handler(
         }
 
         status_handle.set_message("Working...");
-        let core = core.clone();
+        let session = session.clone();
         let status_handle = status_handle.clone();
-        let prepared = preprocess_prompt_text(&value, &resources);
+        let resources = resources.clone();
+        let prompt_extension_host = prompt_extension_host.clone();
         tokio::spawn(async move {
-            if let Err(error) = core.prompt_text(prepared).await {
+            let Some((text, images)) = (match apply_rpc_extension_input(
+                prompt_extension_host.clone(),
+                value,
+                Vec::new(),
+                "interactive",
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    status_handle.set_message(format!("Error: {error}"));
+                    return;
+                }
+            }) else {
+                return;
+            };
+            let prepared = preprocess_prompt_text(&text, &resources);
+            if let Err(error) = prompt_session_with_before_agent_start(
+                &session,
+                prompt_extension_host,
+                prepared,
+                images,
+            )
+            .await
+            {
                 status_handle.set_message(format!("Error: {error}"));
             }
         });
@@ -12953,12 +13560,15 @@ fn push_line(buffer: &mut String, line: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::stream;
     use pi_ai::{
-        FauxModelDefinition, FauxResponse, OAuthCredentials, OAuthCredentialsFuture,
-        OAuthLoginCallbacks, OAuthProvider, RegisterFauxProviderOptions, register_faux_provider,
-        register_oauth_provider, unregister_oauth_provider,
+        AiProvider, AssistantEventStream, FauxModelDefinition, FauxResponse, OAuthCredentials,
+        OAuthCredentialsFuture, OAuthLoginCallbacks, OAuthProvider,
+        RegisterFauxProviderOptions, register_faux_provider, register_oauth_provider,
+        register_provider, unregister_oauth_provider, unregister_provider,
     };
     use pi_coding_agent_core::MemoryAuthStorage;
+    use pi_events::{AssistantEvent, AssistantMessage, StopReason, Usage};
     use std::{
         fs, io,
         path::{Path, PathBuf},
@@ -12970,6 +13580,96 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
     use tokio::time::timeout;
+
+    #[derive(Debug, Clone, Default)]
+    struct RecordedInteractiveRequest {
+        context: Option<pi_events::Context>,
+    }
+
+    #[derive(Clone)]
+    struct InteractiveRecordingProvider {
+        response_text: String,
+        recorded: Arc<Mutex<RecordedInteractiveRequest>>,
+    }
+
+    impl AiProvider for InteractiveRecordingProvider {
+        fn stream(
+            &self,
+            model: Model,
+            context: pi_events::Context,
+            _options: StreamOptions,
+        ) -> AssistantEventStream {
+            *self.recorded.lock().unwrap() = RecordedInteractiveRequest {
+                context: Some(context),
+            };
+
+            let message = AssistantMessage {
+                role: String::from("assistant"),
+                content: vec![AssistantContent::Text {
+                    text: self.response_text.clone(),
+                    text_signature: None,
+                }],
+                api: model.api.clone(),
+                provider: model.provider.clone(),
+                model: model.id.clone(),
+                response_id: None,
+                usage: Usage::default(),
+                stop_reason: StopReason::Stop,
+                error_message: None,
+                timestamp: 0,
+            };
+
+            Box::pin(stream::iter(vec![Ok(AssistantEvent::Done {
+                reason: StopReason::Stop,
+                message,
+            })]))
+        }
+    }
+
+    fn unique_name(prefix: &str) -> String {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("{prefix}-{unique}")
+    }
+
+    fn register_interactive_recording_provider(
+        response_text: &str,
+    ) -> (Model, String, Arc<Mutex<RecordedInteractiveRequest>>) {
+        let api = unique_name("interactive-extension-hooks-api");
+        let provider = unique_name("interactive-extension-hooks-provider");
+        let model_id = unique_name("interactive-extension-hooks-model");
+        let recorded = Arc::new(Mutex::new(RecordedInteractiveRequest::default()));
+        register_provider(
+            api.clone(),
+            Arc::new(InteractiveRecordingProvider {
+                response_text: response_text.to_owned(),
+                recorded: recorded.clone(),
+            }),
+        );
+
+        let model = Model {
+            id: model_id.clone(),
+            name: model_id,
+            api: api.clone(),
+            provider,
+            base_url: String::from("https://example.invalid/v1"),
+            reasoning: false,
+            input: vec![String::from("text")],
+            cost: pi_events::ModelCost {
+                input: 1.0,
+                output: 1.0,
+                cache_read: 0.1,
+                cache_write: 0.1,
+            },
+            context_window: 128_000,
+            max_tokens: 16_384,
+            compat: None,
+        };
+
+        (model, api, recorded)
+    }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -13645,6 +14345,115 @@ mod tests {
         );
 
         faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn interactive_prompt_applies_input_and_before_agent_start_hooks() {
+        let (model, api, recorded) = register_interactive_recording_provider("hooked response");
+        let cwd = unique_temp_dir("interactive-extension-hooks-cwd");
+        let agent_dir = unique_temp_dir("interactive-extension-hooks-agent");
+        let extension_path = cwd.join("interactive-hooks.ts");
+        fs::write(
+            &extension_path,
+            r#"export default function (pi) {
+	pi.on("input", (event) => ({
+		action: "transform",
+		text: `${event.text} [input hook]`,
+	}));
+	pi.on("before_agent_start", (event) => ({
+		message: {
+			customType: "hook",
+			content: "Injected before agent",
+			display: false,
+		},
+		systemPrompt: `${event.systemPrompt}\n\nHOOK SYSTEM`,
+	}));
+}
+"#,
+        )
+        .unwrap();
+
+        let terminal = LifecycleScriptedTerminal::new(vec![
+            (Duration::from_millis(50), String::from("hello")),
+            (Duration::from_millis(10), String::from("\r")),
+            (Duration::from_millis(400), String::from("\x04")),
+        ]);
+        let inspector = terminal.clone();
+
+        let exit_code = timeout(
+            Duration::from_secs(10),
+            run_interactive_command_with_runtime(
+                RunCommandOptions {
+                    args: vec![
+                        String::from("--provider"),
+                        model.provider.clone(),
+                        String::from("--model"),
+                        model.id.clone(),
+                        String::from("--extension"),
+                        extension_path.to_string_lossy().into_owned(),
+                    ],
+                    stdin_is_tty: true,
+                    stdin_content: None,
+                    auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                        model.provider.as_str(),
+                        "token",
+                    )])),
+                    built_in_models: vec![model.clone()],
+                    models_json_path: None,
+                    agent_dir: Some(agent_dir),
+                    cwd,
+                    default_system_prompt: String::from("base system prompt"),
+                    version: String::from("0.1.0"),
+                    stream_options: StreamOptions::default(),
+                },
+                InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone()))),
+            ),
+        )
+        .await
+        .expect("interactive hooks run should complete");
+
+        let output = strip_terminal_control_sequences(&inspector.output());
+        assert_eq!(exit_code, 0, "output: {output}");
+        assert!(output.contains("hooked response"), "output: {output}");
+
+        let request = recorded.lock().unwrap().clone();
+        let context = request.context.expect("expected recorded context");
+        let user_messages = context
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User { content, .. } => Some(
+                    content
+                        .iter()
+                        .filter_map(|item| match item {
+                            UserContent::Text { text } => Some(text.as_str()),
+                            UserContent::Image { .. } => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(""),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            user_messages.iter().any(|text| text == "hello [input hook]"),
+            "messages: {user_messages:?}"
+        );
+        assert!(
+            user_messages
+                .iter()
+                .any(|text| text == "Injected before agent"),
+            "messages: {user_messages:?}"
+        );
+        assert!(
+            context
+                .system_prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("HOOK SYSTEM")),
+            "context: {context:?}"
+        );
+
+        unregister_provider(&api);
     }
 
     #[tokio::test]

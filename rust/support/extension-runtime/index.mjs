@@ -1019,6 +1019,57 @@ export class ExtensionRunner {
 		return currentPayload;
 	}
 
+	async emitBeforeAgentStart(prompt, images, systemPrompt) {
+		const context = this.createContext();
+		const messages = [];
+		let currentSystemPrompt = systemPrompt;
+		let systemPromptModified = false;
+
+		for (const extension of this.extensions) {
+			const handlers = extension.handlers.get("before_agent_start");
+			if (!handlers?.length) {
+				continue;
+			}
+
+			for (const handler of handlers) {
+				try {
+					const handlerResult = await handler(
+						{
+							type: "before_agent_start",
+							prompt,
+							images,
+							systemPrompt: currentSystemPrompt,
+						},
+						context,
+					);
+					if (handlerResult?.message) {
+						messages.push(handlerResult.message);
+					}
+					if (handlerResult?.systemPrompt !== undefined) {
+						currentSystemPrompt = handlerResult.systemPrompt;
+						systemPromptModified = true;
+					}
+				} catch (error) {
+					this.emitError({
+						extensionPath: extension.path,
+						event: "before_agent_start",
+						error: error instanceof Error ? error.message : String(error),
+						stack: error instanceof Error ? error.stack : undefined,
+					});
+				}
+			}
+		}
+
+		if (messages.length > 0 || systemPromptModified) {
+			return {
+				messages: messages.length > 0 ? messages : undefined,
+				systemPrompt: systemPromptModified ? currentSystemPrompt : undefined,
+			};
+		}
+
+		return undefined;
+	}
+
 	async emitInput(text, images, source) {
 		const context = this.createContext();
 		let currentText = text;

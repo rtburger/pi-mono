@@ -1,6 +1,6 @@
 use super::TextEmitter;
 use crate::package_manager::{DefaultPackageManager, ResolveExtensionSourcesOptions};
-use pi_coding_agent_core::{ProviderConfigInput, SourceInfo};
+use pi_coding_agent_core::{CustomMessage, ProviderConfigInput, SourceInfo};
 use pi_events::UserContent;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -101,6 +101,66 @@ pub struct RpcExtensionInputResult {
     pub text: Option<String>,
     #[serde(default)]
     pub images: Option<Vec<UserContent>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcBeforeAgentStartResult {
+    #[serde(default)]
+    pub messages: Vec<CustomMessage>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcBeforeForkResult {
+    #[serde(default)]
+    pub cancel: bool,
+    #[serde(default)]
+    pub skip_conversation_restore: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcCompactionResult {
+    pub summary: String,
+    pub first_kept_entry_id: String,
+    pub tokens_before: u64,
+    #[serde(default)]
+    pub details: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcBeforeCompactResult {
+    #[serde(default)]
+    pub cancel: bool,
+    #[serde(default)]
+    pub compaction: Option<RpcCompactionResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcTreeSummaryResult {
+    pub summary: String,
+    #[serde(default)]
+    pub details: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcBeforeTreeResult {
+    #[serde(default)]
+    pub cancel: bool,
+    #[serde(default)]
+    pub summary: Option<RpcTreeSummaryResult>,
+    #[serde(default)]
+    pub custom_instructions: Option<String>,
+    #[serde(default)]
+    pub replace_instructions: Option<bool>,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -385,6 +445,22 @@ impl RpcExtensionHost {
             .unwrap_or(false))
     }
 
+    pub async fn before_fork(&self, entry_id: &str) -> Result<RpcBeforeForkResult, String> {
+        let value = self
+            .request(
+                "before_fork",
+                json!({
+                    "entryId": entry_id,
+                }),
+            )
+            .await?;
+        if value.is_null() {
+            return Ok(RpcBeforeForkResult::default());
+        }
+        serde_json::from_value(value)
+            .map_err(|error| format!("Invalid extension before_fork response: {error}"))
+    }
+
     pub async fn tool_call(
         &self,
         tool_name: &str,
@@ -477,6 +553,69 @@ impl RpcExtensionHost {
             .await?;
         serde_json::from_value(value)
             .map_err(|error| format!("Invalid extension input response: {error}"))
+    }
+
+    pub async fn before_agent_start(
+        &self,
+        prompt: &str,
+        images: &[UserContent],
+        system_prompt: &str,
+    ) -> Result<Option<RpcBeforeAgentStartResult>, String> {
+        let value = self
+            .request(
+                "before_agent_start",
+                json!({
+                    "prompt": prompt,
+                    "images": images,
+                    "systemPrompt": system_prompt,
+                }),
+            )
+            .await?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        serde_json::from_value(value)
+            .map(Some)
+            .map_err(|error| format!("Invalid extension before_agent_start response: {error}"))
+    }
+
+    pub async fn before_compact(
+        &self,
+        preparation: Value,
+        branch_entries: Value,
+        custom_instructions: Option<String>,
+    ) -> Result<RpcBeforeCompactResult, String> {
+        let value = self
+            .request(
+                "before_compact",
+                json!({
+                    "preparation": preparation,
+                    "branchEntries": branch_entries,
+                    "customInstructions": custom_instructions,
+                }),
+            )
+            .await?;
+        if value.is_null() {
+            return Ok(RpcBeforeCompactResult::default());
+        }
+        serde_json::from_value(value)
+            .map_err(|error| format!("Invalid extension before_compact response: {error}"))
+    }
+
+    pub async fn before_tree(&self, preparation: Value) -> Result<RpcBeforeTreeResult, String> {
+        let value = self
+            .request(
+                "before_tree",
+                json!({
+                    "preparation": preparation,
+                }),
+            )
+            .await?;
+        if value.is_null() {
+            return Ok(RpcBeforeTreeResult::default());
+        }
+        serde_json::from_value(value)
+            .map_err(|error| format!("Invalid extension before_tree response: {error}"))
     }
 
     pub async fn before_provider_request(&self, payload: Value) -> Result<Value, String> {
