@@ -120,6 +120,7 @@ pub struct RetrySettings {
     pub enabled: bool,
     pub max_retries: u32,
     pub base_delay_ms: u64,
+    pub max_retry_delay_ms: Option<u64>,
 }
 
 impl Default for RetrySettings {
@@ -128,6 +129,7 @@ impl Default for RetrySettings {
             enabled: true,
             max_retries: 3,
             base_delay_ms: 2_000,
+            max_retry_delay_ms: None,
         }
     }
 }
@@ -391,7 +393,9 @@ impl AgentSession {
         }
 
         let session_event_listeners = Arc::new(Mutex::new(BTreeMap::new()));
-        let automation = Arc::new(Mutex::new(SessionAutomationState::default()));
+        let mut initial_automation = SessionAutomationState::default();
+        initial_automation.retry_settings.max_retry_delay_ms = core.agent().max_retry_delay_ms();
+        let automation = Arc::new(Mutex::new(initial_automation));
         let queue_state = Arc::new(Mutex::new(SessionQueueState::default()));
         let bash_state = Arc::new(Mutex::new(SessionBashState::default()));
         let unsubscribe = core.agent().subscribe({
@@ -552,10 +556,14 @@ impl AgentSession {
     }
 
     pub fn retry_settings(&self) -> RetrySettings {
-        self.inner.automation.lock().unwrap().retry_settings.clone()
+        let mut settings = self.inner.automation.lock().unwrap().retry_settings.clone();
+        settings.max_retry_delay_ms = self.agent().max_retry_delay_ms();
+        settings
     }
 
     pub fn set_retry_settings(&self, settings: RetrySettings) {
+        self.agent()
+            .set_max_retry_delay_ms(settings.max_retry_delay_ms);
         self.inner.automation.lock().unwrap().retry_settings = settings;
     }
 

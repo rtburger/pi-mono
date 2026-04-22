@@ -133,9 +133,10 @@ impl AiProvider for ScriptedProvider {
     }
 }
 
-fn create_session(
+fn create_session_with_stream_options(
     built_in_model: Model,
     provider: ScriptedProvider,
+    stream_options: StreamOptions,
 ) -> pi_coding_agent_core::AgentSession {
     register_provider(built_in_model.api.clone(), Arc::new(provider));
     let auth = Arc::new(MemoryAuthStorage::with_api_keys([(
@@ -152,7 +153,7 @@ fn create_session(
             tools: None,
             system_prompt: String::new(),
             bootstrap: SessionBootstrapOptions::default(),
-            stream_options: StreamOptions::default(),
+            stream_options,
         },
         session_manager: Some(Arc::new(Mutex::new(SessionManager::in_memory(
             "/tmp/session",
@@ -160,6 +161,13 @@ fn create_session(
     })
     .unwrap()
     .session
+}
+
+fn create_session(
+    built_in_model: Model,
+    provider: ScriptedProvider,
+) -> pi_coding_agent_core::AgentSession {
+    create_session_with_stream_options(built_in_model, provider, StreamOptions::default())
 }
 
 fn expect_first_message_role(session: &pi_coding_agent_core::AgentSession, expected_role: &str) {
@@ -264,6 +272,7 @@ async fn retries_transient_errors_and_waits_for_recovery() {
         enabled: true,
         max_retries: 3,
         base_delay_ms: 1,
+        max_retry_delay_ms: None,
     });
 
     let retry_events = Arc::new(Mutex::new(Vec::<AgentSessionEvent>::new()));
@@ -315,6 +324,46 @@ async fn retries_transient_errors_and_waits_for_recovery() {
             timestamp: 20,
         })
     );
+
+    unregister_provider(&api);
+}
+
+#[tokio::test]
+async fn retry_settings_preserve_and_update_max_retry_delay_ms() {
+    let api = unique_name("retry-delay-api");
+    let provider_name = unique_name("retry-delay-provider");
+    let model_id = unique_name("retry-delay-model");
+    let built_in_model = model(&api, &provider_name, &model_id, 128_000);
+    let session = create_session_with_stream_options(
+        built_in_model,
+        ScriptedProvider::new(Vec::new()),
+        StreamOptions {
+            max_retry_delay_ms: Some(4_321),
+            ..StreamOptions::default()
+        },
+    );
+
+    assert_eq!(session.retry_settings().max_retry_delay_ms, Some(4_321));
+    assert_eq!(session.agent().max_retry_delay_ms(), Some(4_321));
+
+    let mut retry_settings = session.retry_settings();
+    retry_settings.enabled = false;
+    session.set_retry_settings(retry_settings.clone());
+
+    assert_eq!(session.retry_settings(), retry_settings);
+    assert_eq!(session.agent().max_retry_delay_ms(), Some(4_321));
+
+    retry_settings.max_retry_delay_ms = Some(987);
+    session.set_retry_settings(retry_settings.clone());
+
+    assert_eq!(session.retry_settings(), retry_settings);
+    assert_eq!(session.agent().max_retry_delay_ms(), Some(987));
+
+    retry_settings.max_retry_delay_ms = None;
+    session.set_retry_settings(retry_settings.clone());
+
+    assert_eq!(session.retry_settings(), retry_settings);
+    assert_eq!(session.agent().max_retry_delay_ms(), None);
 
     unregister_provider(&api);
 }

@@ -239,6 +239,7 @@ async fn print_mode_json_includes_retry_events() {
         enabled: true,
         max_retries: 1,
         base_delay_ms: 1,
+        max_retry_delay_ms: None,
     });
 
     let result = run_print_mode(
