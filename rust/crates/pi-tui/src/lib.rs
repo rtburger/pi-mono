@@ -1,5 +1,6 @@
 pub mod autocomplete;
 mod box_component;
+pub mod dynamic_border;
 pub mod editor;
 pub mod fuzzy;
 pub mod image;
@@ -381,6 +382,7 @@ pub use autocomplete::{
     CompletionResult, SlashCommand, apply_completion,
 };
 pub use box_component::Box;
+pub use dynamic_border::DynamicBorder;
 pub use editor::{Editor, EditorCursor, EditorOptions, EditorTheme, TextChunk, word_wrap_line};
 pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
 pub use image::{Image, ImageOptions, ImageTheme};

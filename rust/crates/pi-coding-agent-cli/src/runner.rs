@@ -55,7 +55,8 @@ use pi_coding_agent_tui::{
     OAuthSelectorComponent, OAuthSelectorMode, SettingsChange, SettingsConfig,
     SettingsSelectorComponent, ShellUpdateHandle, StartupShellComponent, StatusHandle,
     SystemClipboardImageSource, ThemedKeyHintStyler, TreeFilterMode, TreeSelectorComponent,
-    get_available_themes, init_theme, key_hint, key_text, set_registered_themes, set_theme,
+    UserMessageSelectorComponent, UserMessageSelectorItem, get_available_themes, init_theme,
+    key_hint, key_text, set_registered_themes, set_theme,
 };
 use pi_config::{LoadedRuntimeSettings, ThinkingBudgetsSettings, load_runtime_settings};
 use pi_events::{AssistantContent, Message, Model, UserContent};
@@ -10789,202 +10790,10 @@ fn current_interactive_model_candidates(
     model_registry.get_available()
 }
 
-type ForkSelectCallback = Box<dyn FnMut(String) + Send + 'static>;
-type ForkCancelCallback = Box<dyn FnMut() + Send + 'static>;
-
 #[derive(Debug, Clone)]
 enum ForkPickerOutcome {
     Selected(String),
     Cancelled,
-}
-
-struct ForkMessagePickerComponent {
-    keybindings: KeybindingsManager,
-    candidates: Vec<ForkMessageCandidate>,
-    selected_index: usize,
-    on_select: Option<ForkSelectCallback>,
-    on_cancel: Option<ForkCancelCallback>,
-    viewport_size: Cell<Option<(usize, usize)>>,
-}
-
-impl ForkMessagePickerComponent {
-    fn new(keybindings: &KeybindingsManager, candidates: Vec<ForkMessageCandidate>) -> Self {
-        Self {
-            keybindings: keybindings.clone(),
-            candidates,
-            selected_index: 0,
-            on_select: None,
-            on_cancel: None,
-            viewport_size: Cell::new(None),
-        }
-    }
-
-    fn set_on_select<F>(&mut self, on_select: F)
-    where
-        F: FnMut(String) + Send + 'static,
-    {
-        self.on_select = Some(Box::new(on_select));
-    }
-
-    fn set_on_cancel<F>(&mut self, on_cancel: F)
-    where
-        F: FnMut() + Send + 'static,
-    {
-        self.on_cancel = Some(Box::new(on_cancel));
-    }
-
-    fn matches_binding(&self, data: &str, keybinding: &str) -> bool {
-        self.keybindings
-            .get_keys(keybinding)
-            .iter()
-            .any(|key| matches_key(data, key.as_str()))
-    }
-
-    fn max_visible(&self) -> usize {
-        self.viewport_size
-            .get()
-            .map(|(_, height)| height.saturating_sub(4).max(1))
-            .unwrap_or(10)
-    }
-
-    fn render_candidates(&self, width: usize) -> Vec<String> {
-        if self.candidates.is_empty() {
-            return vec![truncate_to_width(
-                "No messages to fork from",
-                width,
-                "...",
-                false,
-            )];
-        }
-
-        let max_visible = self.max_visible();
-        let start_index = self
-            .selected_index
-            .saturating_sub(max_visible / 2)
-            .min(self.candidates.len().saturating_sub(max_visible));
-        let end_index = (start_index + max_visible).min(self.candidates.len());
-        let mut lines = Vec::new();
-
-        for (visible_index, candidate) in self.candidates[start_index..end_index].iter().enumerate()
-        {
-            let actual_index = start_index + visible_index;
-            let prefix = if actual_index == self.selected_index {
-                "→ "
-            } else {
-                "  "
-            };
-            let suffix = if candidate.parent_id.is_none() {
-                " (root)"
-            } else {
-                ""
-            };
-            lines.push(truncate_to_width(
-                &format!(
-                    "{prefix}{}{}",
-                    sanitize_display_text(&candidate.text),
-                    suffix
-                ),
-                width,
-                "...",
-                false,
-            ));
-        }
-
-        if start_index > 0 || end_index < self.candidates.len() {
-            lines.push(truncate_to_width(
-                &format!("  ({}/{})", self.selected_index + 1, self.candidates.len()),
-                width,
-                "...",
-                false,
-            ));
-        }
-
-        lines
-    }
-}
-
-impl Component for ForkMessagePickerComponent {
-    fn render(&self, width: usize) -> Vec<String> {
-        if width == 0 {
-            return vec![String::new()];
-        }
-
-        let mut lines = Vec::new();
-        lines.push("─".repeat(width));
-        lines.push(truncate_to_width(
-            "Fork session from user message",
-            width,
-            "...",
-            false,
-        ));
-        lines.extend(self.render_candidates(width));
-        lines.push(truncate_to_width(
-            "Enter select  Esc cancel  ↑/↓ navigate",
-            width,
-            "...",
-            false,
-        ));
-        lines.push("─".repeat(width));
-        lines
-    }
-
-    fn invalidate(&mut self) {}
-
-    fn handle_input(&mut self, data: &str) {
-        if self.matches_binding(data, "tui.select.cancel") {
-            if let Some(on_cancel) = &mut self.on_cancel {
-                on_cancel();
-            }
-            return;
-        }
-
-        if self.matches_binding(data, "tui.select.up") {
-            if self.candidates.is_empty() {
-                return;
-            }
-            self.selected_index = if self.selected_index == 0 {
-                self.candidates.len() - 1
-            } else {
-                self.selected_index - 1
-            };
-            return;
-        }
-
-        if self.matches_binding(data, "tui.select.down") {
-            if self.candidates.is_empty() {
-                return;
-            }
-            self.selected_index = if self.selected_index + 1 >= self.candidates.len() {
-                0
-            } else {
-                self.selected_index + 1
-            };
-            return;
-        }
-
-        if self.matches_binding(data, "tui.select.pageUp") {
-            self.selected_index = self.selected_index.saturating_sub(self.max_visible());
-            return;
-        }
-
-        if self.matches_binding(data, "tui.select.pageDown") {
-            self.selected_index = (self.selected_index + self.max_visible())
-                .min(self.candidates.len().saturating_sub(1));
-            return;
-        }
-
-        if self.matches_binding(data, "tui.select.confirm") {
-            if let Some(candidate) = self.candidates.get(self.selected_index)
-                && let Some(on_select) = &mut self.on_select
-            {
-                on_select(candidate.entry_id.clone());
-            }
-        }
-    }
-
-    fn set_viewport_size(&self, width: usize, height: usize) {
-        self.viewport_size.set(Some((width, height)));
-    }
 }
 
 async fn select_fork_message(
@@ -10993,7 +10802,17 @@ async fn select_fork_message(
     candidates: Vec<ForkMessageCandidate>,
 ) -> Result<Option<String>, String> {
     let outcome = Arc::new(Mutex::new(None::<ForkPickerOutcome>));
-    let mut picker = ForkMessagePickerComponent::new(keybindings, candidates);
+    let mut picker = UserMessageSelectorComponent::new(
+        keybindings,
+        candidates
+            .into_iter()
+            .map(|candidate| UserMessageSelectorItem {
+                id: candidate.entry_id,
+                text: candidate.text,
+                is_root: candidate.parent_id.is_none(),
+            })
+            .collect(),
+    );
 
     let outcome_for_select = Arc::clone(&outcome);
     picker.set_on_select(move |entry_id| {

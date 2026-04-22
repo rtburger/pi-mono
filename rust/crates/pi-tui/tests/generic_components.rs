@@ -1,6 +1,6 @@
 use pi_tui::{
-    Box as TuiBox, CancellableLoader, Component, DefaultTextStyle, Loader, Markdown, MarkdownTheme,
-    Text, visible_width,
+    Box as TuiBox, CancellableLoader, Component, DefaultTextStyle, DynamicBorder, Loader, Markdown,
+    MarkdownTheme, Text, visible_width,
 };
 use std::{
     sync::{Arc, Mutex},
@@ -48,6 +48,23 @@ fn box_component_applies_padding_and_background() {
 
     assert_ne!(first, recolored);
     assert!(recolored.iter().all(|line| visible_width(line) == 10));
+}
+
+#[test]
+fn dynamic_border_renders_full_width_and_supports_recoloring() {
+    let mut border = DynamicBorder::new();
+    let plain = border.render(6);
+    assert_eq!(plain, vec![String::from("──────")]);
+    assert_eq!(visible_width(&plain[0]), 6);
+
+    border.set_color_fn(|text| ansi("36", text));
+    let colored = border.render(4);
+    assert_ne!(plain[0], colored[0]);
+    assert!(colored[0].contains("────"));
+    assert_eq!(visible_width(&colored[0]), 4);
+
+    let zero_width = border.render(0);
+    assert_eq!(visible_width(&zero_width[0]), 1);
 }
 
 #[test]

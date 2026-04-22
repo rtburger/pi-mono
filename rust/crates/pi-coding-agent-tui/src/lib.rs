@@ -1,5 +1,6 @@
 mod assistant_message;
 mod bash_execution;
+mod bordered_loader;
 mod branch_summary;
 mod clipboard_image;
 mod compaction_summary;
@@ -34,9 +35,11 @@ mod tool_execution;
 mod transcript;
 mod tree_selector;
 mod user_message;
+mod user_message_selector;
 
 pub use assistant_message::{AssistantMessageComponent, DEFAULT_HIDDEN_THINKING_LABEL};
 pub use bash_execution::{BashExecutionComponent, BashExecutionHandle};
+pub use bordered_loader::{BorderedLoader, BorderedLoaderOptions};
 pub use branch_summary::BranchSummaryMessageComponent;
 pub use clipboard_image::{
     ClipboardCommandRunner, ClipboardImage, ClipboardImageSource, ClipboardPlatform, CommandOutput,
@@ -105,6 +108,7 @@ pub use tool_execution::{
 pub use transcript::TranscriptComponent;
 pub use tree_selector::{TreeFilterMode, TreeSelectorComponent};
 pub use user_message::UserMessageComponent;
+pub use user_message_selector::{UserMessageSelectorComponent, UserMessageSelectorItem};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodingAgentTuiError {
