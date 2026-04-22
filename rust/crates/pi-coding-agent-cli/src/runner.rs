@@ -37,12 +37,11 @@ use pi_coding_agent_core::{
     BranchSummaryDetails, BranchSummaryOptions, CodingAgentCore, CodingAgentCoreError,
     CodingAgentCoreOptions, CompactionResult, CompactionSettings, ContextUsageEstimate,
     CreateAgentSessionResult, CreateAgentSessionRuntimeFactory, CustomMessage,
-    CustomMessageContent, ExistingSessionSelection, FooterDataProvider,
-    ModelRegistry, NavigateTreeOptions, NewSessionOptions, ScopedModel,
-    SessionBootstrapOptions, SessionEntry, SessionHeader, SessionInfo, SessionManager,
-    SourceInfo, apply_tree_navigation, build_default_pi_system_prompt,
-    calculate_context_tokens, compact, create_agent_session, create_agent_session_runtime,
-    estimate_context_tokens, find_exact_model_reference_match,
+    CustomMessageContent, ExistingSessionSelection, FooterDataProvider, ModelRegistry,
+    NavigateTreeOptions, NewSessionOptions, ScopedModel, SessionBootstrapOptions, SessionEntry,
+    SessionHeader, SessionInfo, SessionManager, SourceInfo, apply_tree_navigation,
+    build_default_pi_system_prompt, calculate_context_tokens, compact, create_agent_session,
+    create_agent_session_runtime, estimate_context_tokens, find_exact_model_reference_match,
     generate_branch_summary_with_details, get_default_session_dir, parse_thinking_level,
     prepare_compaction, prepare_tree_navigation, resolve_cli_model, resolve_model_scope,
     restore_model_from_session, should_compact,
@@ -51,12 +50,12 @@ use pi_coding_agent_core::{
 use pi_coding_agent_tui::PlainKeyHintStyler;
 use pi_coding_agent_tui::{
     CustomMessageComponent, DEFAULT_APP_KEYBINDINGS, DeliveryMode, DoubleEscapeAction,
-    ExternalEditorCommandRunner, ExternalEditorHost, FooterStateHandle, InteractiveCoreBinding,
-    KeybindingsManager, LoginDialogComponent, OAuthProviderItem, OAuthSelectorComponent,
-    OAuthSelectorMode, SettingsChange, SettingsConfig, SettingsSelectorComponent,
-    ShellUpdateHandle, StartupShellComponent, StatusHandle, SystemClipboardImageSource,
-    ThemedKeyHintStyler, TreeFilterMode, TreeSelectorComponent, get_available_themes, init_theme,
-    key_hint, key_text, set_registered_themes, set_theme,
+    ExtensionWidgetPlacement, ExternalEditorCommandRunner, ExternalEditorHost, FooterStateHandle,
+    InteractiveCoreBinding, KeybindingsManager, LoginDialogComponent, OAuthProviderItem,
+    OAuthSelectorComponent, OAuthSelectorMode, SettingsChange, SettingsConfig,
+    SettingsSelectorComponent, ShellUpdateHandle, StartupShellComponent, StatusHandle,
+    SystemClipboardImageSource, ThemedKeyHintStyler, TreeFilterMode, TreeSelectorComponent,
+    get_available_themes, init_theme, key_hint, key_text, set_registered_themes, set_theme,
 };
 use pi_config::{LoadedRuntimeSettings, ThinkingBudgetsSettings, load_runtime_settings};
 use pi_events::{AssistantContent, Message, Model, UserContent};
@@ -86,11 +85,10 @@ use tokio::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rpc_extensions::{
-    RpcBeforeAgentStartResult, RpcBeforeForkResult, RpcCompactionResult,
-    RpcExtensionCommandInfo, RpcExtensionHost, RpcExtensionHostStartOptions,
-    RpcExtensionInputResult, RpcExtensionProviderMutation, RpcExtensionShortcutInfo,
-    RpcExtensionToolInfo, RpcToolCallResult, RpcToolResultMutation,
-    should_start_extension_host,
+    RpcBeforeAgentStartResult, RpcBeforeForkResult, RpcCompactionResult, RpcExtensionCommandInfo,
+    RpcExtensionHost, RpcExtensionHostStartOptions, RpcExtensionInputResult,
+    RpcExtensionProviderMutation, RpcExtensionShortcutInfo, RpcExtensionToolInfo,
+    RpcToolCallResult, RpcToolResultMutation, should_start_extension_host,
 };
 use serde_json::{Value, json};
 
@@ -154,6 +152,15 @@ struct InteractiveRuntime {
     terminal_factory: InteractiveTerminalFactory,
     extension_editor_command: Option<String>,
     extension_editor_runner: Option<Arc<dyn ExternalEditorCommandRunner>>,
+}
+
+#[derive(Clone)]
+struct InteractiveUiBridge {
+    shell_update_handle: ShellUpdateHandle,
+    status_handle: StatusHandle,
+    footer_provider: Arc<FooterDataProvider>,
+    viewport_size: Arc<Mutex<(usize, usize)>>,
+    exit_requested: Arc<AtomicBool>,
 }
 
 impl InteractiveRuntime {
@@ -2092,6 +2099,7 @@ async fn run_interactive_iteration(
         let extension_stdout_emitter = interactive_extension_output_emitter(
             status_handle.clone(),
             footer_provider.clone(),
+            footer_state_handle.clone(),
             shell_update_handle.clone(),
             pending_terminal_title.clone(),
             extension_host_holder.clone(),
@@ -2285,6 +2293,13 @@ async fn run_interactive_iteration(
                     tool_source_info: tool_source_info.clone(),
                     tool_metadata: tool_metadata.clone(),
                     extension_host: Some(host.clone()),
+                    interactive_ui: Some(InteractiveUiBridge {
+                        shell_update_handle: shell_update_handle.clone(),
+                        status_handle: status_handle.clone(),
+                        footer_provider: footer_provider.clone(),
+                        viewport_size: viewport_size.clone(),
+                        exit_requested: exit_requested.clone(),
+                    }),
                     auto_compaction_enabled: runtime_settings.settings.compaction.enabled,
                     is_compacting: Arc::new(AtomicBool::new(false)),
                     event_unsubscribe: None,
@@ -5935,6 +5950,7 @@ struct RpcState {
     tool_source_info: BTreeMap<String, SourceInfo>,
     tool_metadata: RuntimeToolMetadata,
     extension_host: Option<RpcExtensionHost>,
+    interactive_ui: Option<InteractiveUiBridge>,
     auto_compaction_enabled: bool,
     is_compacting: Arc<AtomicBool>,
     event_unsubscribe: Option<AgentUnsubscribe>,
@@ -5954,6 +5970,7 @@ struct RpcSnapshot {
     tool_source_info: BTreeMap<String, SourceInfo>,
     tool_metadata: RuntimeToolMetadata,
     extension_host: Option<RpcExtensionHost>,
+    interactive_ui: Option<InteractiveUiBridge>,
     auto_compaction_enabled: bool,
     is_compacting: Arc<AtomicBool>,
 }
@@ -6003,6 +6020,7 @@ impl RpcShared {
             tool_source_info: state.tool_source_info.clone(),
             tool_metadata: state.tool_metadata.clone(),
             extension_host: state.extension_host.clone(),
+            interactive_ui: state.interactive_ui.clone(),
             auto_compaction_enabled: state.auto_compaction_enabled,
             is_compacting: state.is_compacting.clone(),
         }
@@ -7020,10 +7038,9 @@ async fn build_rpc_state(
             return Err(diagnostics_output);
         }
         resource_output.push_str(&diagnostics_output);
-        for warning in apply_rpc_extension_provider_mutations(
-            &core,
-            &start_result.init.provider_mutations,
-        ) {
+        for warning in
+            apply_rpc_extension_provider_mutations(&core, &start_result.init.provider_mutations)
+        {
             push_line(&mut resource_output, &warning);
         }
 
@@ -7208,6 +7225,7 @@ async fn build_rpc_state(
             tool_source_info,
             tool_metadata,
             extension_host,
+            interactive_ui: None,
             auto_compaction_enabled: runtime_settings.settings.compaction.enabled,
             is_compacting: Arc::new(AtomicBool::new(false)),
             event_unsubscribe: None,
@@ -8079,6 +8097,168 @@ async fn handle_extension_host_app_request(
     let method = required_string_field(request, "method")?;
 
     match method.as_str() {
+        "get_editor_text" => {
+            let snapshot = shared.snapshot();
+            Ok(snapshot
+                .interactive_ui
+                .as_ref()
+                .map(|interactive_ui| {
+                    Value::String(interactive_ui.shell_update_handle.current_input_value())
+                })
+                .unwrap_or_else(|| Value::String(String::new())))
+        }
+        "get_ui_viewport" => {
+            let snapshot = shared.snapshot();
+            let (width, height) = snapshot
+                .interactive_ui
+                .as_ref()
+                .map(|interactive_ui| {
+                    *interactive_ui
+                        .viewport_size
+                        .lock()
+                        .expect("interactive viewport mutex poisoned")
+                })
+                .unwrap_or((80, 24));
+            Ok(json!({ "width": width, "height": height }))
+        }
+        "get_footer_data" => {
+            let snapshot = shared.snapshot();
+            let footer_snapshot = snapshot
+                .interactive_ui
+                .as_ref()
+                .map(|interactive_ui| interactive_ui.footer_provider.snapshot());
+            Ok(match footer_snapshot {
+                Some(footer_snapshot) => json!({
+                    "cwd": footer_snapshot.cwd,
+                    "gitBranch": footer_snapshot.git_branch,
+                    "availableProviderCount": footer_snapshot.available_provider_count,
+                    "extensionStatuses": footer_snapshot.extension_statuses,
+                }),
+                None => json!({
+                    "cwd": snapshot.cwd.to_string_lossy(),
+                    "gitBranch": Value::Null,
+                    "availableProviderCount": 0,
+                    "extensionStatuses": serde_json::Map::<String, Value>::new(),
+                }),
+            })
+        }
+        "ui_editor_submit" => {
+            let text = required_string_field(request, "text")?;
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return Ok(Value::Null);
+            }
+
+            let snapshot = shared.snapshot();
+            if let Some((command_name, args)) = parse_rpc_extension_command(trimmed)
+                && let Some(extension_host) = snapshot.extension_host.clone()
+                && extension_host.has_command(&command_name)
+            {
+                let status_handle = snapshot
+                    .interactive_ui
+                    .as_ref()
+                    .map(|interactive_ui| interactive_ui.status_handle.clone());
+                tokio::spawn(async move {
+                    match extension_host.execute_command(&command_name, &args).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            if let Some(status_handle) = status_handle {
+                                status_handle.set_message(format!(
+                                    "Unknown extension command: /{command_name}"
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(status_handle) = status_handle {
+                                status_handle.set_message(format!("Error: {error}"));
+                            }
+                        }
+                    }
+                });
+                return Ok(Value::Null);
+            }
+
+            if trimmed.starts_with('/') {
+                if let Some(interactive_ui) = snapshot.interactive_ui.as_ref() {
+                    interactive_ui.status_handle.set_message(
+                        "Builtin slash commands are not supported from custom editors yet.",
+                    );
+                }
+                return Ok(Value::Null);
+            }
+
+            if trimmed.starts_with('!') {
+                if let Some(interactive_ui) = snapshot.interactive_ui.as_ref() {
+                    interactive_ui
+                        .status_handle
+                        .set_message("Bash submission from custom editors is not supported yet.");
+                }
+                return Ok(Value::Null);
+            }
+
+            if let Some(interactive_ui) = snapshot.interactive_ui.as_ref() {
+                interactive_ui.status_handle.set_message("Working...");
+            }
+
+            let session = snapshot.session.clone();
+            let resources = snapshot.resources.clone();
+            let extension_host = snapshot.extension_host.clone();
+            let status_handle = snapshot
+                .interactive_ui
+                .as_ref()
+                .map(|interactive_ui| interactive_ui.status_handle.clone());
+            tokio::spawn(async move {
+                let Some((text, images)) = (match apply_rpc_extension_input(
+                    extension_host.clone(),
+                    text,
+                    Vec::new(),
+                    "interactive",
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        if let Some(status_handle) = status_handle.as_ref() {
+                            status_handle.set_message(format!("Error: {error}"));
+                        }
+                        return;
+                    }
+                }) else {
+                    return;
+                };
+                let prepared = preprocess_prompt_text(&text, &resources);
+                if let Err(error) = prompt_session_with_before_agent_start(
+                    &session,
+                    extension_host,
+                    prepared,
+                    images,
+                )
+                .await
+                {
+                    if let Some(status_handle) = status_handle.as_ref() {
+                        status_handle.set_message(format!("Error: {error}"));
+                    }
+                }
+            });
+            Ok(Value::Null)
+        }
+        "ui_editor_action" => {
+            let action = required_string_field(request, "action")?;
+            let snapshot = shared.snapshot();
+            match action.as_str() {
+                "exit" => {
+                    if let Some(interactive_ui) = snapshot.interactive_ui.as_ref() {
+                        interactive_ui.exit_requested.store(true, Ordering::Relaxed);
+                    }
+                }
+                "interrupt" => {
+                    snapshot.core.abort();
+                    snapshot.session.abort_bash();
+                }
+                _ => {}
+            }
+            Ok(Value::Null)
+        }
         "wait_for_idle" => {
             shared.current_core().wait_for_idle().await;
             Ok(Value::Null)
@@ -8615,7 +8795,9 @@ fn parse_extension_model_value(value: &Value) -> Result<Model, String> {
 
     let mut normalized = object.clone();
     if let Some(base_url) = normalized.remove("baseUrl") {
-        normalized.entry(String::from("base_url")).or_insert(base_url);
+        normalized
+            .entry(String::from("base_url"))
+            .or_insert(base_url);
     }
     if let Some(context_window) = normalized.remove("contextWindow") {
         normalized
@@ -8637,6 +8819,22 @@ fn optional_string_field(command: &serde_json::Map<String, Value>, key: &str) ->
         .get(key)
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
+}
+
+fn string_array_from_value(value: &Value) -> Result<Vec<String>, String> {
+    let Some(values) = value.as_array() else {
+        return Err(String::from("Expected an array of strings"));
+    };
+
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| String::from("Expected an array of strings"))
+        })
+        .collect()
 }
 
 fn required_string_field(
@@ -11034,6 +11232,7 @@ fn keybindings_json(keybindings: &KeybindingsManager) -> Value {
 fn interactive_extension_output_emitter(
     status_handle: StatusHandle,
     footer_provider: Arc<FooterDataProvider>,
+    footer_state_handle: FooterStateHandle,
     shell_update_handle: ShellUpdateHandle,
     pending_terminal_title: Arc<Mutex<Option<String>>>,
     extension_host_holder: Arc<Mutex<Option<RpcExtensionHost>>>,
@@ -11048,6 +11247,7 @@ fn interactive_extension_output_emitter(
                 trimmed,
                 &status_handle,
                 footer_provider.as_ref(),
+                &footer_state_handle,
                 &shell_update_handle,
                 &pending_terminal_title,
                 &extension_host_holder,
@@ -11075,6 +11275,7 @@ fn handle_interactive_extension_output_line(
     line: &str,
     status_handle: &StatusHandle,
     footer_provider: &FooterDataProvider,
+    footer_state_handle: &FooterStateHandle,
     shell_update_handle: &ShellUpdateHandle,
     pending_terminal_title: &Arc<Mutex<Option<String>>>,
     extension_host_holder: &Arc<Mutex<Option<RpcExtensionHost>>>,
@@ -11106,8 +11307,45 @@ fn handle_interactive_extension_output_line(
                             .get("statusText")
                             .and_then(Value::as_str)
                             .map(ToOwned::to_owned);
-                        footer_provider.set_extension_status(key.to_owned(), text);
+                        footer_provider.set_extension_status(key.to_owned(), text.clone());
+                        footer_state_handle.update(|footer_state| match text {
+                            Some(text) => {
+                                footer_state.extension_statuses.insert(key.to_owned(), text);
+                            }
+                            None => {
+                                footer_state.extension_statuses.remove(key);
+                            }
+                        });
+                        shell_update_handle.request_render();
                     }
+                }
+                Some("setWidget") => {
+                    if let Some(key) = value.get("widgetKey").and_then(Value::as_str) {
+                        let lines = value
+                            .get("widgetLines")
+                            .and_then(|value| string_array_from_value(value).ok());
+                        let placement = match value.get("widgetPlacement").and_then(Value::as_str) {
+                            Some("belowEditor") => ExtensionWidgetPlacement::BelowEditor,
+                            _ => ExtensionWidgetPlacement::AboveEditor,
+                        };
+                        shell_update_handle.set_extension_widget_lines(
+                            key.to_owned(),
+                            placement,
+                            lines,
+                        );
+                    }
+                }
+                Some("setHeader") => {
+                    let lines = value
+                        .get("headerLines")
+                        .and_then(|value| string_array_from_value(value).ok());
+                    shell_update_handle.set_extension_header_lines(lines);
+                }
+                Some("setFooter") => {
+                    let lines = value
+                        .get("footerLines")
+                        .and_then(|value| string_array_from_value(value).ok());
+                    shell_update_handle.set_extension_footer_lines(lines);
                 }
                 Some("setTitle") => {
                     if let Some(title) = value.get("title").and_then(Value::as_str) {
@@ -11120,6 +11358,69 @@ fn handle_interactive_extension_output_line(
                 Some("set_editor_text") => {
                     if let Some(text) = value.get("text").and_then(Value::as_str) {
                         shell_update_handle.set_input_value(text.to_owned(), Some(text.len()));
+                    }
+                }
+                Some("setEditorComponent") => {
+                    let lines = value
+                        .get("editorLines")
+                        .and_then(|value| string_array_from_value(value).ok());
+                    if let Some(lines) = lines {
+                        let remote_editor_handle = shell_update_handle.clone();
+                        let remote_editor_handle_for_callback = remote_editor_handle.clone();
+                        let extension_host_holder = extension_host_holder.clone();
+                        let status_handle = status_handle.clone();
+                        remote_editor_handle.show_remote_editor(
+                            lines,
+                            move |data, width, height| {
+                                let shell_update_handle = remote_editor_handle_for_callback.clone();
+                                let extension_host_holder = extension_host_holder.clone();
+                                let status_handle = status_handle.clone();
+                                tokio::spawn(async move {
+                                    let extension_host = extension_host_holder
+                                        .lock()
+                                        .expect("interactive extension host mutex poisoned")
+                                        .clone();
+                                    let Some(extension_host) = extension_host else {
+                                        return;
+                                    };
+                                    match extension_host
+                                        .request_json(
+                                            "editor_component_input",
+                                            json!({
+                                                "data": data,
+                                                "width": width,
+                                                "height": height,
+                                            }),
+                                        )
+                                        .await
+                                    {
+                                        Ok(response) => {
+                                            if let Some(lines) =
+                                                response.get("lines").and_then(|value| {
+                                                    string_array_from_value(value).ok()
+                                                })
+                                            {
+                                                shell_update_handle
+                                                    .update_remote_editor_lines(lines);
+                                            }
+                                            if let Some(text) =
+                                                response.get("text").and_then(Value::as_str)
+                                            {
+                                                shell_update_handle.set_input_value(
+                                                    text.to_owned(),
+                                                    Some(text.len()),
+                                                );
+                                            }
+                                        }
+                                        Err(error) => {
+                                            status_handle.set_message(format!("Error: {error}"));
+                                        }
+                                    }
+                                });
+                            },
+                        );
+                    } else {
+                        shell_update_handle.hide_remote_editor();
                     }
                 }
                 Some("input") => {
@@ -13563,9 +13864,9 @@ mod tests {
     use futures::stream;
     use pi_ai::{
         AiProvider, AssistantEventStream, FauxModelDefinition, FauxResponse, OAuthCredentials,
-        OAuthCredentialsFuture, OAuthLoginCallbacks, OAuthProvider,
-        RegisterFauxProviderOptions, register_faux_provider, register_oauth_provider,
-        register_provider, unregister_oauth_provider, unregister_provider,
+        OAuthCredentialsFuture, OAuthLoginCallbacks, OAuthProvider, RegisterFauxProviderOptions,
+        register_faux_provider, register_oauth_provider, register_provider,
+        unregister_oauth_provider, unregister_provider,
     };
     use pi_coding_agent_core::MemoryAuthStorage;
     use pi_events::{AssistantEvent, AssistantMessage, StopReason, Usage};
@@ -14436,7 +14737,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            user_messages.iter().any(|text| text == "hello [input hook]"),
+            user_messages
+                .iter()
+                .any(|text| text == "hello [input hook]"),
             "messages: {user_messages:?}"
         );
         assert!(
@@ -14536,6 +14839,198 @@ mod tests {
         assert_eq!(exit_code, 0, "output: {output}");
         assert!(output.contains("Choose action"), "output: {output}");
         assert!(output.contains("Selected: Block"), "output: {output}");
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn interactive_extension_header_footer_and_widgets_render_in_shell() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "interactive-extension-shell-ui-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "interactive-extension-shell-ui-faux-1".into(),
+                name: Some("Interactive Extension Shell UI Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("interactive-extension-shell-ui-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("interactive-extension-shell-ui-cwd");
+        let agent_dir = unique_temp_dir("interactive-extension-shell-ui-agent");
+        let extension_path = cwd.join("shell-ui-extension.ts");
+        fs::write(
+            &extension_path,
+            r#"export default function (pi) {
+	pi.on("session_start", async (_event, ctx) => {
+		ctx.ui.setHeader(() => ({
+			render() {
+				return ["Extension Header"]; 
+			},
+			invalidate() {},
+		}));
+		ctx.ui.setFooter(() => ({
+			render() {
+				return ["Extension Footer"]; 
+			},
+			invalidate() {},
+		}));
+		ctx.ui.setWidget("above", ["Above Widget"]);
+		ctx.ui.setWidget(
+			"below",
+			() => ({
+				render() {
+					return ["Below Widget"]; 
+				},
+				invalidate() {},
+			}),
+			{ placement: "belowEditor" },
+		);
+	});
+}
+"#,
+        )
+        .unwrap();
+
+        let terminal = LifecycleScriptedTerminal::new(vec![(
+            Duration::from_millis(250),
+            String::from("\x04"),
+        )]);
+        let inspector = terminal.clone();
+
+        let exit_code = timeout(
+            Duration::from_secs(10),
+            run_interactive_command_with_runtime(
+                RunCommandOptions {
+                    args: vec![
+                        String::from("--provider"),
+                        model.provider.clone(),
+                        String::from("--model"),
+                        model.id.clone(),
+                        String::from("--extension"),
+                        extension_path.to_string_lossy().into_owned(),
+                    ],
+                    stdin_is_tty: true,
+                    stdin_content: None,
+                    auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                        model.provider.as_str(),
+                        "token",
+                    )])),
+                    built_in_models: vec![model],
+                    models_json_path: None,
+                    agent_dir: Some(agent_dir),
+                    cwd,
+                    default_system_prompt: String::new(),
+                    version: String::from("0.1.0"),
+                    stream_options: StreamOptions::default(),
+                },
+                InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone()))),
+            ),
+        )
+        .await
+        .expect("interactive extension shell ui run should complete");
+
+        let output = strip_terminal_control_sequences(&inspector.output());
+        assert_eq!(exit_code, 0, "output: {output}");
+        assert!(output.contains("Extension Header"), "output: {output}");
+        assert!(output.contains("Above Widget"), "output: {output}");
+        assert!(output.contains("Below Widget"), "output: {output}");
+        assert!(output.contains("Extension Footer"), "output: {output}");
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn interactive_extension_custom_editor_component_submits_prompt() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "interactive-extension-custom-editor-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "interactive-extension-custom-editor-faux-1".into(),
+                name: Some("Interactive Extension Custom Editor Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        faux.set_responses(vec![FauxResponse::text("custom editor response")]);
+        let model = faux
+            .get_model(Some("interactive-extension-custom-editor-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("interactive-extension-custom-editor-cwd");
+        let agent_dir = unique_temp_dir("interactive-extension-custom-editor-agent");
+        let extension_path = cwd.join("custom-editor-extension.ts");
+        fs::write(
+            &extension_path,
+            r#"import { CustomEditor } from "@mariozechner/pi-coding-agent";
+
+class TaggedEditor extends CustomEditor {
+	render(width) {
+		const lines = super.render(width);
+		if (lines.length > 0) {
+			lines[0] = "Custom Editor Active";
+		}
+		return lines;
+	}
+}
+
+export default function (pi) {
+	pi.on("session_start", async (_event, ctx) => {
+		ctx.ui.setEditorComponent((tui, theme, keybindings) => new TaggedEditor(tui, theme, keybindings));
+	});
+}
+"#,
+        )
+        .unwrap();
+
+        let terminal = LifecycleScriptedTerminal::new(vec![
+            (
+                Duration::from_millis(150),
+                String::from("hello from editor"),
+            ),
+            (Duration::from_millis(20), String::from("\r")),
+            (Duration::from_millis(450), String::from("\x04")),
+        ]);
+        let inspector = terminal.clone();
+
+        let exit_code = timeout(
+            Duration::from_secs(10),
+            run_interactive_command_with_runtime(
+                RunCommandOptions {
+                    args: vec![
+                        String::from("--provider"),
+                        model.provider.clone(),
+                        String::from("--model"),
+                        model.id.clone(),
+                        String::from("--extension"),
+                        extension_path.to_string_lossy().into_owned(),
+                    ],
+                    stdin_is_tty: true,
+                    stdin_content: None,
+                    auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                        model.provider.as_str(),
+                        "token",
+                    )])),
+                    built_in_models: vec![model],
+                    models_json_path: None,
+                    agent_dir: Some(agent_dir),
+                    cwd,
+                    default_system_prompt: String::new(),
+                    version: String::from("0.1.0"),
+                    stream_options: StreamOptions::default(),
+                },
+                InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone()))),
+            ),
+        )
+        .await
+        .expect("interactive custom editor run should complete");
+
+        let output = strip_terminal_control_sequences(&inspector.output());
+        assert_eq!(exit_code, 0, "output: {output}");
+        assert!(output.contains("Custom Editor Active"), "output: {output}");
+        assert!(
+            output.contains("custom editor response"),
+            "output: {output}"
+        );
 
         faux.unregister();
     }

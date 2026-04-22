@@ -85,7 +85,9 @@ pub use startup_header::{
     BuiltInHeaderComponent, StartupHeaderComponent, StartupHeaderStyler,
     build_condensed_changelog_notice, build_startup_header_text,
 };
-pub use startup_shell::{ShellUpdateHandle, StartupShellComponent, StatusHandle};
+pub use startup_shell::{
+    ExtensionWidgetPlacement, ShellUpdateHandle, StartupShellComponent, StatusHandle,
+};
 pub use theme::{
     ColorMode, LoadThemesOptions, LoadThemesResult, Theme, ThemeExportColors, ThemeInfo,
     ThemeSelectionResult, ThemedKeyHintStyler, current_theme, current_theme_name,

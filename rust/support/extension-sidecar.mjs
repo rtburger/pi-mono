@@ -25,6 +25,45 @@ const runtimeState = {
 	contextUsage: undefined,
 };
 
+const DEFAULT_UI_VIEWPORT = { width: 80, height: 24 };
+const MAX_WIDGET_LINES = 10;
+const IDENTITY_SELECT_LIST_THEME = {
+	selectedPrefix: (text) => text,
+	selectedText: (text) => text,
+	description: (text) => text,
+	scrollInfo: (text) => text,
+	noMatch: (text) => text,
+};
+const IDENTITY_EDITOR_THEME = {
+	borderColor: (text) => text,
+	selectList: IDENTITY_SELECT_LIST_THEME,
+};
+const IDENTITY_THEME = {
+	fg(_name, text) {
+		return text;
+	},
+	bg(_name, text) {
+		return text;
+	},
+	bold(text) {
+		return text;
+	},
+	italic(text) {
+		return text;
+	},
+	underline(text) {
+		return text;
+	},
+	strikethrough(text) {
+		return text;
+	},
+};
+
+let headerComponentState = null;
+let footerComponentState = null;
+const widgetComponentStates = new Map();
+let editorComponentState = null;
+
 function send(value) {
 	process.stdout.write(`${JSON.stringify(value)}\n`);
 }
@@ -78,6 +117,18 @@ function fireAndTrackHostRequest(method, payload, event, onSuccess) {
 			onSuccess?.(data);
 			return data;
 		})
+		.catch((error) => {
+			emitRuntimeError(event, error instanceof Error ? error.message : String(error));
+			return undefined;
+		});
+	commandActionChain = tracked;
+	trackCommandAction(tracked);
+}
+
+function fireAndTrackAsyncAction(event, action) {
+	const previous = commandActionChain ?? Promise.resolve();
+	const tracked = previous
+		.then(action)
 		.catch((error) => {
 			emitRuntimeError(event, error instanceof Error ? error.message : String(error));
 			return undefined;
@@ -173,6 +224,173 @@ function createDialogPromise(opts, defaultValue, request, parseResponse) {
 	});
 }
 
+async function requestUiViewport() {
+	if (!appRequestsReady) {
+		return DEFAULT_UI_VIEWPORT;
+	}
+	try {
+		const viewport = await requestHost("get_ui_viewport");
+		return {
+			width: typeof viewport?.width === "number" ? viewport.width : DEFAULT_UI_VIEWPORT.width,
+			height: typeof viewport?.height === "number" ? viewport.height : DEFAULT_UI_VIEWPORT.height,
+		};
+	} catch {
+		return DEFAULT_UI_VIEWPORT;
+	}
+}
+
+async function requestFooterDataSnapshot() {
+	if (!appRequestsReady) {
+		return {
+			cwd: "",
+			gitBranch: undefined,
+			availableProviderCount: 0,
+			extensionStatuses: {},
+		};
+	}
+	try {
+		const snapshot = await requestHost("get_footer_data");
+		return {
+			cwd: typeof snapshot?.cwd === "string" ? snapshot.cwd : "",
+			gitBranch: typeof snapshot?.gitBranch === "string" ? snapshot.gitBranch : undefined,
+			availableProviderCount:
+				typeof snapshot?.availableProviderCount === "number" ? snapshot.availableProviderCount : 0,
+			extensionStatuses:
+				snapshot?.extensionStatuses && typeof snapshot.extensionStatuses === "object"
+					? { ...snapshot.extensionStatuses }
+					: {},
+		};
+	} catch {
+		return {
+			cwd: "",
+			gitBranch: undefined,
+			availableProviderCount: 0,
+			extensionStatuses: {},
+		};
+	}
+}
+
+function createFooterDataProxy(snapshot) {
+	return {
+		getGitBranch() {
+			return snapshot.gitBranch;
+		},
+		getExtensionStatuses() {
+			return { ...snapshot.extensionStatuses };
+		},
+		onBranchChange() {
+			return () => {};
+		},
+	};
+}
+
+function normalizeRenderedLines(lines, maxLines) {
+	if (!Array.isArray(lines)) {
+		return [];
+	}
+
+	const normalized = lines.map((line) => (typeof line === "string" ? line : String(line ?? "")));
+	if (typeof maxLines === "number" && normalized.length > maxLines) {
+		return [...normalized.slice(0, maxLines), "... (widget truncated)"];
+	}
+	return normalized;
+}
+
+function getEditorComponentText(component) {
+	if (!component || typeof component !== "object") {
+		return "";
+	}
+	if (typeof component.getExpandedText === "function") {
+		return component.getExpandedText();
+	}
+	if (typeof component.getText === "function") {
+		return component.getText();
+	}
+	return "";
+}
+
+async function renderComponentLines(component, viewport, maxLines) {
+	if (!component || typeof component.render !== "function") {
+		return [];
+	}
+	if (typeof component.setViewportSize === "function") {
+		component.setViewportSize(viewport.width, viewport.height);
+	}
+	return normalizeRenderedLines(component.render(viewport.width), maxLines);
+}
+
+function disposeComponentState(state) {
+	try {
+		state?.component?.dispose?.();
+	} catch {
+		// Ignore disposal errors from extension-owned components.
+	}
+}
+
+function emitUiRequest(method, payload = {}) {
+	send({
+		type: "extension_ui_request",
+		id: nextUiId(),
+		method,
+		...payload,
+	});
+}
+
+function createFakeTui(onRenderRequested, viewport) {
+	return {
+		requestRender() {
+			onRenderRequested?.();
+		},
+		terminal: {
+			rows: viewport.height,
+			columns: viewport.width,
+		},
+	};
+}
+
+function matchesResolvedKeybinding(data, keybinding) {
+	const normalized = typeof keybinding === "string" ? keybinding.toLowerCase() : "";
+	if (!normalized) {
+		return false;
+	}
+
+	if (normalized === "escape") {
+		return data === "\x1b";
+	}
+	if (normalized === "enter") {
+		return data === "\r" || data === "\n";
+	}
+	if (normalized === "tab") {
+		return data === "\t";
+	}
+	if (normalized === "shift+tab") {
+		return data === "\x1b[Z";
+	}
+	if (normalized.startsWith("ctrl+") && normalized.length === 6) {
+		const character = normalized.slice(5);
+		if (character >= "a" && character <= "z") {
+			return data === String.fromCharCode(character.charCodeAt(0) - 96);
+		}
+	}
+	if (normalized.startsWith("alt+") && normalized.length === 5) {
+		return data === `\x1b${normalized.slice(4)}`;
+	}
+	if (normalized.length === 1) {
+		return data === normalized;
+	}
+	return false;
+}
+
+function createKeybindingsProxy() {
+	return {
+		matches(data, action) {
+			const configured = resolvedKeybindings?.[action];
+			const keys = Array.isArray(configured) ? configured : configured ? [configured] : [];
+			return keys.some((keybinding) => matchesResolvedKeybinding(data, keybinding));
+		},
+	};
+}
+
 function createUiContext() {
 	return {
 		select(title, options, opts) {
@@ -215,22 +433,13 @@ function createUiContext() {
 			);
 		},
 		notify(message, type) {
-			send({
-				type: "extension_ui_request",
-				id: nextUiId(),
-				method: "notify",
-				message,
-				notifyType: type,
-			});
+			emitUiRequest("notify", { message, notifyType: type });
 		},
 		onTerminalInput() {
 			return () => {};
 		},
 		setStatus(key, text) {
-			send({
-				type: "extension_ui_request",
-				id: nextUiId(),
-				method: "setStatus",
+			emitUiRequest("setStatus", {
 				statusKey: key,
 				statusText: text,
 			});
@@ -238,21 +447,111 @@ function createUiContext() {
 		setWorkingMessage() {},
 		setHiddenThinkingLabel() {},
 		setWidget(key, content, options) {
-			if (content === undefined || Array.isArray(content)) {
-				send({
-					type: "extension_ui_request",
-					id: nextUiId(),
-					method: "setWidget",
+			disposeComponentState(widgetComponentStates.get(key));
+			widgetComponentStates.delete(key);
+			const placement = options?.placement;
+
+			if (content === undefined) {
+				emitUiRequest("setWidget", {
 					widgetKey: key,
-					widgetLines: content,
-					widgetPlacement: options?.placement,
+					widgetPlacement: placement,
 				});
+				return;
 			}
+
+			if (Array.isArray(content)) {
+				emitUiRequest("setWidget", {
+					widgetKey: key,
+					widgetLines: normalizeRenderedLines(content, MAX_WIDGET_LINES),
+					widgetPlacement: placement,
+				});
+				return;
+			}
+
+			fireAndTrackAsyncAction("set_widget", async () => {
+				const viewport = await requestUiViewport();
+				const state = { component: undefined, placement };
+				const fakeTui = createFakeTui(() => {
+					void (async () => {
+						if (widgetComponentStates.get(key) !== state) {
+							return;
+						}
+						const nextViewport = await requestUiViewport();
+						const widgetLines = await renderComponentLines(state.component, nextViewport, MAX_WIDGET_LINES);
+						emitUiRequest("setWidget", {
+							widgetKey: key,
+							widgetLines,
+							widgetPlacement: placement,
+						});
+					})();
+				}, viewport);
+				state.component = await content(fakeTui, IDENTITY_THEME);
+				widgetComponentStates.set(key, state);
+				const widgetLines = await renderComponentLines(state.component, viewport, MAX_WIDGET_LINES);
+				emitUiRequest("setWidget", {
+					widgetKey: key,
+					widgetLines,
+					widgetPlacement: placement,
+				});
+			});
 		},
-		setFooter() {},
-		setHeader() {},
+		setFooter(factory) {
+			disposeComponentState(footerComponentState);
+			footerComponentState = null;
+			if (!factory) {
+				emitUiRequest("setFooter");
+				return;
+			}
+
+			fireAndTrackAsyncAction("set_footer", async () => {
+				const viewport = await requestUiViewport();
+				const footerData = createFooterDataProxy(await requestFooterDataSnapshot());
+				const state = { component: undefined };
+				const fakeTui = createFakeTui(() => {
+					void (async () => {
+						if (footerComponentState !== state) {
+							return;
+						}
+						const nextViewport = await requestUiViewport();
+						const footerLines = await renderComponentLines(state.component, nextViewport);
+						emitUiRequest("setFooter", { footerLines });
+					})();
+				}, viewport);
+				state.component = await factory(fakeTui, IDENTITY_THEME, footerData);
+				footerComponentState = state;
+				const footerLines = await renderComponentLines(state.component, viewport);
+				emitUiRequest("setFooter", { footerLines });
+			});
+		},
+		setHeader(factory) {
+			disposeComponentState(headerComponentState);
+			headerComponentState = null;
+			if (!factory) {
+				emitUiRequest("setHeader");
+				return;
+			}
+
+			fireAndTrackAsyncAction("set_header", async () => {
+				const viewport = await requestUiViewport();
+				const state = { component: undefined };
+				const fakeTui = createFakeTui(() => {
+					void (async () => {
+						if (headerComponentState !== state) {
+							return;
+						}
+						const nextViewport = await requestUiViewport();
+						const headerLines = await renderComponentLines(state.component, nextViewport);
+						emitUiRequest("setHeader", { headerLines });
+					})();
+				}, viewport);
+				state.component = await factory(fakeTui, IDENTITY_THEME);
+				headerComponentState = state;
+				const headerLines = await renderComponentLines(state.component, viewport);
+				emitUiRequest("setHeader", { headerLines });
+			});
+		},
 		setTitle(title) {
-			send({ type: "extension_ui_request", id: nextUiId(), method: "setTitle", title });
+			emitUiRequest("setTitle", { title });
 		},
 		async custom() {
 			return undefined;
@@ -261,10 +560,18 @@ function createUiContext() {
 			this.setEditorText(text);
 		},
 		setEditorText(text) {
-			send({ type: "extension_ui_request", id: nextUiId(), method: "set_editor_text", text });
+			emitUiRequest("set_editor_text", { text });
+			if (editorComponentState?.component && typeof editorComponentState.component.setText === "function") {
+				fireAndTrackAsyncAction("set_editor_text", async () => {
+					editorComponentState.component.setText(text);
+					const viewport = await requestUiViewport();
+					const editorLines = await renderComponentLines(editorComponentState.component, viewport);
+					emitUiRequest("setEditorComponent", { editorLines });
+				});
+			}
 		},
 		getEditorText() {
-			return "";
+			return getEditorComponentText(editorComponentState?.component);
 		},
 		editor(title, prefill) {
 			return createDialogPromise(
@@ -279,9 +586,65 @@ function createUiContext() {
 				},
 			);
 		},
-		setEditorComponent() {},
+		setEditorComponent(factory) {
+			const previousEditor = editorComponentState;
+			if (!factory) {
+				const currentText = getEditorComponentText(previousEditor?.component);
+				disposeComponentState(previousEditor);
+				editorComponentState = null;
+				if (currentText) {
+					emitUiRequest("set_editor_text", { text: currentText });
+				}
+				emitUiRequest("setEditorComponent");
+				return;
+			}
+
+			fireAndTrackAsyncAction("set_editor_component", async () => {
+				disposeComponentState(previousEditor);
+				const viewport = await requestUiViewport();
+				let currentText = getEditorComponentText(previousEditor?.component);
+				if (!currentText && appRequestsReady) {
+					try {
+						const editorText = await requestHost("get_editor_text");
+						if (typeof editorText === "string") {
+							currentText = editorText;
+						}
+					} catch {
+						// Ignore host lookup errors and fall back to an empty editor.
+					}
+				}
+				const state = { component: undefined, submittedText: undefined };
+				const fakeTui = createFakeTui(() => {
+					void (async () => {
+						if (editorComponentState !== state) {
+							return;
+						}
+						const nextViewport = await requestUiViewport();
+						const editorLines = await renderComponentLines(state.component, nextViewport);
+						emitUiRequest("setEditorComponent", { editorLines });
+					})();
+				}, viewport);
+				state.component = await factory(fakeTui, IDENTITY_EDITOR_THEME, createKeybindingsProxy());
+				if (typeof state.component.setText === "function") {
+					state.component.setText(currentText);
+				}
+				state.component.onEscape = () => {
+					fireAndTrackHostRequest("ui_editor_action", { action: "interrupt" }, "ui_editor_action");
+				};
+				state.component.onCtrlD = () => {
+					fireAndTrackHostRequest("ui_editor_action", { action: "exit" }, "ui_editor_action");
+				};
+				state.component.onSubmit = (value) => {
+					state.submittedText = value;
+					fireAndTrackHostRequest("ui_editor_submit", { text: value }, "ui_editor_submit");
+				};
+				editorComponentState = state;
+				const editorLines = await renderComponentLines(state.component, viewport);
+				emitUiRequest("setEditorComponent", { editorLines });
+			});
+		},
 		get theme() {
-			return { fg(_name, text) { return text; }, bg(_name, text) { return text; } };
+			return IDENTITY_THEME;
 		},
 		getAllThemes() {
 			return [];
@@ -1072,6 +1435,35 @@ async function handleBeforeProviderRequest(message) {
 	}
 }
 
+async function handleEditorComponentInput(message) {
+	if (!editorComponentState?.component) {
+		reply(message.id, { lines: [], text: "" });
+		return;
+	}
+
+	const viewport = {
+		width: typeof message.width === "number" ? message.width : DEFAULT_UI_VIEWPORT.width,
+		height: typeof message.height === "number" ? message.height : DEFAULT_UI_VIEWPORT.height,
+	};
+	if (typeof editorComponentState.component.setViewportSize === "function") {
+		editorComponentState.component.setViewportSize(viewport.width, viewport.height);
+	}
+	if (typeof editorComponentState.component.handleInput === "function") {
+		editorComponentState.submittedText = undefined;
+		editorComponentState.component.handleInput(typeof message.data === "string" ? message.data : "");
+		if (editorComponentState.submittedText !== undefined && typeof editorComponentState.component.setText === "function") {
+			editorComponentState.component.setText("");
+			editorComponentState.submittedText = undefined;
+		}
+	}
+
+	const lines = await renderComponentLines(editorComponentState.component, viewport);
+	reply(message.id, {
+		lines,
+		text: getEditorComponentText(editorComponentState.component),
+	});
+}
+
 async function handleUiResponse(message) {
 	const pending = pendingUiRequests.get(message.response?.id);
 	if (pending) {
@@ -1167,6 +1559,9 @@ async function handleMessage(rawLine) {
 				break;
 			case "before_provider_request":
 				await handleBeforeProviderRequest(message);
+				break;
+			case "editor_component_input":
+				await handleEditorComponentInput(message);
 				break;
 			case "ui_response":
 				await handleUiResponse(message);

@@ -628,6 +628,10 @@ impl RpcExtensionHost {
         .await
     }
 
+    pub async fn request_json(&self, kind: &str, payload: Value) -> Result<Value, String> {
+        self.request(kind, payload).await
+    }
+
     pub async fn update_state(&self, state: Value) -> Result<(), String> {
         let _ = self
             .request("update_state", json!({ "state": state }))

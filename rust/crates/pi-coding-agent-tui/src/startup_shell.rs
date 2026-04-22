@@ -25,6 +25,7 @@ use std::{
 
 type ActionCallback = Box<dyn FnMut() + Send + 'static>;
 type ValueCallback = Box<dyn FnMut(String) + Send + 'static>;
+type RemoteEditorInputCallback = Box<dyn FnMut(String, usize, usize) + Send + 'static>;
 type RegisteredActionCallback = Box<dyn FnMut(&mut StartupShellComponent) + Send + 'static>;
 type ShortcutCallback = Box<dyn FnMut(String) -> bool + Send + 'static>;
 type SubmitCallback = Box<dyn FnMut(&mut StartupShellComponent, String) + Send + 'static>;
@@ -32,6 +33,89 @@ type ModelSelectorSelectCallback = Box<dyn FnMut(Model) + Send + 'static>;
 
 const CLEAR_EXIT_WINDOW: Duration = Duration::from_millis(500);
 const PROMPT_EXTENSION_EDITOR_TITLE: &str = "Edit message";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtensionWidgetPlacement {
+    AboveEditor,
+    BelowEditor,
+}
+
+struct RemoteEditorState {
+    lines: Vec<String>,
+    on_input: RemoteEditorInputCallback,
+    focused: bool,
+    viewport_size: Option<(usize, usize)>,
+}
+
+impl RemoteEditorState {
+    fn new(lines: Vec<String>, on_input: RemoteEditorInputCallback) -> Self {
+        Self {
+            lines,
+            on_input,
+            focused: false,
+            viewport_size: None,
+        }
+    }
+
+    fn render(&self, width: usize) -> Vec<String> {
+        render_static_lines(width, &self.lines)
+    }
+
+    fn handle_input(&mut self, data: &str) {
+        let (width, height) = self.viewport_size.unwrap_or((80, 24));
+        (self.on_input)(data.to_owned(), width, height);
+    }
+
+    fn set_lines(&mut self, lines: Vec<String>) {
+        self.lines = lines;
+    }
+
+    fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    fn set_viewport_size(&mut self, width: usize, height: usize) {
+        self.viewport_size = Some((width, height));
+    }
+}
+
+fn render_static_lines(width: usize, lines: &[String]) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+
+    lines
+        .iter()
+        .map(|line| truncate_to_width(line, width, "...", false))
+        .collect()
+}
+
+fn upsert_extension_widget_lines(
+    widgets: &mut Vec<(String, Vec<String>)>,
+    key: String,
+    lines: Option<Vec<String>>,
+) {
+    if let Some(index) = widgets.iter().position(|(candidate, _)| candidate == &key) {
+        if let Some(lines) = lines {
+            widgets[index] = (key, lines);
+        } else {
+            widgets.remove(index);
+        }
+        return;
+    }
+
+    if let Some(lines) = lines {
+        widgets.push((key, lines));
+    }
+}
+
+fn render_extension_widgets(width: usize, widgets: &[(String, Vec<String>)]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (_, widget_lines) in widgets {
+        lines.extend(render_static_lines(width, widget_lines));
+    }
+    lines
+}
 
 #[derive(Clone)]
 pub struct StatusHandle {
@@ -151,6 +235,25 @@ enum ShellUpdate {
         on_submit: ValueCallback,
         on_cancel: ActionCallback,
     },
+    SetExtensionHeaderLines {
+        lines: Option<Vec<String>>,
+    },
+    SetExtensionFooterLines {
+        lines: Option<Vec<String>>,
+    },
+    SetExtensionWidgetLines {
+        key: String,
+        placement: ExtensionWidgetPlacement,
+        lines: Option<Vec<String>>,
+    },
+    ShowRemoteEditor {
+        lines: Vec<String>,
+        on_input: RemoteEditorInputCallback,
+    },
+    UpdateRemoteEditorLines {
+        lines: Vec<String>,
+    },
+    HideRemoteEditor,
     SetInputValue {
         value: String,
         cursor: Option<usize>,
@@ -180,16 +283,19 @@ enum ModelSelectorEvent {
 #[derive(Clone)]
 pub struct ShellUpdateHandle {
     pending_updates: Arc<Mutex<VecDeque<ShellUpdate>>>,
+    input_text: Arc<Mutex<String>>,
     render_handle: Option<RenderHandle>,
 }
 
 impl ShellUpdateHandle {
     fn new(
         pending_updates: Arc<Mutex<VecDeque<ShellUpdate>>>,
+        input_text: Arc<Mutex<String>>,
         render_handle: Option<RenderHandle>,
     ) -> Self {
         Self {
             pending_updates,
+            input_text,
             render_handle,
         }
     }
@@ -332,11 +438,65 @@ impl ShellUpdateHandle {
         });
     }
 
-    pub fn set_input_value(&self, value: impl Into<String>, cursor: Option<usize>) {
-        self.push(ShellUpdate::SetInputValue {
-            value: value.into(),
-            cursor,
+    pub fn set_extension_header_lines(&self, lines: Option<Vec<String>>) {
+        self.push(ShellUpdate::SetExtensionHeaderLines { lines });
+    }
+
+    pub fn set_extension_footer_lines(&self, lines: Option<Vec<String>>) {
+        self.push(ShellUpdate::SetExtensionFooterLines { lines });
+    }
+
+    pub fn set_extension_widget_lines(
+        &self,
+        key: impl Into<String>,
+        placement: ExtensionWidgetPlacement,
+        lines: Option<Vec<String>>,
+    ) {
+        self.push(ShellUpdate::SetExtensionWidgetLines {
+            key: key.into(),
+            placement,
+            lines,
         });
+    }
+
+    pub fn show_remote_editor<F>(&self, lines: Vec<String>, on_input: F)
+    where
+        F: FnMut(String, usize, usize) + Send + 'static,
+    {
+        self.push(ShellUpdate::ShowRemoteEditor {
+            lines,
+            on_input: Box::new(on_input),
+        });
+    }
+
+    pub fn update_remote_editor_lines(&self, lines: Vec<String>) {
+        self.push(ShellUpdate::UpdateRemoteEditorLines { lines });
+    }
+
+    pub fn hide_remote_editor(&self) {
+        self.push(ShellUpdate::HideRemoteEditor);
+    }
+
+    pub fn set_input_value(&self, value: impl Into<String>, cursor: Option<usize>) {
+        let value = value.into();
+        *self
+            .input_text
+            .lock()
+            .expect("shell input text mutex poisoned") = value.clone();
+        self.push(ShellUpdate::SetInputValue { value, cursor });
+    }
+
+    pub fn current_input_value(&self) -> String {
+        self.input_text
+            .lock()
+            .expect("shell input text mutex poisoned")
+            .clone()
+    }
+
+    pub fn request_render(&self) {
+        if let Some(render_handle) = &self.render_handle {
+            render_handle.request_render();
+        }
     }
 }
 
@@ -345,6 +505,7 @@ pub struct StartupShellComponent {
     transcript: RefCell<TranscriptComponent>,
     pending_messages: RefCell<PendingMessagesComponent>,
     input: RefCell<CustomEditor>,
+    input_text: Arc<Mutex<String>>,
     footer: FooterComponent,
     keybindings: KeybindingsManager,
     status_message: Arc<Mutex<Option<String>>>,
@@ -381,6 +542,11 @@ pub struct StartupShellComponent {
     extension_editor_command: Option<String>,
     extension_editor_runner: Option<Arc<dyn ExternalEditorCommandRunner>>,
     extension_editor_host: Option<Arc<dyn ExternalEditorHost>>,
+    extension_header_lines: RefCell<Option<Vec<String>>>,
+    extension_footer_lines: RefCell<Option<Vec<String>>>,
+    extension_widgets_above: RefCell<Vec<(String, Vec<String>)>>,
+    extension_widgets_below: RefCell<Vec<(String, Vec<String>)>>,
+    remote_editor: RefCell<Option<RemoteEditorState>>,
     model_selector: RefCell<Option<ModelSelectorComponent>>,
     model_selector_events: Arc<Mutex<VecDeque<ModelSelectorEvent>>>,
     model_selector_on_select: RefCell<Option<ModelSelectorSelectCallback>>,
@@ -431,6 +597,15 @@ impl StartupShellComponent {
         changelog_markdown: Option<&str>,
         show_condensed_changelog: bool,
     ) -> Self {
+        let input_text = Arc::new(Mutex::new(String::new()));
+        let mut input = CustomEditor::new(keybindings);
+        {
+            let input_text = Arc::clone(&input_text);
+            input.set_on_change(move |text| {
+                *input_text.lock().expect("shell input text mutex poisoned") = text;
+            });
+        }
+
         Self {
             header: BuiltInHeaderComponent::new(
                 app_name,
@@ -443,7 +618,8 @@ impl StartupShellComponent {
             ),
             transcript: RefCell::new(TranscriptComponent::new()),
             pending_messages: RefCell::new(PendingMessagesComponent::new(keybindings)),
-            input: RefCell::new(CustomEditor::new(keybindings)),
+            input: RefCell::new(input),
+            input_text,
             footer: FooterComponent::default(),
             keybindings: keybindings.clone(),
             status_message: Arc::new(Mutex::new(None)),
@@ -480,6 +656,11 @@ impl StartupShellComponent {
             extension_editor_command: None,
             extension_editor_runner: None,
             extension_editor_host: None,
+            extension_header_lines: RefCell::new(None),
+            extension_footer_lines: RefCell::new(None),
+            extension_widgets_above: RefCell::new(Vec::new()),
+            extension_widgets_below: RefCell::new(Vec::new()),
+            remote_editor: RefCell::new(None),
             model_selector: RefCell::new(None),
             model_selector_events: Arc::new(Mutex::new(VecDeque::new())),
             model_selector_on_select: RefCell::new(None),
@@ -502,16 +683,45 @@ impl StartupShellComponent {
         if let Some(extension_input) = self.extension_input.borrow().as_ref() {
             return extension_input.render(width).len();
         }
+        if let Some(remote_editor) = self.remote_editor.borrow().as_ref() {
+            return remote_editor.render(width).len();
+        }
         self.input.borrow().render(width).len()
+    }
+
+    fn header_lines_for_width(&self, width: usize) -> Vec<String> {
+        self.extension_header_lines
+            .borrow()
+            .as_ref()
+            .map(|lines| render_static_lines(width, lines))
+            .unwrap_or_else(|| self.header.render(width))
+    }
+
+    fn footer_lines_for_width(&self, width: usize) -> Vec<String> {
+        self.extension_footer_lines
+            .borrow()
+            .as_ref()
+            .map(|lines| render_static_lines(width, lines))
+            .unwrap_or_else(|| self.footer.render(width))
+    }
+
+    fn widget_lines_above_for_width(&self, width: usize) -> Vec<String> {
+        render_extension_widgets(width, &self.extension_widgets_above.borrow())
+    }
+
+    fn widget_lines_below_for_width(&self, width: usize) -> Vec<String> {
+        render_extension_widgets(width, &self.extension_widgets_below.borrow())
     }
 
     fn transcript_viewport_height_for_width(&self, width: usize) -> Option<usize> {
         let (_, total_height) = self.viewport_size.get()?;
-        let occupied_height = self.header.render(width).len()
+        let occupied_height = self.header_lines_for_width(width).len()
             + self.pending_messages.borrow().render(width).len()
             + self.render_status(width).len()
+            + self.widget_lines_above_for_width(width).len()
             + self.active_prompt_component_height_for_width(width)
-            + self.footer.render(width).len();
+            + self.widget_lines_below_for_width(width).len()
+            + self.footer_lines_for_width(width).len();
         Some(total_height.saturating_sub(occupied_height))
     }
 
@@ -602,6 +812,7 @@ impl StartupShellComponent {
             && self.extension_input.borrow().is_none()
             && self.extension_selector.borrow().is_none()
             && self.extension_editor.borrow().is_none()
+            && self.remote_editor.borrow().is_none()
             && self.model_selector.borrow().is_none()
     }
 
@@ -880,6 +1091,46 @@ impl StartupShellComponent {
                     move || on_cancel(),
                 );
             }
+            ShellUpdate::SetExtensionHeaderLines { lines } => {
+                *self.extension_header_lines.borrow_mut() = lines;
+            }
+            ShellUpdate::SetExtensionFooterLines { lines } => {
+                *self.extension_footer_lines.borrow_mut() = lines;
+            }
+            ShellUpdate::SetExtensionWidgetLines {
+                key,
+                placement,
+                lines,
+            } => match placement {
+                ExtensionWidgetPlacement::AboveEditor => {
+                    let mut widgets = self.extension_widgets_above.borrow_mut();
+                    upsert_extension_widget_lines(&mut widgets, key, lines);
+                }
+                ExtensionWidgetPlacement::BelowEditor => {
+                    let mut widgets = self.extension_widgets_below.borrow_mut();
+                    upsert_extension_widget_lines(&mut widgets, key, lines);
+                }
+            },
+            ShellUpdate::ShowRemoteEditor { lines, on_input } => {
+                let mut remote_editor = RemoteEditorState::new(lines, on_input);
+                if let Some((width, height)) = self.viewport_size.get() {
+                    remote_editor.set_viewport_size(width, height);
+                }
+                remote_editor.set_focused(self.focused);
+                self.input.borrow_mut().set_focused(false);
+                *self.remote_editor.borrow_mut() = Some(remote_editor);
+            }
+            ShellUpdate::UpdateRemoteEditorLines { lines } => {
+                if let Some(remote_editor) = self.remote_editor.borrow_mut().as_mut() {
+                    remote_editor.set_lines(lines);
+                }
+            }
+            ShellUpdate::HideRemoteEditor => {
+                *self.remote_editor.borrow_mut() = None;
+                self.input
+                    .borrow_mut()
+                    .set_focused(self.should_focus_input());
+            }
             ShellUpdate::SetInputValue { value, cursor } => {
                 self.set_input_value(value.clone());
                 self.set_input_cursor(cursor.unwrap_or(value.len()));
@@ -1054,12 +1305,21 @@ impl StartupShellComponent {
         self.input.borrow().get_text()
     }
 
+    fn sync_input_text(&self) {
+        *self
+            .input_text
+            .lock()
+            .expect("shell input text mutex poisoned") = self.input.borrow().get_text();
+    }
+
     pub fn set_input_value(&self, value: impl Into<String>) {
         self.input.borrow_mut().set_text(value.into());
+        self.sync_input_text();
     }
 
     pub fn insert_input_text_at_cursor(&self, text: &str) {
         self.input.borrow_mut().insert_text_at_cursor(text);
+        self.sync_input_text();
     }
 
     pub fn set_input_cursor(&self, cursor: usize) {
@@ -1071,6 +1331,7 @@ impl StartupShellComponent {
 
     pub fn clear_input(&self) {
         self.input.borrow_mut().set_text("");
+        self.sync_input_text();
     }
 
     pub fn set_input_padding_x(&self, padding_x: usize) {
@@ -1537,7 +1798,11 @@ impl StartupShellComponent {
         &self,
         render_handle: RenderHandle,
     ) -> ShellUpdateHandle {
-        ShellUpdateHandle::new(Arc::clone(&self.pending_updates), Some(render_handle))
+        ShellUpdateHandle::new(
+            Arc::clone(&self.pending_updates),
+            Arc::clone(&self.input_text),
+            Some(render_handle),
+        )
     }
 
     pub fn set_footer_state(&mut self, state: FooterState) {
@@ -1588,8 +1853,9 @@ impl StartupShellComponent {
 impl Component for StartupShellComponent {
     fn render(&self, width: usize) -> Vec<String> {
         self.drain_pending_updates();
-        let header_lines = self.header.render(width);
+        let header_lines = self.header_lines_for_width(width);
         let pending_lines = self.pending_messages.borrow().render(width);
+        let widget_lines_above = self.widget_lines_above_for_width(width);
         let input_lines = if let Some(model_selector) = self.model_selector.borrow().as_ref() {
             model_selector.render(width)
         } else if let Some(extension_editor) = self.extension_editor.borrow().as_ref() {
@@ -1598,10 +1864,13 @@ impl Component for StartupShellComponent {
             extension_selector.render(width)
         } else if let Some(extension_input) = self.extension_input.borrow().as_ref() {
             extension_input.render(width)
+        } else if let Some(remote_editor) = self.remote_editor.borrow().as_ref() {
+            remote_editor.render(width)
         } else {
             self.input.borrow().render(width)
         };
-        let footer_lines = self.footer.render(width);
+        let widget_lines_below = self.widget_lines_below_for_width(width);
+        let footer_lines = self.footer_lines_for_width(width);
         let status_lines = self.render_status(width);
         let transcript_height = self.transcript_viewport_height_for_width(width);
         self.transcript
@@ -1613,7 +1882,9 @@ impl Component for StartupShellComponent {
         lines.extend(transcript_lines);
         lines.extend(pending_lines);
         lines.extend(status_lines);
+        lines.extend(widget_lines_above);
         lines.extend(input_lines);
+        lines.extend(widget_lines_below);
         lines.extend(footer_lines);
         lines
     }
@@ -1667,6 +1938,13 @@ impl Component for StartupShellComponent {
                 extension_input.handle_input(data);
             }
             self.drain_extension_input_events();
+            return;
+        }
+
+        if self.remote_editor.borrow().is_some() {
+            if let Some(remote_editor) = self.remote_editor.borrow_mut().as_mut() {
+                remote_editor.handle_input(data);
+            }
             return;
         }
 
@@ -1795,6 +2073,9 @@ impl Component for StartupShellComponent {
         if let Some(extension_input) = self.extension_input.borrow_mut().as_mut() {
             extension_input.set_focused(focused);
         }
+        if let Some(remote_editor) = self.remote_editor.borrow_mut().as_mut() {
+            remote_editor.set_focused(focused);
+        }
     }
 
     fn set_viewport_size(&self, width: usize, height: usize) {
@@ -1816,6 +2097,9 @@ impl Component for StartupShellComponent {
         }
         if let Some(extension_input) = self.extension_input.borrow().as_ref() {
             extension_input.set_viewport_size(width, height);
+        }
+        if let Some(remote_editor) = self.remote_editor.borrow_mut().as_mut() {
+            remote_editor.set_viewport_size(width, height);
         }
         self.footer.set_viewport_size(width, height);
     }
