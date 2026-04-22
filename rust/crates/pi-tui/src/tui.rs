@@ -376,7 +376,7 @@ pub struct Tui<T: Terminal> {
     overlays: Vec<OverlayEntry>,
     input_listeners: Vec<InputListenerEntry>,
     pending_terminal_events: Arc<Mutex<PendingTerminalEvents>>,
-    on_debug: Option<Box<dyn FnMut() + Send>>,
+    on_debug: Option<Box<dyn FnMut()>>,
     focus_order_counter: u64,
     focused_target: Option<FocusTarget>,
     started: bool,
@@ -485,7 +485,7 @@ impl<T: Terminal> Tui<T> {
 
     pub fn set_debug_handler<F>(&mut self, handler: F)
     where
-        F: FnMut() + Send + 'static,
+        F: FnMut() + 'static,
     {
         self.on_debug = Some(Box::new(handler));
     }

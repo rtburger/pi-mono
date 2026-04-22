@@ -982,6 +982,71 @@ impl Component for SharedLoginDialog {
     }
 }
 
+#[derive(Clone)]
+struct SharedStartupShell {
+    inner: Arc<Mutex<StartupShellComponent>>,
+}
+
+impl SharedStartupShell {
+    fn new(shell: StartupShellComponent) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(shell)),
+        }
+    }
+
+    fn with_mut<T>(&self, callback: impl FnOnce(&mut StartupShellComponent) -> T) -> T {
+        let mut shell = self
+            .inner
+            .lock()
+            .expect("shared startup shell mutex poisoned");
+        callback(&mut shell)
+    }
+}
+
+impl Component for SharedStartupShell {
+    fn render(&self, width: usize) -> Vec<String> {
+        self.inner
+            .lock()
+            .expect("shared startup shell mutex poisoned")
+            .render(width)
+    }
+
+    fn invalidate(&mut self) {
+        self.inner
+            .lock()
+            .expect("shared startup shell mutex poisoned")
+            .invalidate();
+    }
+
+    fn handle_input(&mut self, data: &str) {
+        self.inner
+            .lock()
+            .expect("shared startup shell mutex poisoned")
+            .handle_input(data);
+    }
+
+    fn wants_key_release(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("shared startup shell mutex poisoned")
+            .wants_key_release()
+    }
+
+    fn set_focused(&mut self, focused: bool) {
+        self.inner
+            .lock()
+            .expect("shared startup shell mutex poisoned")
+            .set_focused(focused);
+    }
+
+    fn set_viewport_size(&self, width: usize, height: usize) {
+        self.inner
+            .lock()
+            .expect("shared startup shell mutex poisoned")
+            .set_viewport_size(width, height);
+    }
+}
+
 enum OAuthLoginDialogEvent {
     ShowAuth {
         url: String,
@@ -2353,6 +2418,10 @@ async fn run_interactive_iteration(
         &footer_state_handle,
         shared_runtime_settings.clone(),
     );
+    let debug_slash_command_context = slash_command_context.clone();
+    let debug_status_handle = status_handle.clone();
+    let debug_render_handle = render_handle.clone();
+    let debug_core = core.clone();
     install_interactive_submit_handler(
         &mut shell,
         _session.clone(),
@@ -2368,7 +2437,24 @@ async fn run_interactive_iteration(
         resources.clone(),
         render_handle.clone(),
     );
-    let shell_id = tui.add_child(Box::new(shell));
+    let shared_shell = SharedStartupShell::new(shell);
+    let debug_shell = shared_shell.clone();
+    tui.set_debug_handler(move || {
+        debug_shell.with_mut(|shell| {
+            match write_interactive_debug_log(shell, &debug_core, &debug_slash_command_context) {
+                Ok(path) => {
+                    append_transcript_custom_message(
+                        shell,
+                        "debug",
+                        format!("Debug log written\n{}", path.display()),
+                    );
+                    debug_render_handle.request_render();
+                }
+                Err(error) => debug_status_handle.set_message(format!("Error: {error}")),
+            }
+        });
+    });
+    let shell_id = tui.add_child(Box::new(shared_shell));
     let _ = tui.set_focus_child(shell_id);
     let _ = tui.terminal_mut().set_title("pi");
 
@@ -15825,6 +15911,74 @@ export default function (pi) {
         let rendered = strip_terminal_control_sequences(&shell.render(120).join("\n"));
         assert!(rendered.contains("Debug log written"), "output: {rendered}");
         assert!(rendered.contains("ARMIN SAYS HI"), "output: {rendered}");
+
+        faux.unregister();
+    }
+
+    #[tokio::test]
+    async fn interactive_debug_hotkey_writes_log_and_transcript_message() {
+        let faux = register_faux_provider(RegisterFauxProviderOptions {
+            provider: "interactive-debug-hotkey-faux".into(),
+            models: vec![FauxModelDefinition {
+                id: "interactive-debug-hotkey-faux-1".into(),
+                name: Some("Interactive Debug Hotkey Faux".into()),
+                reasoning: false,
+            }],
+            ..RegisterFauxProviderOptions::default()
+        });
+        let model = faux
+            .get_model(Some("interactive-debug-hotkey-faux-1"))
+            .expect("expected faux model");
+        let cwd = unique_temp_dir("interactive-debug-hotkey-cwd");
+        let terminal = LifecycleScriptedTerminal::new(vec![
+            (Duration::from_millis(50), String::from("\x1b[27;6;100~")),
+            (Duration::from_millis(100), String::from("\x04")),
+        ]);
+        let inspector = terminal.clone();
+
+        let exit_code = timeout(
+            Duration::from_secs(3),
+            run_interactive_command_with_runtime(
+                RunCommandOptions {
+                    args: vec![
+                        String::from("--provider"),
+                        model.provider.clone(),
+                        String::from("--model"),
+                        model.id.clone(),
+                    ],
+                    stdin_is_tty: true,
+                    stdin_content: None,
+                    auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+                        model.provider.as_str(),
+                        "token",
+                    )])),
+                    built_in_models: vec![model],
+                    models_json_path: None,
+                    agent_dir: None,
+                    cwd: cwd.clone(),
+                    default_system_prompt: String::new(),
+                    version: String::from("0.1.0"),
+                    stream_options: StreamOptions::default(),
+                },
+                InteractiveRuntime::new(Arc::new(move || Box::new(terminal.clone()))),
+            ),
+        )
+        .await
+        .expect("interactive debug hotkey run should complete");
+
+        let output = strip_terminal_control_sequences(&inspector.output());
+        assert_eq!(exit_code, 0, "output: {output}");
+        assert!(output.contains("Debug log written"), "output: {output}");
+
+        let debug_log = cwd.join(DEBUG_LOG_FILE_NAME);
+        assert!(
+            debug_log.exists(),
+            "missing debug log: {}",
+            debug_log.display()
+        );
+        let debug_output = fs::read_to_string(&debug_log).expect("expected debug log contents");
+        assert!(debug_output.contains("=== Agent messages (JSONL) ==="));
+        assert!(debug_output.contains("=== All rendered lines with visible widths ==="));
 
         faux.unregister();
     }
