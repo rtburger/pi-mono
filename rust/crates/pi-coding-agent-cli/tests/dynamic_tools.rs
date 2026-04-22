@@ -116,6 +116,123 @@ fn register_recording_provider(
     (model, api_name, recorded)
 }
 
+fn last_user_text(context: &Context) -> String {
+    context
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            pi_events::Message::User { content, .. } => Some(
+                content
+                    .iter()
+                    .filter_map(|item| match item {
+                        pi_events::UserContent::Text { text } => Some(text.as_str()),
+                        pi_events::UserContent::Image { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn rpc_session_start_sees_load_time_extension_tools_in_registry_and_active_set() {
+    let (model, api, recorded) = register_recording_provider("load time tools ready");
+    let cwd = unique_temp_dir("rpc-load-time-tools");
+    let agent_dir = unique_temp_dir("rpc-load-time-tools-agent");
+    let extension_path = cwd.join("load-time-tools-extension.ts");
+    fs::write(
+        &extension_path,
+        r#"import { Type } from "@sinclair/typebox";
+
+export default function (pi) {
+	let allAtStart = "";
+	let activeAtStart = "";
+
+	pi.registerTool({
+		name: "load_time_tool",
+		label: "Load Time Tool",
+		description: "Tool registered while the extension loads",
+		promptSnippet: "Use load_time_tool for load-time behavior",
+		promptGuidelines: ["Use load_time_tool when startup behavior needs it."],
+		parameters: Type.Object({}),
+		execute: async () => ({
+			content: [{ type: "text", text: "load time tool result" }],
+			details: { source: "load-time" },
+		}),
+	});
+
+	pi.on("session_start", () => {
+		allAtStart = pi.getAllTools().map((tool) => tool.name).join(",");
+		activeAtStart = pi.getActiveTools().join(",");
+	});
+
+	pi.registerCommand("capture-load-time-tools", {
+		description: "Capture tool state observed during session_start",
+		handler: async () => {
+			pi.sendUserMessage(`session-start tools all=${allAtStart}; active=${activeAtStart}`);
+		},
+	});
+}
+"#,
+    )
+    .unwrap();
+
+    let result = run_command(RunCommandOptions {
+        args: vec![
+            String::from("--mode"),
+            String::from("rpc"),
+            String::from("--provider"),
+            model.provider.clone(),
+            String::from("--model"),
+            model.id.clone(),
+            String::from("--extension"),
+            extension_path.to_string_lossy().into_owned(),
+        ],
+        stdin_is_tty: false,
+        stdin_content: Some(String::from(
+            "{\"id\":\"cmd-1\",\"type\":\"prompt\",\"message\":\"/capture-load-time-tools\"}\n",
+        )),
+        auth_source: Arc::new(MemoryAuthStorage::with_api_keys([(
+            model.provider.as_str(),
+            "token",
+        )])),
+        built_in_models: vec![model],
+        models_json_path: None,
+        agent_dir: Some(agent_dir),
+        cwd: cwd.clone(),
+        default_system_prompt: String::new(),
+        version: String::from("0.1.0"),
+        stream_options: StreamOptions::default(),
+    })
+    .await;
+
+    assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+    assert!(result.stderr.is_empty(), "stderr: {}", result.stderr);
+    assert!(
+        !result.stdout.contains("\"type\":\"extension_error\""),
+        "stdout: {}",
+        result.stdout
+    );
+
+    let recorded = recorded.lock().unwrap().clone();
+    assert_eq!(
+        recorded.contexts.len(),
+        1,
+        "contexts: {:?}",
+        recorded.contexts
+    );
+    let context = &recorded.contexts[0];
+    assert_eq!(
+        last_user_text(context),
+        "session-start tools all=read,bash,edit,write,grep,find,ls,load_time_tool; active=read,bash,edit,write,load_time_tool"
+    );
+
+    unregister_provider(&api);
+}
+
 #[tokio::test]
 async fn rpc_extension_command_can_register_dynamic_tools_and_activate_them_immediately() {
     let (model, api, recorded) = register_recording_provider("dynamic tools ready");

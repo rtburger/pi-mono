@@ -1173,6 +1173,9 @@ async function handleInit(message) {
 
 	diagnostics.push(...applyExtensionFlagValues(message.flagValues, loaded));
 	bindRunner(loaded, message.cwd, providerMutations, diagnostics);
+	// Mirror TypeScript runtime behavior before session_start runs so load-time
+	// extension tools appear in getAllTools()/getActiveTools() immediately.
+	updateRuntimeToolStateFromExtensionTools(extensionTools());
 	resolvedShortcuts = runner.getShortcuts(resolvedKeybindings);
 	diagnostics.push(...runner.getShortcutDiagnostics().map(({ level, message: text }) => ({ level, message: text })));
 
