@@ -6,12 +6,12 @@ use crate::{
     model_resolver::ModelCatalog,
 };
 use pi_events::{Model, ModelCompat, ModelCost, ModelRouting, OpenAiCompletionsCompatConfig};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,15 +20,52 @@ pub struct RequestAuth {
     pub headers: Option<BTreeMap<String, String>>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfigInput {
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub api: Option<String>,
+    pub headers: Option<BTreeMap<String, String>>,
+    pub auth_header: Option<bool>,
+    pub models: Option<Vec<ProviderModelInput>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderModelInput {
+    pub id: String,
+    pub name: String,
+    pub api: Option<String>,
+    pub reasoning: bool,
+    pub input: Vec<String>,
+    pub cost: ModelCost,
+    pub context_window: u64,
+    pub max_tokens: u64,
+    pub headers: Option<BTreeMap<String, String>>,
+    pub compat: Option<ModelCompat>,
+}
+
 pub struct ModelRegistry {
     auth_source: Arc<dyn AuthSource>,
     built_in_models: Vec<Model>,
     models_json_path: Option<PathBuf>,
+    registered_providers: RwLock<BTreeMap<String, ProviderConfigInput>>,
+    state: RwLock<ModelRegistryState>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ModelRegistryState {
     models: Vec<Model>,
     provider_request_configs: BTreeMap<String, ProviderRequestConfig>,
     model_request_headers: BTreeMap<String, BTreeMap<String, String>>,
     load_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ModelRegistryBuildState {
+    provider_request_configs: BTreeMap<String, ProviderRequestConfig>,
+    model_request_headers: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl ModelRegistry {
@@ -37,14 +74,12 @@ impl ModelRegistry {
         built_in_models: Vec<Model>,
         models_json_path: Option<PathBuf>,
     ) -> Self {
-        let mut registry = Self {
+        let registry = Self {
             auth_source,
             built_in_models,
             models_json_path,
-            models: Vec::new(),
-            provider_request_configs: BTreeMap::new(),
-            model_request_headers: BTreeMap::new(),
-            load_error: None,
+            registered_providers: RwLock::new(BTreeMap::new()),
+            state: RwLock::new(ModelRegistryState::default()),
         };
         registry.refresh();
         registry
@@ -54,64 +89,123 @@ impl ModelRegistry {
         Self::new(auth_source, built_in_models, None)
     }
 
-    pub fn refresh(&mut self) {
-        self.provider_request_configs.clear();
-        self.model_request_headers.clear();
-        self.load_error = None;
+    pub fn refresh(&self) {
+        let registered_providers = self
+            .registered_providers
+            .read()
+            .expect("model registry registered providers rwlock poisoned")
+            .clone();
 
+        let mut build_state = ModelRegistryBuildState::default();
         let custom = match self.models_json_path.clone() {
-            Some(path) => self.load_custom_models(&path),
+            Some(path) => self.load_custom_models(&path, &mut build_state),
             None => CustomModelsResult::default(),
         };
 
-        if let Some(error) = custom.error.clone() {
-            self.load_error = Some(error);
+        let built_in_models =
+            self.load_built_in_models(&custom.overrides, &custom.model_overrides);
+        let mut models = merge_custom_models(built_in_models, custom.models);
+        let mut load_error = custom.error;
+
+        if let Err(error) =
+            self.apply_registered_providers(&registered_providers, &mut models, &mut build_state)
+        {
+            load_error = combine_load_errors(load_error, Some(error));
         }
 
-        let built_in_models = self.load_built_in_models(&custom.overrides, &custom.model_overrides);
-        let combined = merge_custom_models(built_in_models, custom.models);
-        self.models = self.apply_auth_model_mutations(combined);
+        let mut state = self
+            .state
+            .write()
+            .expect("model registry state rwlock poisoned");
+        state.models = self.apply_auth_model_mutations(models);
+        state.provider_request_configs = build_state.provider_request_configs;
+        state.model_request_headers = build_state.model_request_headers;
+        state.load_error = load_error;
     }
 
-    pub fn get_error(&self) -> Option<&str> {
-        self.load_error.as_deref()
+    pub fn register_provider(
+        &self,
+        provider_name: &str,
+        config: ProviderConfigInput,
+    ) -> Result<(), String> {
+        self.validate_provider_config(provider_name, &config)?;
+        self.registered_providers
+            .write()
+            .expect("model registry registered providers rwlock poisoned")
+            .insert(provider_name.to_owned(), config);
+        self.refresh();
+        Ok(())
     }
 
-    pub fn get_all(&self) -> &[Model] {
-        &self.models
+    pub fn unregister_provider(&self, provider_name: &str) {
+        let removed = self
+            .registered_providers
+            .write()
+            .expect("model registry registered providers rwlock poisoned")
+            .remove(provider_name)
+            .is_some();
+        if removed {
+            self.refresh();
+        }
+    }
+
+    pub fn get_error(&self) -> Option<String> {
+        self.state
+            .read()
+            .expect("model registry state rwlock poisoned")
+            .load_error
+            .clone()
+    }
+
+    pub fn get_all(&self) -> Vec<Model> {
+        self.state
+            .read()
+            .expect("model registry state rwlock poisoned")
+            .models
+            .clone()
     }
 
     pub fn get_available(&self) -> Vec<Model> {
-        self.models
-            .iter()
+        self.get_all()
+            .into_iter()
             .filter(|model| self.has_configured_auth(model))
-            .cloned()
             .collect()
     }
 
     pub fn catalog(&self) -> ModelCatalog {
-        ModelCatalog::new(self.models.clone(), self.get_available())
+        ModelCatalog::new(self.get_all(), self.get_available())
     }
 
     pub fn find(&self, provider: &str, model_id: &str) -> Option<Model> {
-        self.models
+        self.state
+            .read()
+            .expect("model registry state rwlock poisoned")
+            .models
             .iter()
             .find(|model| model.provider == provider && model.id == model_id)
             .cloned()
     }
 
     pub fn has_configured_auth(&self, model: &Model) -> bool {
-        self.auth_source.has_auth(&model.provider)
-            || self
-                .provider_request_configs
-                .get(&model.provider)
-                .and_then(|config| config.api_key.as_ref())
-                .is_some()
+        if self.auth_source.has_auth(&model.provider) {
+            return true;
+        }
+
+        self.state
+            .read()
+            .expect("model registry state rwlock poisoned")
+            .provider_request_configs
+            .get(&model.provider)
+            .and_then(|config| config.api_key.as_ref())
+            .is_some()
     }
 
     pub fn get_api_key_for_provider(&self, provider: &str) -> Option<String> {
         self.auth_source.get_api_key(provider).or_else(|| {
-            self.provider_request_configs
+            self.state
+                .read()
+                .expect("model registry state rwlock poisoned")
+                .provider_request_configs
                 .get(provider)
                 .and_then(|config| config.api_key.as_deref())
                 .and_then(resolve_config_value_uncached)
@@ -119,9 +213,10 @@ impl ModelRegistry {
     }
 
     pub fn get_api_key_and_headers(&self, model: &Model) -> Result<RequestAuth, String> {
-        let provider_config = self.provider_request_configs.get(&model.provider);
+        let (provider_config, model_headers) = self.request_config_for_model(model);
         let api_key = self.auth_source.get_api_key(&model.provider).or_else(|| {
             provider_config
+                .as_ref()
                 .and_then(|config| config.api_key.as_deref())
                 .map(|value| {
                     resolve_config_value_or_err(
@@ -134,14 +229,14 @@ impl ModelRegistry {
                 .flatten()
         });
 
-        self.finalize_request_auth(model, provider_config, api_key)
+        self.finalize_request_auth(model, provider_config.as_ref(), model_headers.as_ref(), api_key)
     }
 
     pub async fn get_api_key_and_headers_async(
         &self,
         model: &Model,
     ) -> Result<RequestAuth, String> {
-        let provider_config = self.provider_request_configs.get(&model.provider);
+        let (provider_config, model_headers) = self.request_config_for_model(model);
         let api_key = match self
             .auth_source
             .get_api_key_for_request(&model.provider)
@@ -149,6 +244,7 @@ impl ModelRegistry {
         {
             Some(api_key) => Some(api_key),
             None => provider_config
+                .as_ref()
                 .and_then(|config| config.api_key.as_deref())
                 .map(|value| {
                     resolve_config_value_or_err(
@@ -159,13 +255,31 @@ impl ModelRegistry {
                 .transpose()?,
         };
 
-        self.finalize_request_auth(model, provider_config, api_key)
+        self.finalize_request_auth(model, provider_config.as_ref(), model_headers.as_ref(), api_key)
+    }
+
+    fn request_config_for_model(
+        &self,
+        model: &Model,
+    ) -> (Option<ProviderRequestConfig>, Option<BTreeMap<String, String>>) {
+        let state = self
+            .state
+            .read()
+            .expect("model registry state rwlock poisoned");
+        (
+            state.provider_request_configs.get(&model.provider).cloned(),
+            state
+                .model_request_headers
+                .get(&model_request_key(&model.provider, &model.id))
+                .cloned(),
+        )
     }
 
     fn finalize_request_auth(
         &self,
         model: &Model,
         provider_config: Option<&ProviderRequestConfig>,
+        model_headers: Option<&BTreeMap<String, String>>,
         api_key: Option<String>,
     ) -> Result<RequestAuth, String> {
         if provider_config
@@ -187,11 +301,8 @@ impl ModelRegistry {
             provider_config.and_then(|config| config.headers.as_ref()),
             &format!("provider \"{}\"", model.provider),
         )?;
-        let model_headers = resolve_headers_or_err(
-            self.model_request_headers
-                .get(&model_request_key(&model.provider, &model.id)),
-            &format!("model \"{}/{}\"", model.provider, model.id),
-        )?;
+        let model_headers =
+            resolve_headers_or_err(model_headers, &format!("model \"{}/{}\"", model.provider, model.id))?;
 
         let mut headers = BTreeMap::new();
         if let Some(provider_headers) = provider_headers {
@@ -212,6 +323,141 @@ impl ModelRegistry {
             api_key,
             headers: (!headers.is_empty()).then_some(headers),
         })
+    }
+
+    fn validate_provider_config(
+        &self,
+        provider_name: &str,
+        config: &ProviderConfigInput,
+    ) -> Result<(), String> {
+        let model_definitions = config.models.as_deref().unwrap_or_default();
+        if model_definitions.is_empty() {
+            return Ok(());
+        }
+
+        if config.base_url.is_none() {
+            return Err(format!(
+                "Provider {provider_name}: \"baseUrl\" is required when defining models."
+            ));
+        }
+        if config.api_key.is_none() {
+            return Err(format!(
+                "Provider {provider_name}: \"apiKey\" is required when defining models."
+            ));
+        }
+
+        for model_definition in model_definitions {
+            if model_definition.id.trim().is_empty() {
+                return Err(format!("Provider {provider_name}: model missing \"id\""));
+            }
+            if model_definition.name.trim().is_empty() {
+                return Err(format!(
+                    "Provider {provider_name}, model {}: \"name\" is required.",
+                    model_definition.id
+                ));
+            }
+            if config.api.is_none() && model_definition.api.is_none() {
+                return Err(format!(
+                    "Provider {provider_name}, model {}: no \"api\" specified.",
+                    model_definition.id
+                ));
+            }
+            if model_definition.input.is_empty() {
+                return Err(format!(
+                    "Provider {provider_name}, model {}: \"input\" must not be empty.",
+                    model_definition.id
+                ));
+            }
+            if model_definition.context_window == 0 {
+                return Err(format!(
+                    "Provider {provider_name}, model {}: invalid contextWindow",
+                    model_definition.id
+                ));
+            }
+            if model_definition.max_tokens == 0 {
+                return Err(format!(
+                    "Provider {provider_name}, model {}: invalid maxTokens",
+                    model_definition.id
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_registered_providers(
+        &self,
+        registered_providers: &BTreeMap<String, ProviderConfigInput>,
+        models: &mut Vec<Model>,
+        build_state: &mut ModelRegistryBuildState,
+    ) -> Result<(), String> {
+        for (provider_name, config) in registered_providers {
+            self.apply_registered_provider(provider_name, config, models, build_state)?;
+        }
+        Ok(())
+    }
+
+    fn apply_registered_provider(
+        &self,
+        provider_name: &str,
+        config: &ProviderConfigInput,
+        models: &mut Vec<Model>,
+        build_state: &mut ModelRegistryBuildState,
+    ) -> Result<(), String> {
+        store_provider_request_config(
+            build_state,
+            provider_name,
+            config.api_key.clone(),
+            config.headers.clone(),
+            config.auth_header.unwrap_or(false),
+        );
+
+        let model_definitions = config.models.as_deref().unwrap_or_default();
+        if !model_definitions.is_empty() {
+            models.retain(|model| model.provider != provider_name);
+            for model_definition in model_definitions {
+                let api = model_definition
+                    .api
+                    .as_deref()
+                    .or(config.api.as_deref())
+                    .ok_or_else(|| {
+                        format!(
+                            "Provider {provider_name}, model {}: no \"api\" specified.",
+                            model_definition.id
+                        )
+                    })?;
+                store_model_headers(
+                    build_state,
+                    provider_name,
+                    &model_definition.id,
+                    model_definition.headers.as_ref(),
+                );
+                models.push(Model {
+                    id: model_definition.id.clone(),
+                    name: model_definition.name.clone(),
+                    api: api.to_owned(),
+                    provider: provider_name.to_owned(),
+                    base_url: config.base_url.clone().unwrap_or_default(),
+                    reasoning: model_definition.reasoning,
+                    input: model_definition.input.clone(),
+                    cost: model_definition.cost,
+                    context_window: model_definition.context_window,
+                    max_tokens: model_definition.max_tokens,
+                    compat: model_definition.compat.clone(),
+                });
+            }
+            return Ok(());
+        }
+
+        if config.base_url.is_some() || config.headers.is_some() || config.auth_header.is_some() {
+            for model in models.iter_mut().filter(|model| model.provider == provider_name) {
+                if let Some(base_url) = config.base_url.as_ref() {
+                    model.base_url = base_url.clone();
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn load_built_in_models(
@@ -260,7 +506,11 @@ impl ModelRegistry {
             .collect()
     }
 
-    fn load_custom_models(&mut self, path: &Path) -> CustomModelsResult {
+    fn load_custom_models(
+        &self,
+        path: &Path,
+        build_state: &mut ModelRegistryBuildState,
+    ) -> CustomModelsResult {
         if !path.exists() {
             return CustomModelsResult::default();
         }
@@ -303,12 +553,19 @@ impl ModelRegistry {
                 );
             }
 
-            self.store_provider_request_config(provider_name, provider_config);
+            store_provider_request_config(
+                build_state,
+                provider_name,
+                provider_config.api_key.clone(),
+                provider_config.headers.clone(),
+                provider_config.auth_header.unwrap_or(false),
+            );
 
             if let Some(overrides_for_provider) = provider_config.model_overrides.as_ref() {
                 model_overrides.insert(provider_name.clone(), overrides_for_provider.clone());
                 for (model_id, model_override) in overrides_for_provider {
-                    self.store_model_headers(
+                    store_model_headers(
+                        build_state,
                         provider_name,
                         model_id,
                         model_override.headers.as_ref(),
@@ -318,42 +575,10 @@ impl ModelRegistry {
         }
 
         CustomModelsResult {
-            models: parse_custom_models(&config, self),
+            models: parse_custom_models(&config, build_state),
             overrides,
             model_overrides,
             error: None,
-        }
-    }
-
-    fn store_provider_request_config(&mut self, provider_name: &str, config: &ProviderConfigFile) {
-        if config.api_key.is_none()
-            && config.headers.is_none()
-            && !config.auth_header.unwrap_or(false)
-        {
-            return;
-        }
-
-        self.provider_request_configs.insert(
-            provider_name.to_string(),
-            ProviderRequestConfig {
-                api_key: config.api_key.clone(),
-                headers: config.headers.clone(),
-                auth_header: config.auth_header.unwrap_or(false),
-            },
-        );
-    }
-
-    fn store_model_headers(
-        &mut self,
-        provider_name: &str,
-        model_id: &str,
-        headers: Option<&BTreeMap<String, String>>,
-    ) {
-        let key = model_request_key(provider_name, model_id);
-        if let Some(headers) = headers
-            && !headers.is_empty()
-        {
-            self.model_request_headers.insert(key, headers.clone());
         }
     }
 }
@@ -519,7 +744,10 @@ fn validate_config(config: &ModelsConfigFile) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_custom_models(config: &ModelsConfigFile, registry: &mut ModelRegistry) -> Vec<Model> {
+fn parse_custom_models(
+    config: &ModelsConfigFile,
+    build_state: &mut ModelRegistryBuildState,
+) -> Vec<Model> {
     let mut models = Vec::new();
 
     for (provider_name, provider_config) in &config.providers {
@@ -537,7 +765,8 @@ fn parse_custom_models(config: &ModelsConfigFile, registry: &mut ModelRegistry) 
                 continue;
             }
 
-            registry.store_model_headers(
+            store_model_headers(
+                build_state,
                 provider_name,
                 &model_definition.id,
                 model_definition.headers.as_ref(),
@@ -574,6 +803,41 @@ fn parse_custom_models(config: &ModelsConfigFile, registry: &mut ModelRegistry) 
     }
 
     models
+}
+
+fn store_provider_request_config(
+    build_state: &mut ModelRegistryBuildState,
+    provider_name: &str,
+    api_key: Option<String>,
+    headers: Option<BTreeMap<String, String>>,
+    auth_header: bool,
+) {
+    if api_key.is_none() && headers.is_none() && !auth_header {
+        return;
+    }
+
+    build_state.provider_request_configs.insert(
+        provider_name.to_string(),
+        ProviderRequestConfig {
+            api_key,
+            headers,
+            auth_header,
+        },
+    );
+}
+
+fn store_model_headers(
+    build_state: &mut ModelRegistryBuildState,
+    provider_name: &str,
+    model_id: &str,
+    headers: Option<&BTreeMap<String, String>>,
+) {
+    let key = model_request_key(provider_name, model_id);
+    if let Some(headers) = headers
+        && !headers.is_empty()
+    {
+        build_state.model_request_headers.insert(key, headers.clone());
+    }
 }
 
 fn model_inputs_to_strings(input: &[ModelInputKind]) -> Vec<String> {
@@ -713,6 +977,14 @@ fn merge_custom_models(built_in_models: Vec<Model>, custom_models: Vec<Model>) -
     }
 
     merged
+}
+
+fn combine_load_errors(base: Option<String>, next: Option<String>) -> Option<String> {
+    match (base, next) {
+        (None, None) => None,
+        (Some(error), None) | (None, Some(error)) => Some(error),
+        (Some(base), Some(next)) => Some(format!("{base}\n\n{next}")),
+    }
 }
 
 fn model_request_key(provider: &str, model_id: &str) -> String {

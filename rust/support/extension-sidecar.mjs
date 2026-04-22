@@ -350,7 +350,79 @@ function applyExtensionFlagValues(flagValues, loaded) {
 	return diagnostics;
 }
 
-function bindRunner(loaded, cwd) {
+function cloneJsonValue(value) {
+	if (value === undefined) {
+		return undefined;
+	}
+	return JSON.parse(JSON.stringify(value));
+}
+
+function serializeProviderConfig(config) {
+	if (!config || typeof config !== "object" || Array.isArray(config)) {
+		return { ok: false, error: "Provider config must be an object" };
+	}
+	if (typeof config.streamSimple === "function") {
+		return {
+			ok: false,
+			error: "streamSimple is not supported in the Rust RPC extension bridge yet",
+		};
+	}
+	if (config.oauth !== undefined) {
+		return {
+			ok: false,
+			error: "OAuth provider registration is not supported in the Rust RPC extension bridge yet",
+		};
+	}
+
+	const normalized = {};
+	if (typeof config.baseUrl === "string") {
+		normalized.baseUrl = config.baseUrl;
+	}
+	if (typeof config.apiKey === "string") {
+		normalized.apiKey = config.apiKey;
+	}
+	if (typeof config.api === "string") {
+		normalized.api = config.api;
+	}
+	if (config.headers && typeof config.headers === "object" && !Array.isArray(config.headers)) {
+		normalized.headers = cloneJsonValue(config.headers);
+	}
+	if (typeof config.authHeader === "boolean") {
+		normalized.authHeader = config.authHeader;
+	}
+	if (Array.isArray(config.models)) {
+		normalized.models = cloneJsonValue(config.models);
+	}
+
+	return { ok: true, config: normalized };
+}
+
+function createProviderRegisterMutation(name, config, diagnostics) {
+	if (typeof name !== "string" || name.trim().length === 0) {
+		diagnostics?.push({
+			level: "warning",
+			message: "Extension provider registration skipped: provider name must be a non-empty string",
+		});
+		return undefined;
+	}
+
+	const serialized = serializeProviderConfig(config);
+	if (!serialized.ok) {
+		diagnostics?.push({
+			level: "warning",
+			message: `Extension provider registration skipped for ${name}: ${serialized.error}`,
+		});
+		return undefined;
+	}
+
+	return {
+		action: "register",
+		name,
+		config: serialized.config,
+	};
+}
+
+function bindRunner(loaded, cwd, providerMutations, diagnostics) {
 	const dummySessionManager = {};
 	const dummyModelRegistry = {
 		registerProvider() {},
@@ -495,11 +567,56 @@ function bindRunner(loaded, cwd) {
 			},
 		},
 		{
-			registerProvider() {
-				emitUnsupported("register_provider");
+			registerProvider(name, config) {
+				const mutation = createProviderRegisterMutation(
+					name,
+					config,
+					appRequestsReady ? undefined : diagnostics,
+				);
+				if (!mutation) {
+					if (appRequestsReady) {
+						emitRuntimeError(
+							"register_provider",
+							`Provider registration skipped for ${String(name)}`,
+						);
+					}
+					return;
+				}
+				if (!appRequestsReady) {
+					providerMutations.push(mutation);
+					return;
+				}
+				fireAndTrackHostRequest(
+					"register_provider",
+					{ name: mutation.name, config: mutation.config },
+					"register_provider",
+				);
 			},
-			unregisterProvider() {
-				emitUnsupported("unregister_provider");
+			unregisterProvider(name) {
+				if (typeof name !== "string" || name.trim().length === 0) {
+					if (appRequestsReady) {
+						emitRuntimeError(
+							"unregister_provider",
+							"Provider name must be a non-empty string",
+						);
+					} else {
+						diagnostics?.push({
+							level: "warning",
+							message: "Extension provider unregistration skipped: provider name must be a non-empty string",
+						});
+					}
+					return;
+				}
+				const mutation = { action: "unregister", name };
+				if (!appRequestsReady) {
+					providerMutations.push(mutation);
+					return;
+				}
+				fireAndTrackHostRequest(
+					"unregister_provider",
+					{ name: mutation.name },
+					"unregister_provider",
+				);
 			},
 		},
 	);
@@ -626,6 +743,7 @@ async function handleInit(message) {
 				message.agentDir ?? undefined,
 			);
 	const diagnostics = [...loadDiagnostics(loaded.errors)];
+	const providerMutations = [];
 	if (!loaded.extensions || loaded.extensions.length === 0) {
 		reply(message.id, {
 			extensionCount: 0,
@@ -635,13 +753,14 @@ async function handleInit(message) {
 			skillPaths: [],
 			promptPaths: [],
 			themePaths: [],
+			providerMutations,
 			diagnostics,
 		});
 		return;
 	}
 
 	diagnostics.push(...applyExtensionFlagValues(message.flagValues, loaded));
-	bindRunner(loaded, message.cwd);
+	bindRunner(loaded, message.cwd, providerMutations, diagnostics);
 	resolvedShortcuts = runner.getShortcuts(resolvedKeybindings);
 	diagnostics.push(...runner.getShortcutDiagnostics().map(({ level, message: text }) => ({ level, message: text })));
 
@@ -671,6 +790,7 @@ async function handleInit(message) {
 		skillPaths: resources.skillPaths,
 		promptPaths: resources.promptPaths,
 		themePaths: resources.themePaths,
+		providerMutations,
 		diagnostics,
 	});
 	appRequestsReady = true;

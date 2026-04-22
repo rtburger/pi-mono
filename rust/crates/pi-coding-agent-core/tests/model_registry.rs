@@ -1,4 +1,6 @@
-use pi_coding_agent_core::{MemoryAuthStorage, ModelRegistry, RequestAuth};
+use pi_coding_agent_core::{
+    MemoryAuthStorage, ModelRegistry, ProviderConfigInput, ProviderModelInput, RequestAuth,
+};
 use pi_events::{
     Model, ModelCompat, ModelCost, ModelRouting, OpenAiCompletionsCompatConfig,
     OpenAiCompletionsMaxTokensField, OpenAiResponsesCompatConfig, OpenAiThinkingFormat,
@@ -79,8 +81,8 @@ fn base_url_override_keeps_built_in_models() {
         Some(models_json_path),
     );
 
-    let openai_models: Vec<_> = registry
-        .get_all()
+    let all_models = registry.get_all();
+    let openai_models: Vec<_> = all_models
         .iter()
         .filter(|model| model.provider == "openai")
         .collect();
@@ -122,8 +124,8 @@ fn custom_models_merge_with_built_ins() {
         Some(models_json_path),
     );
 
-    let openai_models: Vec<_> = registry
-        .get_all()
+    let all_models = registry.get_all();
+    let openai_models: Vec<_> = all_models
         .iter()
         .filter(|model| model.provider == "openai")
         .collect();
@@ -170,8 +172,8 @@ fn custom_model_replaces_built_in_by_provider_and_id() {
         Some(models_json_path),
     );
 
-    let matching: Vec<_> = registry
-        .get_all()
+    let all_models = registry.get_all();
+    let matching: Vec<_> = all_models
         .iter()
         .filter(|model| model.provider == "openai" && model.id == "gpt-4o")
         .collect();
@@ -404,7 +406,7 @@ fn refresh_reloads_models_json_from_disk() {
         }),
     );
 
-    let mut registry = ModelRegistry::new(
+    let registry = ModelRegistry::new(
         Arc::new(MemoryAuthStorage::new()),
         built_in_models(),
         Some(models_json_path.clone()),
@@ -609,4 +611,115 @@ fn get_api_key_and_headers_returns_error_for_failed_auth_header_resolution() {
 
     let error = registry.get_api_key_and_headers(&model).unwrap_err();
     assert!(error.contains("Failed to resolve API key for provider \"openai\""));
+}
+
+#[test]
+fn dynamic_provider_registration_replaces_models_and_unregister_restores_state() {
+    let registry = ModelRegistry::in_memory(Arc::new(MemoryAuthStorage::new()), built_in_models());
+
+    registry
+        .register_provider(
+            "dynamic-proxy",
+            ProviderConfigInput {
+                base_url: Some(String::from("https://dynamic.example.com/v1")),
+                api_key: Some(String::from("dynamic-token")),
+                api: Some(String::from("openai-completions")),
+                headers: None,
+                auth_header: Some(true),
+                models: Some(vec![ProviderModelInput {
+                    id: String::from("dynamic-model"),
+                    name: String::from("Dynamic Model"),
+                    api: None,
+                    reasoning: false,
+                    input: vec![String::from("text")],
+                    cost: ModelCost {
+                        input: 0.0,
+                        output: 0.0,
+                        cache_read: 0.0,
+                        cache_write: 0.0,
+                    },
+                    context_window: 64_000,
+                    max_tokens: 8_192,
+                    headers: None,
+                    compat: None,
+                }]),
+            },
+        )
+        .unwrap();
+
+    let model = registry.find("dynamic-proxy", "dynamic-model").unwrap();
+    assert_eq!(model.base_url, "https://dynamic.example.com/v1");
+    assert!(
+        registry
+            .get_available()
+            .iter()
+            .any(|candidate| candidate.provider == "dynamic-proxy" && candidate.id == "dynamic-model")
+    );
+    assert_eq!(
+        registry.get_api_key_and_headers(&model).unwrap(),
+        RequestAuth {
+            api_key: Some(String::from("dynamic-token")),
+            headers: Some(
+                [(String::from("Authorization"), String::from("Bearer dynamic-token"))]
+                    .into_iter()
+                    .collect(),
+            ),
+        }
+    );
+
+    registry.unregister_provider("dynamic-proxy");
+
+    assert!(registry.find("dynamic-proxy", "dynamic-model").is_none());
+    assert!(
+        registry
+            .get_available()
+            .iter()
+            .all(|candidate| candidate.provider != "dynamic-proxy")
+    );
+}
+
+#[test]
+fn dynamic_provider_override_updates_existing_models_and_unregister_restores_base_url() {
+    let registry = ModelRegistry::in_memory(Arc::new(MemoryAuthStorage::new()), built_in_models());
+    let original_base_url = registry.find("openai", "gpt-4o").unwrap().base_url;
+
+    registry
+        .register_provider(
+            "openai",
+            ProviderConfigInput {
+                base_url: Some(String::from("https://override.example.com/v1")),
+                api_key: Some(String::from("override-token")),
+                api: None,
+                headers: Some(
+                    [(String::from("X-Override"), String::from("true"))]
+                        .into_iter()
+                        .collect(),
+                ),
+                auth_header: Some(true),
+                models: None,
+            },
+        )
+        .unwrap();
+
+    let overridden = registry.find("openai", "gpt-4o").unwrap();
+    assert_eq!(overridden.base_url, "https://override.example.com/v1");
+    assert_eq!(
+        registry.get_api_key_and_headers(&overridden).unwrap(),
+        RequestAuth {
+            api_key: Some(String::from("override-token")),
+            headers: Some(
+                [
+                    (String::from("Authorization"), String::from("Bearer override-token")),
+                    (String::from("X-Override"), String::from("true")),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        }
+    );
+
+    registry.unregister_provider("openai");
+
+    let restored = registry.find("openai", "gpt-4o").unwrap();
+    assert_eq!(restored.base_url, original_base_url);
 }

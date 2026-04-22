@@ -1,6 +1,6 @@
 use super::TextEmitter;
 use crate::package_manager::{DefaultPackageManager, ResolveExtensionSourcesOptions};
-use pi_coding_agent_core::SourceInfo;
+use pi_coding_agent_core::{ProviderConfigInput, SourceInfo};
 use pi_events::UserContent;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -64,6 +64,18 @@ pub struct RpcExtensionDiagnostic {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub enum RpcExtensionProviderMutation {
+    Register {
+        name: String,
+        config: ProviderConfigInput,
+    },
+    Unregister {
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RpcExtensionToolExecutionResult {
     #[serde(default)]
     pub content: Vec<UserContent>,
@@ -91,7 +103,7 @@ pub struct RpcExtensionInputResult {
     pub images: Option<Vec<UserContent>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcExtensionInitOutput {
     pub extension_count: usize,
@@ -106,6 +118,8 @@ pub struct RpcExtensionInitOutput {
     pub prompt_paths: Vec<RpcExtensionResourcePath>,
     #[serde(default)]
     pub theme_paths: Vec<RpcExtensionResourcePath>,
+    #[serde(default)]
+    pub provider_mutations: Vec<RpcExtensionProviderMutation>,
     #[serde(default)]
     pub diagnostics: Vec<RpcExtensionDiagnostic>,
 }

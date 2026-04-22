@@ -85,8 +85,9 @@ use tokio::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rpc_extensions::{
     RpcExtensionCommandInfo, RpcExtensionHost, RpcExtensionHostStartOptions,
-    RpcExtensionInputResult, RpcExtensionShortcutInfo, RpcExtensionToolInfo, RpcToolCallResult,
-    RpcToolResultMutation, should_start_extension_host,
+    RpcExtensionInputResult, RpcExtensionProviderMutation, RpcExtensionShortcutInfo,
+    RpcExtensionToolInfo, RpcToolCallResult, RpcToolResultMutation,
+    should_start_extension_host,
 };
 use serde_json::{Value, json};
 
@@ -2158,6 +2159,10 @@ async fn run_interactive_iteration(
                 transition: None,
                 session_context: None,
             };
+        }
+
+        for warning in apply_rpc_extension_provider_mutations(&core, &init.provider_mutations) {
+            eprintln!("{warning}");
         }
 
         let skill_paths = init
@@ -7006,6 +7011,12 @@ async fn build_rpc_state(
             return Err(diagnostics_output);
         }
         resource_output.push_str(&diagnostics_output);
+        for warning in apply_rpc_extension_provider_mutations(
+            &core,
+            &start_result.init.provider_mutations,
+        ) {
+            push_line(&mut resource_output, &warning);
+        }
 
         if let Some(host) = start_result.host {
             let extension_tool_infos = host.tools();
@@ -8075,14 +8086,38 @@ async fn handle_extension_host_app_request(
             execute_extension_set_label(&shared, &entry_id, label)?;
             Ok(Value::Null)
         }
+        "register_provider" => {
+            let name = required_string_field(request, "name")?;
+            let config = serde_json::from_value(
+                request
+                    .get("config")
+                    .cloned()
+                    .ok_or_else(|| String::from("Missing required field: config"))?,
+            )
+            .map_err(|error| format!("Invalid provider config: {error}"))?;
+            let snapshot = shared.snapshot();
+            snapshot
+                .core
+                .model_registry()
+                .register_provider(&name, config)?;
+            refresh_rpc_current_model_from_registry(&snapshot.core);
+            sync_rpc_extension_state(&shared).await;
+            Ok(Value::Null)
+        }
+        "unregister_provider" => {
+            let name = required_string_field(request, "name")?;
+            let snapshot = shared.snapshot();
+            snapshot.core.model_registry().unregister_provider(&name);
+            refresh_rpc_current_model_from_registry(&snapshot.core);
+            sync_rpc_extension_state(&shared).await;
+            Ok(Value::Null)
+        }
         "set_model" => {
-            let model = serde_json::from_value::<Model>(
+            let model = parse_extension_model_value(
                 request
                     .get("model")
-                    .cloned()
                     .ok_or_else(|| String::from("Missing required field: model"))?,
-            )
-            .map_err(|error| format!("Invalid model payload: {error}"))?;
+            )?;
             let snapshot = shared.snapshot();
             if !snapshot.core.model_registry().has_configured_auth(&model) {
                 return Ok(Value::Bool(false));
@@ -8495,6 +8530,31 @@ fn parse_extension_user_message_content(
     Ok((text_parts.join("\n"), images))
 }
 
+fn parse_extension_model_value(value: &Value) -> Result<Model, String> {
+    let Some(object) = value.as_object() else {
+        return serde_json::from_value(value.clone())
+            .map_err(|error| format!("Invalid model payload: {error}"));
+    };
+
+    let mut normalized = object.clone();
+    if let Some(base_url) = normalized.remove("baseUrl") {
+        normalized.entry(String::from("base_url")).or_insert(base_url);
+    }
+    if let Some(context_window) = normalized.remove("contextWindow") {
+        normalized
+            .entry(String::from("context_window"))
+            .or_insert(context_window);
+    }
+    if let Some(max_tokens) = normalized.remove("maxTokens") {
+        normalized
+            .entry(String::from("max_tokens"))
+            .or_insert(max_tokens);
+    }
+
+    serde_json::from_value(Value::Object(normalized))
+        .map_err(|error| format!("Invalid model payload: {error}"))
+}
+
 fn optional_string_field(command: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     command
         .get(key)
@@ -8726,6 +8786,51 @@ async fn wait_for_abort_signal(mut signal: watch::Receiver<bool>) {
             return;
         }
     }
+}
+
+fn refresh_rpc_current_model_from_registry(core: &CodingAgentCore) {
+    let current_model = core.state().model;
+    let refreshed_model = core
+        .model_registry()
+        .find(&current_model.provider, &current_model.id);
+    let Some(refreshed_model) = refreshed_model else {
+        return;
+    };
+    if refreshed_model == current_model {
+        return;
+    }
+
+    core.agent().update_state(move |state| {
+        state.model = refreshed_model.clone();
+    });
+}
+
+fn apply_rpc_extension_provider_mutations(
+    core: &CodingAgentCore,
+    provider_mutations: &[RpcExtensionProviderMutation],
+) -> Vec<String> {
+    let registry = core.model_registry();
+    let mut warnings = Vec::new();
+
+    for mutation in provider_mutations {
+        match mutation {
+            RpcExtensionProviderMutation::Register { name, config } => {
+                if let Err(error) = registry.register_provider(name, config.clone()) {
+                    warnings.push(format!(
+                        "Warning: Failed to register extension provider {name}: {error}"
+                    ));
+                    continue;
+                }
+            }
+            RpcExtensionProviderMutation::Unregister { name } => {
+                registry.unregister_provider(name);
+            }
+        }
+
+        refresh_rpc_current_model_from_registry(core);
+    }
+
+    warnings
 }
 
 fn build_rpc_extension_tools(
