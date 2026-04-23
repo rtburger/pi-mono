@@ -970,33 +970,7 @@ impl OpenAiResponsesStreamState {
                 emitted = self.handle_response_function_call_arguments_delta(event);
             }
             "response.function_call_arguments.done" => {
-                if self.current_block_kind == Some(OpenAiResponsesBlockKind::ToolCall)
-                    && let Some(index) = self.current_block_index
-                {
-                    let full = event
-                        .data
-                        .get("arguments")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let previous = self.current_tool_json.clone();
-                    self.current_tool_json = full.clone();
-                    if let Some(AssistantContent::ToolCall { arguments, .. }) =
-                        self.output.content.get_mut(index)
-                    {
-                        *arguments = parse_streaming_json_map(&self.current_tool_json);
-                    }
-                    if full.starts_with(&previous) {
-                        let delta = full[previous.len()..].to_string();
-                        if !delta.is_empty() {
-                            emitted.push(AssistantEvent::ToolCallDelta {
-                                content_index: index,
-                                delta,
-                                partial: self.output.clone(),
-                            });
-                        }
-                    }
-                }
+                emitted = self.handle_response_function_call_arguments_done(event);
             }
             "response.output_item.done" => {
                 let item = event
@@ -1272,6 +1246,43 @@ impl OpenAiResponsesStreamState {
                 });
             }
             _ => {}
+        }
+
+        emitted
+    }
+
+    fn handle_response_function_call_arguments_done(
+        &mut self,
+        event: &OpenAiResponsesStreamEnvelope,
+    ) -> Vec<AssistantEvent> {
+        let mut emitted = Vec::new();
+
+        if self.current_block_kind == Some(OpenAiResponsesBlockKind::ToolCall)
+            && let Some(index) = self.current_block_index
+        {
+            let full = event
+                .data
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let previous = self.current_tool_json.clone();
+            self.current_tool_json = full.clone();
+            if let Some(AssistantContent::ToolCall { arguments, .. }) =
+                self.output.content.get_mut(index)
+            {
+                *arguments = parse_streaming_json_map(&self.current_tool_json);
+            }
+            if full.starts_with(&previous) {
+                let delta = full[previous.len()..].to_string();
+                if !delta.is_empty() {
+                    emitted.push(AssistantEvent::ToolCallDelta {
+                        content_index: index,
+                        delta,
+                        partial: self.output.clone(),
+                    });
+                }
+            }
         }
 
         emitted
