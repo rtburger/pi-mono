@@ -119,6 +119,19 @@ fn captures_unknown_long_flags_like_typescript_cli() {
 }
 
 #[test]
+fn rejects_extension_flags() {
+    let args = parse(&["--extension", "demo.ts", "--no-extensions"]);
+
+    assert_eq!(args.diagnostics.len(), 2);
+    assert!(args.diagnostics.iter().all(|diagnostic| {
+        diagnostic.kind == DiagnosticKind::Error
+            && diagnostic
+                .message
+                .contains("Extensions are not supported in the Rust CLI rewrite")
+    }));
+}
+
+#[test]
 fn parses_list_models_with_optional_search_pattern() {
     let all = parse(&["--list-models"]);
     let search = parse(&["--list-models", "sonnet"]);

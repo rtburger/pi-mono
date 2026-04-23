@@ -290,13 +290,16 @@ pub fn parse_args(args: &[String]) -> Args {
         } else if arg == "--extension" || arg == "-e" {
             if index + 1 < args.len() {
                 index += 1;
-                result
-                    .extensions
-                    .get_or_insert_with(Vec::new)
-                    .push(args[index].clone());
             }
+            result.diagnostics.push(Diagnostic {
+                kind: DiagnosticKind::Error,
+                message: String::from("Extensions are not supported in the Rust CLI rewrite"),
+            });
         } else if arg == "--no-extensions" || arg == "-ne" {
-            result.no_extensions = true;
+            result.diagnostics.push(Diagnostic {
+                kind: DiagnosticKind::Error,
+                message: String::from("Extensions are not supported in the Rust CLI rewrite"),
+            });
         } else if arg == "--skill" && index + 1 < args.len() {
             index += 1;
             result

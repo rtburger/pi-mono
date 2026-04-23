@@ -287,10 +287,10 @@ async fn run_command_print_mode_expands_skill_commands_from_project_resources() 
 }
 
 #[tokio::test]
-async fn run_command_print_mode_accepts_extension_flags_without_rejecting() {
+async fn run_command_print_mode_rejects_extension_flags() {
     let provider = unique_name("extension-provider");
     let model_id = unique_name("extension-model");
-    let (api, recorded) = register_recording_provider("done");
+    let (api, _recorded) = register_recording_provider("done");
     let built_in_model = model(&api, &provider, &model_id);
     let cwd = unique_temp_dir("resources-extension-flags");
     let extension_path = cwd.join("demo-extension.ts");
@@ -324,29 +324,37 @@ async fn run_command_print_mode_accepts_extension_flags_without_rejecting() {
     })
     .await;
 
-    assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+    assert_eq!(result.exit_code, 1, "stderr: {}", result.stderr);
+    assert!(result.stdout.is_empty(), "stdout: {}", result.stdout);
     assert!(
-        !result
+        result
             .stderr
-            .contains("Extension loading is not supported in the Rust CLI yet"),
+            .contains("Extensions are not supported in the Rust CLI rewrite"),
         "stderr: {}",
         result.stderr
     );
-    let request = recorded.lock().unwrap().clone();
-    let context = request.context.expect("expected recorded context");
-    assert_eq!(last_user_text(&context), "hello");
 
     unregister_provider(&api);
 }
 
 #[tokio::test]
-async fn run_command_warns_for_missing_extension_paths() {
-    let provider = unique_name("missing-extension-provider");
-    let model_id = unique_name("missing-extension-model");
-    let (api, recorded) = register_recording_provider("done");
+async fn run_command_rejects_settings_based_extensions() {
+    let provider = unique_name("settings-extension-provider");
+    let model_id = unique_name("settings-extension-model");
+    let (api, _recorded) = register_recording_provider("done");
     let built_in_model = model(&api, &provider, &model_id);
-    let cwd = unique_temp_dir("resources-missing-extension");
-    let missing_extension_path = cwd.join("missing-extension.ts");
+    let cwd = unique_temp_dir("resources-settings-extension");
+    let agent_dir = cwd.join("agent");
+    fs::create_dir_all(&agent_dir).unwrap();
+    fs::create_dir_all(cwd.join(".pi")).unwrap();
+    fs::write(
+        cwd.join(".pi").join("settings.json"),
+        format!(
+            "{{\n  \"extensions\": [\"{}\"]\n}}\n",
+            cwd.join("demo-extension.ts").display()
+        ),
+    )
+    .unwrap();
 
     let result = run_command(RunCommandOptions {
         args: vec![
@@ -355,8 +363,6 @@ async fn run_command_warns_for_missing_extension_paths() {
             provider.clone(),
             String::from("--model"),
             model_id.clone(),
-            String::from("--extension"),
-            missing_extension_path.to_string_lossy().into_owned(),
             String::from("hello"),
         ],
         stdin_is_tty: true,
@@ -367,7 +373,7 @@ async fn run_command_warns_for_missing_extension_paths() {
         )])),
         built_in_models: vec![built_in_model],
         models_json_path: None,
-        agent_dir: Some(cwd.join("agent")),
+        agent_dir: Some(agent_dir),
         cwd: cwd.clone(),
         default_system_prompt: String::new(),
         version: String::from("0.1.0"),
@@ -375,18 +381,15 @@ async fn run_command_warns_for_missing_extension_paths() {
     })
     .await;
 
-    assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+    assert_eq!(result.exit_code, 1, "stderr: {}", result.stderr);
+    assert!(result.stdout.is_empty(), "stdout: {}", result.stdout);
     assert!(
-        result.stderr.contains(&format!(
-            "Warning: Extension path does not exist: {}",
-            missing_extension_path.display()
-        )),
+        result
+            .stderr
+            .contains("Remove `extensions` entries from settings"),
         "stderr: {}",
         result.stderr
     );
-    let request = recorded.lock().unwrap().clone();
-    let context = request.context.expect("expected recorded context");
-    assert_eq!(last_user_text(&context), "hello");
 
     unregister_provider(&api);
 }
@@ -448,19 +451,25 @@ async fn run_command_print_mode_loads_prompt_templates_from_project_package_sett
 }
 
 #[tokio::test]
-async fn run_command_print_mode_loads_prompt_templates_from_temporary_extension_packages() {
+async fn run_command_rejects_packages_that_enable_extensions() {
     let provider = unique_name("temporary-package-provider");
     let model_id = unique_name("temporary-package-model");
-    let (api, recorded) = register_recording_provider("done");
+    let (api, _recorded) = register_recording_provider("done");
     let built_in_model = model(&api, &provider, &model_id);
     let cwd = unique_temp_dir("resources-temporary-package-prompt");
     let agent_dir = cwd.join("agent");
     let package_dir = cwd.join("temporary-package");
     fs::create_dir_all(agent_dir.clone()).unwrap();
-    fs::create_dir_all(package_dir.join("prompts")).unwrap();
+    fs::create_dir_all(cwd.join(".pi")).unwrap();
+    fs::create_dir_all(package_dir.join("extensions")).unwrap();
     fs::write(
-        package_dir.join("prompts").join("review.md"),
-        "Temporary review $1\n",
+        package_dir.join("extensions").join("demo.ts"),
+        "export default function () {}\n",
+    )
+    .unwrap();
+    fs::write(
+        cwd.join(".pi").join("settings.json"),
+        format!("{{\n  \"packages\": [\"{}\"]\n}}\n", package_dir.display()),
     )
     .unwrap();
 
@@ -471,9 +480,7 @@ async fn run_command_print_mode_loads_prompt_templates_from_temporary_extension_
             provider.clone(),
             String::from("--model"),
             model_id.clone(),
-            String::from("--extension"),
-            package_dir.to_string_lossy().into_owned(),
-            String::from("/review src/main.rs"),
+            String::from("hello"),
         ],
         stdin_is_tty: true,
         stdin_content: None,
@@ -491,10 +498,15 @@ async fn run_command_print_mode_loads_prompt_templates_from_temporary_extension_
     })
     .await;
 
-    assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
-    let request = recorded.lock().unwrap().clone();
-    let context = request.context.expect("expected recorded context");
-    assert_eq!(last_user_text(&context), "Temporary review src/main.rs\n");
+    assert_eq!(result.exit_code, 1, "stderr: {}", result.stderr);
+    assert!(result.stdout.is_empty(), "stdout: {}", result.stdout);
+    assert!(
+        result
+            .stderr
+            .contains("Disable configured extension resource"),
+        "stderr: {}",
+        result.stderr
+    );
 
     unregister_provider(&api);
 }

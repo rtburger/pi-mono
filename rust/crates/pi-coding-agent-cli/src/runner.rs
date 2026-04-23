@@ -4,8 +4,8 @@ mod export_html;
 mod rpc_extensions;
 
 use crate::{
-    AppMode, Args, Diagnostic, DiagnosticKind, ListModels, OverlayAuthSource, PrintModeOptions,
-    ProcessFileOptions,
+    AppMode, Args, DefaultPackageManager, Diagnostic, DiagnosticKind, ListModels,
+    OverlayAuthSource, PrintModeOptions, ProcessFileOptions,
     auth::{
         OAuthProviderSummary, best_effort_open_browser, list_persisted_oauth_providers,
         oauth_provider_name, oauth_provider_summaries, persist_oauth_credentials,
@@ -58,7 +58,9 @@ use pi_coding_agent_tui::{
     UserMessageSelectorComponent, UserMessageSelectorItem, get_available_themes, init_theme,
     key_hint, key_text, set_registered_themes, set_theme,
 };
-use pi_config::{LoadedRuntimeSettings, ThinkingBudgetsSettings, load_runtime_settings};
+use pi_config::{
+    LoadedRuntimeSettings, ThinkingBudgetsSettings, load_resource_settings, load_runtime_settings,
+};
 use pi_events::{AssistantContent, Message, Model, UserContent};
 use pi_tui::{
     AutocompleteItem, CombinedAutocompleteProvider, Component, Input, ProcessTerminal,
@@ -1814,6 +1816,15 @@ async fn run_interactive_iteration(
         scoped_models_override,
         runtime_settings_override,
     } = options;
+
+    if let Some(message) = unsupported_extension_configuration_message(&cwd, agent_dir.as_deref()) {
+        eprintln!("Error: {message}");
+        return InteractiveIterationOutcome {
+            exit_code: 1,
+            transition: None,
+            session_context: None,
+        };
+    }
 
     let runtime_settings = runtime_settings_override.unwrap_or_else(|| {
         agent_dir
@@ -5795,6 +5806,17 @@ async fn run_command_with_terminal_factory(
     let runtime_cwd = prepared_session.runtime_cwd;
     let session_support = prepared_session.session_support;
 
+    if let Some(message) =
+        unsupported_extension_configuration_message(&runtime_cwd, agent_dir.as_deref())
+    {
+        push_line(&mut stderr, &format!("Error: {message}"));
+        return RunCommandResult {
+            exit_code: 1,
+            stdout,
+            stderr,
+        };
+    }
+
     let runtime_settings = agent_dir
         .as_deref()
         .map(|agent_dir| load_runtime_settings(&runtime_cwd, agent_dir))
@@ -6265,6 +6287,14 @@ async fn run_rpc_command_live_with_terminal_factory(
                 return 1;
             }
         };
+
+    if let Some(message) = unsupported_extension_configuration_message(
+        &prepared_session.runtime_cwd,
+        agent_dir.as_deref(),
+    ) {
+        stderr_emitter(format!("Error: {message}\n"));
+        return 1;
+    }
 
     let prepared = RpcPreparedOptions {
         parsed,
@@ -6954,6 +6984,12 @@ async fn build_rpc_state(
     stdout_emitter: TextEmitter,
     stderr_emitter: TextEmitter,
 ) -> Result<(RpcState, String), String> {
+    if let Some(message) =
+        unsupported_extension_configuration_message(cwd, options.agent_dir.as_deref())
+    {
+        return Err(format!("Error: {message}\n"));
+    }
+
     let mut resources = load_cli_resources(&options.parsed, cwd, options.agent_dir.as_deref());
     let mut resource_output = String::new();
     for warning in &resources.warnings {
@@ -13717,6 +13753,50 @@ fn render_no_models_message(models_json_path: Option<&Path>) -> String {
     output
 }
 
+fn directory_has_entries(path: &Path) -> bool {
+    fs::read_dir(path)
+        .ok()
+        .and_then(|mut entries| entries.find_map(Result::ok))
+        .is_some()
+}
+
+fn unsupported_extension_configuration_message(
+    cwd: &Path,
+    agent_dir: Option<&Path>,
+) -> Option<String> {
+    let agent_dir = agent_dir?;
+    let settings = load_resource_settings(cwd, agent_dir);
+    if !settings.global.extensions.is_empty() || !settings.project.extensions.is_empty() {
+        return Some(String::from(
+            "Extensions are not supported in the Rust CLI rewrite. Remove `extensions` entries from settings.",
+        ));
+    }
+
+    if directory_has_entries(&cwd.join(".pi").join("extensions"))
+        || directory_has_entries(&agent_dir.join("extensions"))
+    {
+        return Some(String::from(
+            "Extensions are not supported in the Rust CLI rewrite. Remove auto-discovered extension directories.",
+        ));
+    }
+
+    let package_manager = DefaultPackageManager::new(cwd.to_path_buf(), agent_dir.to_path_buf());
+    if let Ok(output) = package_manager.resolve()
+        && let Some(resource) = output
+            .resolved
+            .extensions
+            .iter()
+            .find(|resource| resource.enabled)
+    {
+        return Some(format!(
+            "Extensions are not supported in the Rust CLI rewrite. Disable configured extension resource: {}",
+            resource.path
+        ));
+    }
+
+    None
+}
+
 fn unsupported_flag_message(_parsed: &Args) -> Option<String> {
     None
 }
@@ -13747,10 +13827,12 @@ fn render_help() -> String {
         "  - interactive bash via !<command> and !!<command>",
         "  - --list-models [search]",
         "  - --export <session.jsonl> [out.html]",
-        "  - --extension/-e, --no-extensions (RPC extension commands/resources/UI bridge)",
         "  - --skill, --no-skills, --prompt-template, --no-prompt-templates",
         "  - --theme, --no-themes",
         "  - @file text/image preprocessing",
+        "",
+        "Not supported in the Rust CLI rewrite:",
+        "  - extensions (--extension/-e, --no-extensions, settings-based extensions, extension packages)",
         "",
         "RPC mode limitations:",
         "  - @file arguments are rejected",
@@ -14448,6 +14530,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "extensions are unsupported in the Rust CLI rewrite"]
     async fn interactive_extension_input_dialog_accepts_response_and_updates_prompt_text() {
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             provider: "interactive-extension-input-faux".into(),
@@ -14554,6 +14637,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "extensions are unsupported in the Rust CLI rewrite"]
     async fn interactive_prompt_applies_input_and_before_agent_start_hooks() {
         let (model, api, recorded) = register_interactive_recording_provider("hooked response");
         let cwd = unique_temp_dir("interactive-extension-hooks-cwd");
@@ -14665,6 +14749,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "extensions are unsupported in the Rust CLI rewrite"]
     async fn interactive_extension_select_dialog_returns_selected_option() {
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             provider: "interactive-extension-select-faux".into(),
@@ -14749,6 +14834,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "extensions are unsupported in the Rust CLI rewrite"]
     async fn interactive_extension_header_footer_and_widgets_render_in_shell() {
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             provider: "interactive-extension-shell-ui-faux".into(),
@@ -14847,6 +14933,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "extensions are unsupported in the Rust CLI rewrite"]
     async fn interactive_extension_custom_editor_component_submits_prompt() {
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             provider: "interactive-extension-custom-editor-faux".into(),
@@ -15229,6 +15316,7 @@ export default function (pi) {
     }
 
     #[tokio::test]
+    #[ignore = "extensions are unsupported in the Rust CLI rewrite"]
     async fn rpc_extension_ui_response_resolves_pending_dialog_request() {
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             provider: "rpc-extension-ui-response-faux".into(),
@@ -16222,6 +16310,7 @@ export default function (pi) {
     }
 
     #[tokio::test]
+    #[ignore = "extensions are unsupported in the Rust CLI rewrite"]
     async fn interactive_extension_shortcut_executes_handler() {
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             provider: "interactive-shortcut-faux".into(),
