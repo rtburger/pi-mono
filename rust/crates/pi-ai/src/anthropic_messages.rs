@@ -960,59 +960,67 @@ impl AnthropicStreamState {
         emitted
     }
 
+    fn handle_content_block_stop(
+        &mut self,
+        event: &AnthropicStreamEnvelope,
+    ) -> Vec<AssistantEvent> {
+        let mut emitted = Vec::new();
+        let Some(provider_index) = usize_field(&event.data, "index") else {
+            return emitted;
+        };
+        let Some(content_index) = self.block_indices.remove(&provider_index) else {
+            return emitted;
+        };
+        match self.output.content.get(content_index).cloned() {
+            Some(AssistantContent::Text { text, .. }) => {
+                emitted.push(AssistantEvent::TextEnd {
+                    content_index,
+                    content: text,
+                    partial: self.output.clone(),
+                });
+            }
+            Some(AssistantContent::Thinking { thinking, .. }) => {
+                emitted.push(AssistantEvent::ThinkingEnd {
+                    content_index,
+                    content: thinking,
+                    partial: self.output.clone(),
+                });
+            }
+            Some(AssistantContent::ToolCall { mut arguments, .. }) => {
+                if let Some(buffer) = self.partial_tool_json.remove(&provider_index)
+                    && (!buffer.is_empty() || arguments.is_empty())
+                {
+                    let parsed = parse_tool_arguments_best_effort(&buffer);
+                    if let Some(AssistantContent::ToolCall {
+                        arguments: existing,
+                        ..
+                    }) = self.output.content.get_mut(content_index)
+                    {
+                        *existing = parsed.clone();
+                    }
+                    arguments = parsed;
+                }
+                let tool_call = self.output.content[content_index].clone();
+                let _ = arguments;
+                emitted.push(AssistantEvent::ToolCallEnd {
+                    content_index,
+                    tool_call,
+                    partial: self.output.clone(),
+                });
+            }
+            None => {}
+        }
+
+        emitted
+    }
+
     fn process_event(&mut self, event: &AnthropicStreamEnvelope) -> Vec<AssistantEvent> {
         let mut emitted = Vec::new();
         match event.event_type.as_str() {
             "message_start" => self.handle_message_start(event),
             "content_block_start" => emitted = self.handle_content_block_start(event),
             "content_block_delta" => emitted = self.handle_content_block_delta(event),
-            "content_block_stop" => {
-                let Some(provider_index) = usize_field(&event.data, "index") else {
-                    return emitted;
-                };
-                let Some(content_index) = self.block_indices.remove(&provider_index) else {
-                    return emitted;
-                };
-                match self.output.content.get(content_index).cloned() {
-                    Some(AssistantContent::Text { text, .. }) => {
-                        emitted.push(AssistantEvent::TextEnd {
-                            content_index,
-                            content: text,
-                            partial: self.output.clone(),
-                        });
-                    }
-                    Some(AssistantContent::Thinking { thinking, .. }) => {
-                        emitted.push(AssistantEvent::ThinkingEnd {
-                            content_index,
-                            content: thinking,
-                            partial: self.output.clone(),
-                        });
-                    }
-                    Some(AssistantContent::ToolCall { mut arguments, .. }) => {
-                        if let Some(buffer) = self.partial_tool_json.remove(&provider_index)
-                            && (!buffer.is_empty() || arguments.is_empty())
-                        {
-                            let parsed = parse_tool_arguments_best_effort(&buffer);
-                            if let Some(AssistantContent::ToolCall {
-                                arguments: existing,
-                                ..
-                            }) = self.output.content.get_mut(content_index)
-                            {
-                                *existing = parsed.clone();
-                            }
-                            arguments = parsed;
-                        }
-                        let tool_call = self.output.content[content_index].clone();
-                        let _ = arguments;
-                        emitted.push(AssistantEvent::ToolCallEnd {
-                            content_index,
-                            tool_call,
-                            partial: self.output.clone(),
-                        });
-                    }
-                    None => {}
-                }
-            }
+            "content_block_stop" => emitted = self.handle_content_block_stop(event),
             "message_delta" => {
                 if let Some(delta) = object_field(&event.data, "delta")
                     && let Some(stop_reason) = string_field(delta, "stop_reason")
