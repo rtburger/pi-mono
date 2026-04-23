@@ -11,6 +11,7 @@ pub mod prompt_templates;
 pub mod resource_loader;
 pub mod resource_types;
 pub mod runtime;
+pub mod session_cwd;
 pub mod session_manager;
 pub mod skill_block;
 pub mod skills;
@@ -64,6 +65,10 @@ pub use runtime::{
     CreateAgentSessionRuntimeFactory, CreateAgentSessionRuntimeFuture, CreateCodingAgentCoreResult,
     ForkMessageCandidate, NavigateTreeOptions, RetrySettings, SessionStats, SessionTokenUsage,
     create_agent_session, create_agent_session_runtime, create_coding_agent_core,
+};
+pub use session_cwd::{
+    SessionCwdIssue, assert_session_cwd_exists, format_missing_session_cwd_error,
+    format_missing_session_cwd_prompt, get_missing_session_cwd_issue,
 };
 pub use session_manager::{
     CURRENT_SESSION_VERSION, FileEntry, NewSessionOptions, SessionContext, SessionEntry,

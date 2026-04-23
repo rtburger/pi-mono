@@ -8,7 +8,7 @@ use crate::{
     create_bash_execution_message, estimate_context_tokens, filter_blocked_images,
     generate_branch_summary_with_details, get_latest_compaction_entry, latest_compaction_timestamp,
     model_resolver::{parse_thinking_level, restore_model_from_session},
-    prepare_compaction, should_compact,
+    prepare_compaction, session_cwd::assert_session_cwd_exists, should_compact,
     tree_navigation::{
         TreeNavigationResult, TreeNavigationSummary, apply_tree_navigation, prepare_tree_navigation,
     },
@@ -2098,6 +2098,8 @@ pub enum AgentSessionRuntimeError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("{0}")]
+    MissingSessionCwd(#[from] crate::SessionCwdIssue),
+    #[error("{0}")]
     Message(String),
 }
 
@@ -2218,6 +2220,7 @@ impl AgentSessionRuntime {
         cwd_override: Option<&str>,
     ) -> Result<(), AgentSessionRuntimeError> {
         let manager = SessionManager::open(session_path, None, cwd_override)?;
+        assert_session_cwd_exists(&manager, self.cwd())?;
         let cwd = PathBuf::from(manager.get_cwd());
         self.replace_runtime(cwd, Some(Arc::new(Mutex::new(manager))))
             .await
@@ -2332,6 +2335,13 @@ impl AgentSessionRuntime {
             )?))
         };
 
+        {
+            let session_manager = session_manager
+                .lock()
+                .expect("session manager mutex poisoned");
+            assert_session_cwd_exists(&session_manager, self.cwd())?;
+        }
+
         let cwd = {
             let session_manager = session_manager
                 .lock()
@@ -2369,6 +2379,13 @@ impl AgentSessionRuntime {
         cwd: PathBuf,
         session_manager: Option<Arc<Mutex<SessionManager>>>,
     ) -> Result<(), AgentSessionRuntimeError> {
+        if let Some(session_manager) = session_manager.as_ref() {
+            let session_manager = session_manager
+                .lock()
+                .expect("session manager mutex poisoned");
+            assert_session_cwd_exists(&session_manager, &cwd)?;
+        }
+
         let result = (self.create_runtime)(AgentSessionRuntimeRequest {
             cwd: cwd.clone(),
             session_manager,
@@ -2388,6 +2405,12 @@ pub async fn create_agent_session_runtime(
     request: AgentSessionRuntimeRequest,
 ) -> Result<AgentSessionRuntime, AgentSessionRuntimeError> {
     let fallback_cwd = request.cwd.clone();
+    if let Some(session_manager) = request.session_manager.as_ref() {
+        let session_manager = session_manager
+            .lock()
+            .expect("session manager mutex poisoned");
+        assert_session_cwd_exists(&session_manager, &fallback_cwd)?;
+    }
     let result = create_runtime(request).await?;
     let cwd = current_runtime_cwd(&result.session, &fallback_cwd);
     Ok(AgentSessionRuntime {
