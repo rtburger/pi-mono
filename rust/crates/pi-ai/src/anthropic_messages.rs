@@ -1014,6 +1014,21 @@ impl AnthropicStreamState {
         emitted
     }
 
+    fn handle_message_delta(&mut self, event: &AnthropicStreamEnvelope) -> Vec<AssistantEvent> {
+        if let Some(delta) = object_field(&event.data, "delta")
+            && let Some(stop_reason) = string_field(delta, "stop_reason")
+        {
+            match map_stop_reason(stop_reason) {
+                Ok(stop_reason) => self.output.stop_reason = stop_reason,
+                Err(message) => return vec![self.error_event(message)],
+            }
+        }
+        if let Some(usage) = object_field(&event.data, "usage") {
+            self.apply_usage(usage, false);
+        }
+        Vec::new()
+    }
+
     fn process_event(&mut self, event: &AnthropicStreamEnvelope) -> Vec<AssistantEvent> {
         let mut emitted = Vec::new();
         match event.event_type.as_str() {
@@ -1021,19 +1036,7 @@ impl AnthropicStreamState {
             "content_block_start" => emitted = self.handle_content_block_start(event),
             "content_block_delta" => emitted = self.handle_content_block_delta(event),
             "content_block_stop" => emitted = self.handle_content_block_stop(event),
-            "message_delta" => {
-                if let Some(delta) = object_field(&event.data, "delta")
-                    && let Some(stop_reason) = string_field(delta, "stop_reason")
-                {
-                    match map_stop_reason(stop_reason) {
-                        Ok(stop_reason) => self.output.stop_reason = stop_reason,
-                        Err(message) => return vec![self.error_event(message)],
-                    }
-                }
-                if let Some(usage) = object_field(&event.data, "usage") {
-                    self.apply_usage(usage, false);
-                }
-            }
+            "message_delta" => emitted = self.handle_message_delta(event),
             "error" => {
                 let message = object_field(&event.data, "error")
                     .and_then(|error| string_field(error, "message"))
