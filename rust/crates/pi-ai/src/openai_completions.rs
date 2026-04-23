@@ -508,120 +508,8 @@ pub fn convert_openai_completions_messages(
                 index += 1;
             }
             Message::Assistant { content, .. } => {
-                let mut assistant = OpenAiCompletionsMessageParam {
-                    role: "assistant".into(),
-                    content: if compat.requires_assistant_after_tool_result {
-                        OpenAiCompletionsMessageContent::Text(String::new())
-                    } else {
-                        OpenAiCompletionsMessageContent::Null(())
-                    },
-                    tool_calls: None,
-                    tool_call_id: None,
-                    name: None,
-                    extra: BTreeMap::new(),
-                };
-
-                let text_blocks = content
-                    .iter()
-                    .filter_map(|block| match block {
-                        AssistantContent::Text { text, .. } if !text.trim().is_empty() => {
-                            Some(sanitize_provider_text(text))
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                if !text_blocks.is_empty() {
-                    assistant.content = OpenAiCompletionsMessageContent::Text(text_blocks.join(""));
-                }
-
-                let thinking_blocks = content
-                    .iter()
-                    .filter_map(|block| match block {
-                        AssistantContent::Thinking { thinking, .. }
-                            if !thinking.trim().is_empty() =>
-                        {
-                            Some(sanitize_provider_text(thinking))
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                if !thinking_blocks.is_empty() {
-                    if compat.requires_thinking_as_text {
-                        let thinking_text = thinking_blocks.join("\n\n");
-                        assistant.content = match assistant.content {
-                            OpenAiCompletionsMessageContent::Text(ref existing)
-                                if !existing.is_empty() =>
-                            {
-                                OpenAiCompletionsMessageContent::Text(format!(
-                                    "{thinking_text}\n\n{existing}"
-                                ))
-                            }
-                            _ => OpenAiCompletionsMessageContent::Text(thinking_text),
-                        };
-                    } else if let Some(signature) = content.iter().find_map(|block| match block {
-                        AssistantContent::Thinking {
-                            thinking_signature: Some(signature),
-                            ..
-                        } if !signature.is_empty() => Some(signature.as_str()),
-                        _ => None,
-                    }) {
-                        assistant.extra.insert(
-                            signature.to_string(),
-                            Value::String(thinking_blocks.join("\n")),
-                        );
-                    }
-                }
-
-                let tool_calls = content
-                    .iter()
-                    .filter_map(|block| match block {
-                        AssistantContent::ToolCall {
-                            id,
-                            name,
-                            arguments,
-                            thought_signature,
-                        } => Some((
-                            OpenAiCompletionsToolCall {
-                                id: id.clone(),
-                                call_type: "function".into(),
-                                function: OpenAiCompletionsToolCallFunction {
-                                    name: name.clone(),
-                                    arguments: serde_json::to_string(arguments)
-                                        .unwrap_or_else(|_| "{}".into()),
-                                },
-                            },
-                            thought_signature.clone(),
-                        )),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                if !tool_calls.is_empty() {
-                    assistant.tool_calls = Some(
-                        tool_calls
-                            .iter()
-                            .map(|(tool_call, _)| tool_call.clone())
-                            .collect(),
-                    );
-                    let reasoning_details = tool_calls
-                        .iter()
-                        .filter_map(|(_, signature)| signature.as_ref())
-                        .filter_map(|signature| serde_json::from_str::<Value>(signature).ok())
-                        .collect::<Vec<_>>();
-                    if !reasoning_details.is_empty() {
-                        assistant
-                            .extra
-                            .insert("reasoning_details".into(), Value::Array(reasoning_details));
-                    }
-                }
-
-                let has_content = match &assistant.content {
-                    OpenAiCompletionsMessageContent::Text(text) => !text.is_empty(),
-                    OpenAiCompletionsMessageContent::Parts(parts) => !parts.is_empty(),
-                    OpenAiCompletionsMessageContent::Null(()) => false,
-                };
-                if has_content || assistant.tool_calls.is_some() {
-                    params.push(assistant);
-                    last_role = Some("assistant");
+                if let Some(role) = push_assistant_message(&mut params, content, compat) {
+                    last_role = Some(role);
                 }
                 index += 1;
             }
@@ -860,6 +748,128 @@ fn push_user_message(
         extra: BTreeMap::new(),
     });
     Some("user")
+}
+
+// TODO(wave3+): subdivide into text/thinking/tool_calls helpers
+#[allow(clippy::too_many_lines)]
+fn push_assistant_message(
+    params: &mut Vec<OpenAiCompletionsMessageParam>,
+    content: &[AssistantContent],
+    compat: &OpenAiCompletionsCompat,
+) -> Option<&'static str> {
+    let mut assistant = OpenAiCompletionsMessageParam {
+        role: "assistant".into(),
+        content: if compat.requires_assistant_after_tool_result {
+            OpenAiCompletionsMessageContent::Text(String::new())
+        } else {
+            OpenAiCompletionsMessageContent::Null(())
+        },
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+        extra: BTreeMap::new(),
+    };
+
+    let text_blocks = content
+        .iter()
+        .filter_map(|block| match block {
+            AssistantContent::Text { text, .. } if !text.trim().is_empty() => {
+                Some(sanitize_provider_text(text))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !text_blocks.is_empty() {
+        assistant.content = OpenAiCompletionsMessageContent::Text(text_blocks.join(""));
+    }
+
+    let thinking_blocks = content
+        .iter()
+        .filter_map(|block| match block {
+            AssistantContent::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
+                Some(sanitize_provider_text(thinking))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !thinking_blocks.is_empty() {
+        if compat.requires_thinking_as_text {
+            let thinking_text = thinking_blocks.join("\n\n");
+            assistant.content = match assistant.content {
+                OpenAiCompletionsMessageContent::Text(ref existing) if !existing.is_empty() => {
+                    OpenAiCompletionsMessageContent::Text(format!(
+                        "{thinking_text}\n\n{existing}"
+                    ))
+                }
+                _ => OpenAiCompletionsMessageContent::Text(thinking_text),
+            };
+        } else if let Some(signature) = content.iter().find_map(|block| match block {
+            AssistantContent::Thinking {
+                thinking_signature: Some(signature),
+                ..
+            } if !signature.is_empty() => Some(signature.as_str()),
+            _ => None,
+        }) {
+            assistant.extra.insert(
+                signature.to_string(),
+                Value::String(thinking_blocks.join("\n")),
+            );
+        }
+    }
+
+    let tool_calls = content
+        .iter()
+        .filter_map(|block| match block {
+            AssistantContent::ToolCall {
+                id,
+                name,
+                arguments,
+                thought_signature,
+            } => Some((
+                OpenAiCompletionsToolCall {
+                    id: id.clone(),
+                    call_type: "function".into(),
+                    function: OpenAiCompletionsToolCallFunction {
+                        name: name.clone(),
+                        arguments: serde_json::to_string(arguments)
+                            .unwrap_or_else(|_| "{}".into()),
+                    },
+                },
+                thought_signature.clone(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !tool_calls.is_empty() {
+        assistant.tool_calls = Some(
+            tool_calls
+                .iter()
+                .map(|(tool_call, _)| tool_call.clone())
+                .collect(),
+        );
+        let reasoning_details = tool_calls
+            .iter()
+            .filter_map(|(_, signature)| signature.as_ref())
+            .filter_map(|signature| serde_json::from_str::<Value>(signature).ok())
+            .collect::<Vec<_>>();
+        if !reasoning_details.is_empty() {
+            assistant
+                .extra
+                .insert("reasoning_details".into(), Value::Array(reasoning_details));
+        }
+    }
+
+    let has_content = match &assistant.content {
+        OpenAiCompletionsMessageContent::Text(text) => !text.is_empty(),
+        OpenAiCompletionsMessageContent::Parts(parts) => !parts.is_empty(),
+        OpenAiCompletionsMessageContent::Null(()) => false,
+    };
+    if has_content || assistant.tool_calls.is_some() {
+        params.push(assistant);
+        Some("assistant")
+    } else {
+        None
+    }
 }
 
 fn assistant_bridge_message() -> OpenAiCompletionsMessageParam {
