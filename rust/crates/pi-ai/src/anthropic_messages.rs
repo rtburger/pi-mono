@@ -785,19 +785,21 @@ impl AnthropicStreamState {
         }
     }
 
+    fn handle_message_start(&mut self, event: &AnthropicStreamEnvelope) {
+        if let Some(message) = object_field(&event.data, "message") {
+            if let Some(id) = string_field(message, "id") {
+                self.output.response_id = Some(id.to_string());
+            }
+            if let Some(usage) = object_field(message, "usage") {
+                self.apply_usage(usage, true);
+            }
+        }
+    }
+
     fn process_event(&mut self, event: &AnthropicStreamEnvelope) -> Vec<AssistantEvent> {
         let mut emitted = Vec::new();
         match event.event_type.as_str() {
-            "message_start" => {
-                if let Some(message) = object_field(&event.data, "message") {
-                    if let Some(id) = string_field(message, "id") {
-                        self.output.response_id = Some(id.to_string());
-                    }
-                    if let Some(usage) = object_field(message, "usage") {
-                        self.apply_usage(usage, true);
-                    }
-                }
-            }
+            "message_start" => self.handle_message_start(event),
             "content_block_start" => {
                 let Some(provider_index) = usize_field(&event.data, "index") else {
                     return emitted;
