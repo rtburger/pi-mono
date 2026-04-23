@@ -529,7 +529,7 @@ where
                         }
                     };
 
-                    for event in events {
+                    for event in &events {
                         let emitted = state.process_event(event);
                         for assistant_event in emitted {
                             let terminal = is_terminal_event(&assistant_event);
@@ -548,7 +548,7 @@ where
                             return;
                         }
                     };
-                    for event in events {
+                    for event in &events {
                         let emitted = state.process_event(event);
                         for assistant_event in emitted {
                             let terminal = is_terminal_event(&assistant_event);
@@ -579,7 +579,7 @@ pub fn stream_anthropic_sse_events(
     Box::pin(stream! {
         let mut state = AnthropicStreamState::new(&model, is_oauth_token, tools);
         yield Ok(state.start_event());
-        for event in events {
+        for event in &events {
             let emitted = state.process_event(event);
             for assistant_event in emitted {
                 let terminal = is_terminal_event(&assistant_event);
@@ -785,7 +785,7 @@ impl AnthropicStreamState {
         }
     }
 
-    fn process_event(&mut self, event: AnthropicStreamEnvelope) -> Vec<AssistantEvent> {
+    fn process_event(&mut self, event: &AnthropicStreamEnvelope) -> Vec<AssistantEvent> {
         let mut emitted = Vec::new();
         match event.event_type.as_str() {
             "message_start" => {
