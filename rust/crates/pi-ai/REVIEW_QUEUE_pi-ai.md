@@ -1,0 +1,12 @@
+- [x] crates/pi-ai/src/anthropic_messages.rs
+- [x] crates/pi-ai/src/bin/pi-ai-catalog.rs
+- [x] crates/pi-ai/src/lib.rs
+- [x] crates/pi-ai/src/main.rs
+- [x] crates/pi-ai/src/models.rs
+- [x] crates/pi-ai/src/oauth.rs
+- [x] crates/pi-ai/src/openai_codex_responses.rs
+- [x] crates/pi-ai/src/openai_completions.rs
+- [x] crates/pi-ai/src/openai_responses.rs
+- [x] crates/pi-ai/src/overflow.rs
+- [x] crates/pi-ai/src/partial_json.rs
+- [x] crates/pi-ai/src/unicode.rs

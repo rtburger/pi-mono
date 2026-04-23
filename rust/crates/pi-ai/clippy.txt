@@ -1,0 +1,455 @@
+warning: you are deriving `PartialEq` and can implement `Eq`
+  --> crates/pi-events/src/lib.rs:36:24
+   |
+36 | #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+   |                        ^^^^^^^^^ help: consider deriving `Eq` as well: `PartialEq, Eq`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#derive_partial_eq_without_eq
+   = note: `-W clippy::derive-partial-eq-without-eq` implied by `-W clippy::nursery`
+   = help: to override `-W clippy::nursery` add `#[allow(clippy::derive_partial_eq_without_eq)]`
+
+warning: this could be a `const fn`
+  --> crates/pi-events/src/lib.rs:60:1
+   |
+60 | / fn is_false(value: &bool) -> bool {
+61 | |     !*value
+62 | | }
+   | |_^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#missing_const_for_fn
+   = note: `-W clippy::missing-const-for-fn` implied by `-W clippy::nursery`
+   = help: to override `-W clippy::nursery` add `#[allow(clippy::missing_const_for_fn)]`
+help: make the function `const`
+   |
+60 | const fn is_false(value: &bool) -> bool {
+   | +++++
+
+warning: this argument (1 byte) is passed by reference, but would be more efficient if passed by value (limit: 8 byte)
+  --> crates/pi-events/src/lib.rs:60:20
+   |
+60 | fn is_false(value: &bool) -> bool {
+   |                    ^^^^^ help: consider passing by value instead: `bool`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#trivially_copy_pass_by_ref
+   = note: `-W clippy::trivially-copy-pass-by-ref` implied by `-W clippy::pedantic`
+   = help: to override `-W clippy::pedantic` add `#[allow(clippy::trivially_copy_pass_by_ref)]`
+
+warning: you are deriving `PartialEq` and can implement `Eq`
+  --> crates/pi-events/src/lib.rs:64:24
+   |
+64 | #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+   |                        ^^^^^^^^^ help: consider deriving `Eq` as well: `PartialEq, Eq`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#derive_partial_eq_without_eq
+
+warning: this method could have a `#[must_use]` attribute
+   --> crates/pi-events/src/lib.rs:248:12
+    |
+248 |     pub fn as_openai_completions(&self) -> Option<&OpenAiCompletionsCompatConfig> {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#must_use_candidate
+    = note: `-W clippy::must-use-candidate` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::must_use_candidate)]`
+help: add the attribute
+    |
+248 ~     #[must_use] 
+249 ~     pub fn as_openai_completions(&self) -> Option<&OpenAiCompletionsCompatConfig> {
+    |
+
+warning: this could be a `const fn`
+   --> crates/pi-events/src/lib.rs:248:5
+    |
+248 | /     pub fn as_openai_completions(&self) -> Option<&OpenAiCompletionsCompatConfig> {
+249 | |         match self {
+250 | |             Self::OpenAiCompletions(config) => Some(config),
+251 | |             Self::OpenAiResponses(_) => None,
+252 | |         }
+253 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+248 |     pub const fn as_openai_completions(&self) -> Option<&OpenAiCompletionsCompatConfig> {
+    |         +++++
+
+warning: this method could have a `#[must_use]` attribute
+   --> crates/pi-events/src/lib.rs:255:12
+    |
+255 |     pub fn as_openai_responses(&self) -> Option<&OpenAiResponsesCompatConfig> {
+    |            ^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#must_use_candidate
+help: add the attribute
+    |
+255 ~     #[must_use] 
+256 ~     pub fn as_openai_responses(&self) -> Option<&OpenAiResponsesCompatConfig> {
+    |
+
+warning: this could be a `const fn`
+   --> crates/pi-events/src/lib.rs:255:5
+    |
+255 | /     pub fn as_openai_responses(&self) -> Option<&OpenAiResponsesCompatConfig> {
+256 | |         match self {
+257 | |             Self::OpenAiResponses(config) => Some(config),
+258 | |             Self::OpenAiCompletions(_) => None,
+259 | |         }
+260 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+255 |     pub const fn as_openai_responses(&self) -> Option<&OpenAiResponsesCompatConfig> {
+    |         +++++
+
+warning: you are deriving `PartialEq` and can implement `Eq`
+   --> crates/pi-events/src/lib.rs:292:24
+    |
+292 | #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    |                        ^^^^^^^^^ help: consider deriving `Eq` as well: `PartialEq, Eq`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#derive_partial_eq_without_eq
+
+warning: `pi-events` (lib) generated 9 warnings (run `cargo clippy --fix --lib -p pi-events` to apply 8 suggestions)
+crates/pi-ai/src/openai_codex_responses.rs:538:17: warning: unnested or-patterns
+crates/pi-ai/src/openai_completions.rs:276:9: warning: binding's name is too similar to existing binding
+crates/pi-ai/src/openai_responses.rs:254:21: warning: binding's name is too similar to existing binding
+crates/pi-ai/src/openai_responses.rs:719:23: warning: long literal lacking separators: help: consider: `0xdead_beef`
+crates/pi-ai/src/openai_responses.rs:720:23: warning: long literal lacking separators: help: consider: `0x41c6_ce57`
+crates/pi-ai/src/openai_responses.rs:723:37: warning: long literal lacking separators: help: consider: `2_654_435_761`
+crates/pi-ai/src/openai_responses.rs:724:37: warning: long literal lacking separators: help: consider: `1_597_334_677`
+crates/pi-ai/src/openai_responses.rs:726:41: warning: long literal lacking separators: help: consider: `2_246_822_507`
+crates/pi-ai/src/openai_responses.rs:726:86: warning: long literal lacking separators: help: consider: `3_266_489_909`
+crates/pi-ai/src/openai_responses.rs:727:41: warning: long literal lacking separators: help: consider: `2_246_822_507`
+crates/pi-ai/src/openai_responses.rs:727:86: warning: long literal lacking separators: help: consider: `3_266_489_909`
+crates/pi-ai/src/lib.rs:744:5: warning: binding's name is too similar to existing binding
+crates/pi-ai/src/anthropic_messages.rs:106:24: warning: you are deriving `PartialEq` and can implement `Eq`: help: consider deriving `Eq` as well: `PartialEq, Eq`
+crates/pi-ai/src/anthropic_messages.rs:162:24: warning: you are deriving `PartialEq` and can implement `Eq`: help: consider deriving `Eq` as well: `PartialEq, Eq`
+crates/pi-ai/src/anthropic_messages.rs:170:24: warning: you are deriving `PartialEq` and can implement `Eq`: help: consider deriving `Eq` as well: `PartialEq, Eq`
+crates/pi-ai/src/anthropic_messages.rs:186:24: warning: you are deriving `PartialEq` and can implement `Eq`: help: consider deriving `Eq` as well: `PartialEq, Eq`
+crates/pi-ai/src/anthropic_messages.rs:212:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/anthropic_messages.rs:226:76: warning: redundant clone: help: remove this
+crates/pi-ai/src/anthropic_messages.rs:269:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/anthropic_messages.rs:269:1: warning: this function has too many lines (126/100)
+crates/pi-ai/src/anthropic_messages.rs:322:33: warning: unnecessary boolean `not` operation
+crates/pi-ai/src/anthropic_messages.rs:406:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/anthropic_messages.rs:416:1: warning: this function has too many lines (133/100)
+crates/pi-ai/src/anthropic_messages.rs:464:17: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/anthropic_messages.rs:486:21: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/anthropic_messages.rs:513:21: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/anthropic_messages.rs:573:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/anthropic_messages.rs:1185:1: warning: this function's return value is unnecessarily wrapped by `Option`
+crates/pi-ai/src/anthropic_messages.rs:1455:13: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `UserContent::Text { .. }`
+crates/pi-ai/src/anthropic_messages.rs:1475:1: warning: this function has too many lines (176/100)
+crates/pi-ai/src/anthropic_messages.rs:1549:33: warning: this `if` has identical blocks
+crates/pi-ai/src/anthropic_messages.rs:1707:17: warning: this `match` can be collapsed into the outer `if let`
+crates/pi-ai/src/anthropic_messages.rs:1751:5: warning: use Option::map_or_else instead of an if let/else
+crates/pi-ai/src/anthropic_messages.rs:1774:9: warning: these match arms have identical bodies: the wildcard arm
+crates/pi-ai/src/anthropic_messages.rs:1795:5: warning: called `map(<f>).unwrap_or_else(<g>)` on an `Option` value
+crates/pi-ai/src/anthropic_messages.rs:1804:5: warning: called `map(<f>).unwrap_or_else(<g>)` on an `Option` value
+crates/pi-ai/src/anthropic_messages.rs:1848:43: warning: casting `u64` to `usize` may truncate the value on targets with 32-bit wide pointers
+crates/pi-ai/src/anthropic_messages.rs:1855:1: warning: this could be a `const fn`
+crates/pi-ai/src/anthropic_messages.rs:1862:1: warning: it is more idiomatic to use `Option<&T>` instead of `&Option<T>`
+crates/pi-ai/src/anthropic_messages.rs:1863:5: warning: called `map(<f>).unwrap_or(false)` on an `Option` value
+crates/pi-ai/src/anthropic_messages.rs:1878:5: warning: casting `u128` to `u64` may truncate the value
+crates/pi-ai/src/models.rs:42:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/models.rs:46:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/models.rs:50:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/models.rs:58:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/models.rs:66:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/models.rs:74:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/models.rs:87:53: warning: casting `u64` to `f64` causes a loss of precision (`u64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+crates/pi-ai/src/models.rs:88:55: warning: casting `u64` to `f64` causes a loss of precision (`u64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+crates/pi-ai/src/models.rs:89:63: warning: casting `u64` to `f64` causes a loss of precision (`u64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+crates/pi-ai/src/models.rs:90:65: warning: casting `u64` to `f64` causes a loss of precision (`u64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+crates/pi-ai/src/models.rs:96:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/models.rs:104:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/oauth.rs:49:24: warning: you are deriving `PartialEq` and can implement `Eq`: help: consider deriving `Eq` as well: `PartialEq, Eq`
+crates/pi-ai/src/oauth.rs:68:5: warning: missing `#[must_use]` attribute on a method returning `Self`
+crates/pi-ai/src/oauth.rs:118:5: warning: missing `#[must_use]` attribute on a method returning `Self`
+crates/pi-ai/src/oauth.rs:126:5: warning: missing `#[must_use]` attribute on a method returning `Self`
+crates/pi-ai/src/oauth.rs:135:12: warning: this method could have a `#[must_use]` attribute
+crates/pi-ai/src/oauth.rs:135:5: warning: missing `#[must_use]` attribute on a method returning `Self`
+crates/pi-ai/src/oauth.rs:140:5: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/oauth.rs:144:5: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/oauth.rs:148:5: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/oauth.rs:149:9: warning: use Option::map_or instead of an if let/else: help: try: `self.on_progress.as_ref().map_or(Ok(()), |handler| handler(message.into()))`
+crates/pi-ai/src/oauth.rs:160:12: warning: this method could have a `#[must_use]` attribute
+crates/pi-ai/src/oauth.rs:161:9: warning: called `map(<f>).unwrap_or(false)` on an `Option` value
+crates/pi-ai/src/oauth.rs:182:14: warning: the following explicit lifetimes could be elided: 'a
+crates/pi-ai/src/oauth.rs:184:22: warning: the following explicit lifetimes could be elided: 'a
+crates/pi-ai/src/oauth.rs:186:5: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/oauth.rs:219:21: warning: returning a `str` unnecessarily tied to the lifetime of arguments: help: try: `&'static str`
+crates/pi-ai/src/oauth.rs:223:23: warning: returning a `str` unnecessarily tied to the lifetime of arguments: help: try: `&'static str`
+crates/pi-ai/src/oauth.rs:231:14: warning: the following explicit lifetimes could be elided: 'a
+crates/pi-ai/src/oauth.rs:235:22: warning: the following explicit lifetimes could be elided: 'a
+crates/pi-ai/src/oauth.rs:245:21: warning: returning a `str` unnecessarily tied to the lifetime of arguments: help: try: `&'static str`
+crates/pi-ai/src/oauth.rs:249:23: warning: returning a `str` unnecessarily tied to the lifetime of arguments: help: try: `&'static str`
+crates/pi-ai/src/oauth.rs:257:14: warning: the following explicit lifetimes could be elided: 'a
+crates/pi-ai/src/oauth.rs:261:22: warning: the following explicit lifetimes could be elided: 'a
+crates/pi-ai/src/oauth.rs:304:1: warning: docs for function which may panic missing `# Panics` section
+crates/pi-ai/src/oauth.rs:304:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/oauth.rs:314:1: warning: docs for function which may panic missing `# Panics` section
+crates/pi-ai/src/oauth.rs:319:1: warning: docs for function which may panic missing `# Panics` section
+crates/pi-ai/src/oauth.rs:332:1: warning: docs for function which may panic missing `# Panics` section
+crates/pi-ai/src/oauth.rs:338:1: warning: docs for function which may panic missing `# Panics` section
+crates/pi-ai/src/oauth.rs:338:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/oauth.rs:343:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/oauth.rs:354:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/oauth.rs:362:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/oauth.rs:392:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/oauth.rs:415:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/oauth.rs:419:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/oauth.rs:423:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/oauth.rs:429:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/oauth.rs:436:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/oauth.rs:440:1: warning: this function has too many lines (108/100)
+crates/pi-ai/src/oauth.rs:520:16: warning: this `if` statement can be collapsed
+crates/pi-ai/src/oauth.rs:719:16: warning: this `if` statement can be collapsed
+crates/pi-ai/src/oauth.rs:846:5: warning: use of `format!` to build up a string from an iterator
+crates/pi-ai/src/oauth.rs:882:5: warning: this `if` statement can be collapsed
+crates/pi-ai/src/oauth.rs:929:5: warning: this could be a `const fn`
+crates/pi-ai/src/oauth.rs:1114:9: warning: these match arms have identical bodies: the wildcard arm
+crates/pi-ai/src/oauth.rs:1269:11: warning: manual implementation of `.is_multiple_of()`: help: replace with: `!normalized.len().is_multiple_of(4)`
+crates/pi-ai/src/oauth.rs:1286:5: warning: casting `u128` to `i64` may truncate the value
+crates/pi-ai/src/openai_codex_responses.rs:58:24: warning: you are deriving `PartialEq` and can implement `Eq`: help: consider deriving `Eq` as well: `PartialEq, Eq`
+crates/pi-ai/src/openai_codex_responses.rs:87:24: warning: you are deriving `PartialEq` and can implement `Eq`: help: consider deriving `Eq` as well: `PartialEq, Eq`
+crates/pi-ai/src/openai_codex_responses.rs:147:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/openai_codex_responses.rs:156:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/openai_codex_responses.rs:211:21: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/openai_codex_responses.rs:388:13: warning: unnecessary structure name repetition: help: use the applicable keyword: `Self`
+crates/pi-ai/src/openai_codex_responses.rs:399:9: warning: this `if` statement can be collapsed
+crates/pi-ai/src/openai_codex_responses.rs:425:5: warning: this could be a `const fn`
+crates/pi-ai/src/openai_codex_responses.rs:433:5: warning: this could be a `const fn`
+crates/pi-ai/src/openai_codex_responses.rs:451:27: warning: temporary with significant `Drop` in `if let` scrutinee will live until the end of the `if let` expression
+crates/pi-ai/src/openai_codex_responses.rs:466:50: warning: this argument is passed by value, but not consumed in the function body
+crates/pi-ai/src/openai_codex_responses.rs:466:65: warning: this argument is passed by value, but not consumed in the function body
+crates/pi-ai/src/openai_codex_responses.rs:470:41: warning: redundant clone: help: remove this
+crates/pi-ai/src/openai_codex_responses.rs:519:21: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/openai_codex_responses.rs:538:17: warning: these match arms have identical bodies
+crates/pi-ai/src/openai_codex_responses.rs:540:34: warning: called `map(<f>).unwrap_or_else(<g>)` on an `Option` value: help: try: `frame.map_or_else(|| "WebSocket closed before response.completed".into(), |frame| format!("WebSocket closed {} {}", u16::from(frame.code), frame.reason))`
+crates/pi-ai/src/openai_codex_responses.rs:693:13: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/openai_codex_responses.rs:737:13: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/openai_codex_responses.rs:808:17: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/openai_codex_responses.rs:864:13: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/openai_codex_responses.rs:877:13: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/openai_codex_responses.rs:878:13: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/openai_codex_responses.rs:1190:5: warning: use Option::map_or_else instead of an if let/else
+crates/pi-ai/src/openai_codex_responses.rs:1253:5: warning: casting `u128` to `u64` may truncate the value
+crates/pi-ai/src/openai_completions.rs:30:12: warning: this method could have a `#[must_use]` attribute
+crates/pi-ai/src/openai_completions.rs:30:5: warning: this could be a `const fn`
+crates/pi-ai/src/openai_completions.rs:44:1: warning: more than 3 bools in a struct
+crates/pi-ai/src/openai_completions.rs:90:1: warning: this `impl` can be derived
+crates/pi-ai/src/openai_completions.rs:205:24: warning: you are deriving `PartialEq` and can implement `Eq`: help: consider deriving `Eq` as well: `PartialEq, Eq`
+crates/pi-ai/src/openai_completions.rs:251:24: warning: you are deriving `PartialEq` and can implement `Eq`: help: consider deriving `Eq` as well: `PartialEq, Eq`
+crates/pi-ai/src/openai_completions.rs:260:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/openai_completions.rs:374:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/openai_completions.rs:467:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/openai_completions.rs:467:1: warning: this function has too many lines (232/100)
+crates/pi-ai/src/openai_completions.rs:690:17: warning: unnecessary boolean `not` operation
+crates/pi-ai/src/openai_completions.rs:719:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/openai_completions.rs:770:53: warning: redundant clone: help: remove this
+crates/pi-ai/src/openai_completions.rs:782:46: warning: redundant clone: help: remove this
+crates/pi-ai/src/openai_completions.rs:782:25: warning: assigning the result of `Clone::clone()` may be inefficient: help: use `clone_from()`: `slot.clone_from(&cache_control)`
+crates/pi-ai/src/openai_completions.rs:867:1: warning: this function has too many lines (173/100)
+crates/pi-ai/src/openai_completions.rs:1453:17: warning: assigning the result of `Clone::clone()` may be inefficient: help: use `clone_from()`: `id.clone_from(next_id)`
+crates/pi-ai/src/openai_completions.rs:1461:17: warning: assigning the result of `Clone::clone()` may be inefficient: help: use `clone_from()`: `name.clone_from(next_name)`
+crates/pi-ai/src/openai_completions.rs:1497:17: warning: `if _ { .. } else { .. }` is an expression
+crates/pi-ai/src/openai_completions.rs:1581:20: warning: use Option::map_or instead of an if let/else: help: try: `line.strip_suffix(b"\r").map_or(line, |stripped| stripped)`
+crates/pi-ai/src/openai_completions.rs:1606:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/openai_completions.rs:1615:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/openai_completions.rs:1623:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/openai_completions.rs:1664:1: warning: this function has too many lines (142/100)
+crates/pi-ai/src/openai_completions.rs:1704:17: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/openai_completions.rs:1726:21: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/openai_completions.rs:1753:21: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/openai_completions.rs:2039:1: warning: this could be a `const fn`
+crates/pi-ai/src/openai_completions.rs:2046:1: warning: it is more idiomatic to use `Option<&T>` instead of `&Option<T>`
+crates/pi-ai/src/openai_completions.rs:2047:5: warning: called `map(<f>).unwrap_or(false)` on an `Option` value
+crates/pi-ai/src/openai_completions.rs:2062:5: warning: casting `u128` to `u64` may truncate the value
+crates/pi-ai/src/openai_responses.rs:43:24: warning: you are deriving `PartialEq` and can implement `Eq`: help: consider deriving `Eq` as well: `PartialEq, Eq`
+crates/pi-ai/src/openai_responses.rs:116:24: warning: you are deriving `PartialEq` and can implement `Eq`: help: consider deriving `Eq` as well: `PartialEq, Eq`
+crates/pi-ai/src/openai_responses.rs:142:24: warning: you are deriving `PartialEq` and can implement `Eq`: help: consider deriving `Eq` as well: `PartialEq, Eq`
+crates/pi-ai/src/openai_responses.rs:153:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/openai_responses.rs:216:1: warning: this function has too many lines (157/100)
+crates/pi-ai/src/openai_responses.rs:220:14: warning: this argument is passed by value, but not consumed in the function body
+crates/pi-ai/src/openai_responses.rs:282:46: warning: called `map(<f>).unwrap_or_else(<g>)` on an `Option` value
+crates/pi-ai/src/openai_responses.rs:300:29: warning: this `if` statement can be collapsed
+crates/pi-ai/src/openai_responses.rs:388:1: warning: this function has too many lines (161/100)
+crates/pi-ai/src/openai_responses.rs:644:5: warning: this `if` statement can be collapsed
+crates/pi-ai/src/openai_responses.rs:668:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/openai_responses.rs:754:5: warning: use Option::map_or_else instead of an if let/else
+crates/pi-ai/src/openai_responses.rs:766:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/openai_responses.rs:773:24: warning: you are deriving `PartialEq` and can implement `Eq`: help: consider deriving `Eq` as well: `PartialEq, Eq`
+crates/pi-ai/src/openai_responses.rs:836:20: warning: use Option::map_or instead of an if let/else: help: try: `line.strip_suffix(b"\r").map_or(line, |stripped| stripped)`
+crates/pi-ai/src/openai_responses.rs:861:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/openai_responses.rs:870:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/openai_responses.rs:999:14: warning: function call inside of `or`: help: try: `or_else(|| self.output.response_id.clone())`
+crates/pi-ai/src/openai_responses.rs:1039:14: warning: function call inside of `or`: help: try: `or_else(|| self.output.response_id.clone())`
+crates/pi-ai/src/openai_responses.rs:1205:25: warning: assigning the result of `Clone::clone()` may be inefficient: help: use `clone_from()`: `text.clone_from(&content)`
+crates/pi-ai/src/openai_responses.rs:1263:25: warning: assigning the result of `Clone::clone()` may be inefficient: help: use `clone_from()`: `thinking.clone_from(&content)`
+crates/pi-ai/src/openai_responses.rs:1296:13: warning: assigning the result of `Clone::clone()` may be inefficient: help: use `clone_from()`: `self.current_tool_json.clone_from(&full)`
+crates/pi-ai/src/openai_responses.rs:1500:1: warning: this function has too many lines (135/100)
+crates/pi-ai/src/openai_responses.rs:1541:17: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/openai_responses.rs:1563:21: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/openai_responses.rs:1590:21: warning: matching over `()` is more explicit: help: use `()` instead of `_`: `()`
+crates/pi-ai/src/openai_responses.rs:1657:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/openai_responses.rs:1693:1: warning: it is more idiomatic to use `Option<&T>` instead of `&Option<T>`
+crates/pi-ai/src/openai_responses.rs:1694:5: warning: called `map(<f>).unwrap_or(false)` on an `Option` value
+crates/pi-ai/src/openai_responses.rs:1746:1: warning: this could be a `const fn`
+crates/pi-ai/src/openai_responses.rs:1808:9: warning: these match arms have identical bodies
+crates/pi-ai/src/openai_responses.rs:1810:9: warning: these match arms have identical bodies: the wildcard arm
+crates/pi-ai/src/openai_responses.rs:1862:1: warning: this could be a `const fn`
+crates/pi-ai/src/openai_responses.rs:1958:5: warning: casting `u128` to `u64` may truncate the value
+crates/pi-ai/src/overflow.rs:5:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/overflow.rs:33:1: warning: docs for function which may panic missing `# Panics` section
+crates/pi-ai/src/partial_json.rs:4:1: warning: pub(crate) function inside private module
+crates/pi-ai/src/partial_json.rs:23:5: warning: this could be a `const fn`
+crates/pi-ai/src/partial_json.rs:56:13: warning: this could be rewritten as `let...else`: help: consider writing: `let Some(key) = self.parse_string() else { return Some(Value::Object(object)) };`
+crates/pi-ai/src/partial_json.rs:67:13: warning: this could be rewritten as `let...else`: help: consider writing: `let Some(value) = self.parse_value() else { return Some(Value::Object(object)) };`
+crates/pi-ai/src/partial_json.rs:82:17: warning: these match arms have identical bodies: the wildcard arm
+crates/pi-ai/src/partial_json.rs:103:13: warning: this could be rewritten as `let...else`: help: consider writing: `let Some(value) = self.parse_value() else { return Some(Value::Array(values)) };`
+crates/pi-ai/src/partial_json.rs:118:17: warning: these match arms have identical bodies: the wildcard arm
+crates/pi-ai/src/partial_json.rs:198:27: warning: casting `f64` to `u64` may truncate the value
+crates/pi-ai/src/partial_json.rs:198:27: warning: casting `f64` to `u64` may lose the sign of the value
+crates/pi-ai/src/partial_json.rs:199:16: warning: strict comparison of `f32` or `f64`: help: consider comparing them within some margin of error: `(integer as f64 - value).abs() < error_margin`
+crates/pi-ai/src/partial_json.rs:199:16: warning: casting `u64` to `f64` causes a loss of precision (`u64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+crates/pi-ai/src/partial_json.rs:203:27: warning: casting `f64` to `i64` may truncate the value
+crates/pi-ai/src/partial_json.rs:204:16: warning: strict comparison of `f32` or `f64`: help: consider comparing them within some margin of error: `(integer as f64 - value).abs() < error_margin`
+crates/pi-ai/src/partial_json.rs:204:16: warning: casting `i64` to `f64` causes a loss of precision (`i64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+crates/pi-ai/src/unicode.rs:11:1: warning: pub(crate) function inside private module
+crates/pi-ai/src/lib.rs:69:5: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/lib.rs:132:9: warning: item in documentation is missing backticks
+crates/pi-ai/src/lib.rs:148:5: warning: this could be a `const fn`
+crates/pi-ai/src/lib.rs:158:5: warning: this could be a `const fn`
+crates/pi-ai/src/lib.rs:188:9: warning: item in documentation is missing backticks
+crates/pi-ai/src/lib.rs:190:9: warning: item in documentation is missing backticks
+crates/pi-ai/src/lib.rs:226:1: warning: docs for function which may panic missing `# Panics` section
+crates/pi-ai/src/lib.rs:230:1: warning: docs for function which may panic missing `# Panics` section
+crates/pi-ai/src/lib.rs:234:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/lib.rs:258:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/lib.rs:258:1: warning: this function can be simplified using the `async fn` syntax
+crates/pi-ai/src/lib.rs:277:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/lib.rs:277:1: warning: this function can be simplified using the `async fn` syntax
+crates/pi-ai/src/lib.rs:296:1: warning: docs for function which may panic missing `# Panics` section
+crates/pi-ai/src/lib.rs:296:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/lib.rs:311:1: warning: docs for function returning `Result` missing `# Errors` section
+crates/pi-ai/src/lib.rs:312:12: warning: this argument is passed by value, but not consumed in the function body
+crates/pi-ai/src/lib.rs:347:5: warning: `if _ { .. } else { .. }` is an expression
+crates/pi-ai/src/lib.rs:491:12: warning: this method could have a `#[must_use]` attribute
+crates/pi-ai/src/lib.rs:495:12: warning: this method could have a `#[must_use]` attribute
+crates/pi-ai/src/lib.rs:496:9: warning: use Option::map_or_else instead of an if let/else: help: try: `id.map_or_else(|| self.models.first().cloned(), |id| self.models.iter().find(|m| m.id == id).cloned())`
+crates/pi-ai/src/lib.rs:502:5: warning: docs for function which may panic missing `# Panics` section
+crates/pi-ai/src/lib.rs:507:5: warning: docs for function which may panic missing `# Panics` section
+crates/pi-ai/src/lib.rs:507:12: warning: this method could have a `#[must_use]` attribute
+crates/pi-ai/src/lib.rs:511:5: warning: docs for function which may panic missing `# Panics` section
+crates/pi-ai/src/lib.rs:511:12: warning: this method could have a `#[must_use]` attribute
+crates/pi-ai/src/lib.rs:535:8: warning: this function could have a `#[must_use]` attribute
+crates/pi-ai/src/lib.rs:535:40: warning: this argument is passed by value, but not consumed in the function body
+crates/pi-ai/src/lib.rs:685:12: warning: this argument is passed by value, but not consumed in the function body
+crates/pi-ai/src/lib.rs:755:5: warning: this `if` statement can be collapsed
+crates/pi-ai/src/lib.rs:833:1: warning: it is more idiomatic to use `Option<&T>` instead of `&Option<T>`
+crates/pi-ai/src/lib.rs:834:5: warning: called `map(<f>).unwrap_or(false)` on an `Option` value
+crates/pi-ai/src/lib.rs:848:5: warning: casting `u128` to `u64` may truncate the value
+crates/pi-ai/src/oauth.rs:1428:18: warning: the following explicit lifetimes could be elided: 'a
+crates/pi-ai/src/oauth.rs:1432:26: warning: the following explicit lifetimes could be elided: 'a
+crates/pi-ai/src/oauth.rs:1452:13: warning: this `MutexGuard` is held across an await point
+warning: `pi-ai` (lib) generated 240 warnings (run `cargo clippy --fix --lib -p pi-ai` to apply 118 suggestions)
+warning: `pi-ai` (lib test) generated 243 warnings (240 duplicates) (run `cargo clippy --fix --lib -p pi-ai --tests` to apply 2 suggestions)
+crates/pi-ai/tests/openai_completions_http.rs:256:13: warning: unneeded use of `concat!` macro: help: replace with: `"data: {\"id\":\"chatcmpl-abort\",\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n"`
+crates/pi-ai/src/bin/pi-ai-catalog.rs:61:21: warning: this argument is passed by value, but not consumed in the function body: help: consider changing the type to: `&[String]`
+crates/pi-ai/tests/openai_responses_reasoning_replay.rs:231:7: warning: this function has too many lines (136/100)
+crates/pi-ai/tests/anthropic_messages_params.rs:158:9: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Text(_)`
+crates/pi-ai/tests/anthropic_messages_params.rs:190:25: warning: redundant clone: help: remove this
+crates/pi-ai/tests/anthropic_messages_params.rs:223:28: warning: `into_iter` call on a collection with only one item: help: try: `std::iter::once(("path".into(), json!("README.md")))`
+crates/pi-ai/tests/anthropic_messages_params.rs:274:9: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Text(_)`
+crates/pi-ai/tests/anthropic_messages_params.rs:289:32: warning: `into_iter` call on a collection with only one item: help: try: `std::iter::once(("path".into(), json!("src/main.rs")))`
+crates/pi-ai/tests/anthropic_messages_params.rs:329:9: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Text(_)`
+crates/pi-ai/tests/anthropic_messages_params.rs:346:9: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Text(_)`
+crates/pi-ai/tests/unicode_request_text.rs:250:9: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Blocks(_)`
+crates/pi-ai/tests/unicode_request_text.rs:264:9: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Text(_)`
+crates/pi-ai/tests/unicode_request_text.rs:275:9: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Text(_)`
+crates/pi-ai/tests/unicode_request_text.rs:271:17: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Blocks(_)`
+crates/pi-ai/tests/unicode_request_text.rs:322:13: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ ResponsesFunctionCallOutput::Content(_)`
+crates/pi-ai/tests/unicode_request_text.rs:399:13: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ ResponsesFunctionCallOutput::Content(_)`
+crates/pi-ai/tests/catalog_cli.rs:108:164: warning: long literal lacking separators: help: consider: `272_000`
+crates/pi-ai/tests/catalog_cli.rs:108:172: warning: long literal lacking separators: help: consider: `128_000`
+crates/pi-ai/tests/catalog_cli.rs:111:193: warning: long literal lacking separators: help: consider: `1_000_000`
+crates/pi-ai/tests/catalog_cli.rs:111:202: warning: long literal lacking separators: help: consider: `128_000`
+crates/pi-ai/tests/catalog_cli.rs:114:182: warning: long literal lacking separators: help: consider: `272_000`
+crates/pi-ai/tests/catalog_cli.rs:114:190: warning: long literal lacking separators: help: consider: `128_000`
+crates/pi-ai/tests/catalog_cli.rs:123:193: warning: long literal lacking separators: help: consider: `1_000_000`
+crates/pi-ai/tests/catalog_cli.rs:123:202: warning: long literal lacking separators: help: consider: `128_000`
+crates/pi-ai/tests/catalog_cli.rs:126:172: warning: long literal lacking separators: help: consider: `272_000`
+crates/pi-ai/tests/catalog_cli.rs:126:180: warning: long literal lacking separators: help: consider: `128_000`
+crates/pi-ai/tests/catalog_cli.rs:129:182: warning: long literal lacking separators: help: consider: `272_000`
+crates/pi-ai/tests/catalog_cli.rs:129:190: warning: long literal lacking separators: help: consider: `128_000`
+crates/pi-ai/tests/openai_codex_responses_http.rs:57:1: warning: this could be a `const fn`
+crates/pi-ai/tests/openai_codex_responses_transport.rs:56:1: warning: this could be a `const fn`
+crates/pi-ai/tests/openai_codex_responses_transport.rs:80:22: warning: called `map(<f>).unwrap_or(<a>)` on an `Option` value
+crates/pi-ai/tests/tool_call_without_result.rs:217:9: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Text(_)`
+crates/pi-ai/tests/tool_call_without_result.rs:224:9: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Blocks(_)`
+crates/pi-ai/tests/tool_call_without_result.rs:222:13: warning: consider adding a `;` to the last statement for consistent formatting: help: add a `;` here: `assert_eq!(text, "Never mind, just tell me what is 2 + 2?");`
+crates/pi-ai/tests/tool_call_without_result.rs:286:13: warning: consider adding a `;` to the last statement for consistent formatting: help: add a `;` here: `assert_eq!(text, "Never mind, just tell me what is 2 + 2?");`
+crates/pi-ai/tests/tool_call_without_result.rs:297:10: warning: calling `OpenAiCodexResponsesRequestOptions::default()` is more clear than this expression: help: try: `OpenAiCodexResponsesRequestOptions::default()`
+crates/pi-ai/src/main.rs:147:1: warning: this function's return value is unnecessary
+crates/pi-ai/src/main.rs:166:13: warning: `format!(..)` appended to existing `String`
+crates/pi-ai/src/main.rs:156:1: warning: unused `async` for function with no await statements
+crates/pi-ai/tests/anthropic_messages_stream.rs:42:7: warning: this function has too many lines (160/100)
+crates/pi-ai/tests/anthropic_messages_stream.rs:199:36: warning: `into_iter` call on a collection with only one item: help: try: `std::iter::once(("task".into(), json!("buy milk")))`
+crates/pi-ai/tests/anthropic_messages_stream.rs:303:66: warning: this `match` can be collapsed into the outer `match`
+crates/pi-ai/tests/empty_messages.rs:95:1: warning: this could be a `const fn`
+crates/pi-ai/tests/empty_messages.rs:256:10: warning: calling `OpenAiCodexResponsesRequestOptions::default()` is more clear than this expression: help: try: `OpenAiCodexResponsesRequestOptions::default()`
+crates/pi-ai/tests/empty_messages.rs:276:10: warning: calling `OpenAiCodexResponsesRequestOptions::default()` is more clear than this expression: help: try: `OpenAiCodexResponsesRequestOptions::default()`
+crates/pi-ai/tests/openai_completions_messages.rs:248:13: warning: consider adding a `;` to the last statement for consistent formatting: help: add a `;` here: `assert_eq!(text, "I have processed the tool results.");`
+warning: `pi-ai` (test "openai_completions_http") generated 1 warning (run `cargo clippy --fix --test "openai_completions_http" -p pi-ai` to apply 1 suggestion)
+warning: `pi-ai` (bin "pi-ai-catalog" test) generated 1 warning
+warning: `pi-ai` (test "openai_responses_reasoning_replay") generated 1 warning
+warning: `pi-ai` (test "anthropic_messages_params") generated 7 warnings (run `cargo clippy --fix --test "anthropic_messages_params" -p pi-ai` to apply 1 suggestion)
+warning: `pi-ai` (test "unicode_request_text") generated 6 warnings
+warning: `pi-ai` (test "catalog_cli") generated 12 warnings
+warning: `pi-ai` (test "openai_codex_responses_http") generated 1 warning (run `cargo clippy --fix --test "openai_codex_responses_http" -p pi-ai` to apply 1 suggestion)
+warning: `pi-ai` (test "openai_codex_responses_transport") generated 2 warnings (run `cargo clippy --fix --test "openai_codex_responses_transport" -p pi-ai` to apply 2 suggestions)
+warning: `pi-ai` (test "tool_call_without_result") generated 5 warnings (run `cargo clippy --fix --test "tool_call_without_result" -p pi-ai` to apply 2 suggestions)
+warning: `pi-ai` (bin "pi-ai" test) generated 3 warnings
+warning: `pi-ai` (test "anthropic_messages_stream") generated 3 warnings
+warning: `pi-ai` (bin "pi-ai-catalog") generated 1 warning (1 duplicate)
+warning: `pi-ai` (test "empty_messages") generated 3 warnings (run `cargo clippy --fix --test "empty_messages" -p pi-ai` to apply 1 suggestion)
+warning: `pi-ai` (test "openai_completions_messages") generated 1 warning (run `cargo clippy --fix --test "openai_completions_messages" -p pi-ai` to apply 1 suggestion)
+crates/pi-ai/tests/openai_responses_stream.rs:197:7: warning: this function has too many lines (117/100)
+crates/pi-ai/tests/openai_responses_stream.rs:326:7: warning: this function has too many lines (111/100)
+crates/pi-ai/tests/openai_completions_params.rs:329:13: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ OpenAiCompletionsContentPart::ImageUrl { .. }`
+crates/pi-ai/tests/cross_provider_handoff.rs:182:1: warning: this function has too many lines (109/100)
+crates/pi-ai/tests/cross_provider_handoff.rs:339:9: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Text(_)`
+crates/pi-ai/tests/cross_provider_handoff.rs:363:9: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Text(_)`
+crates/pi-ai/tests/openai_completions_usage.rs:49:5: warning: strict comparison of `f32` or `f64`
+crates/pi-ai/tests/openai_completions_usage.rs:50:5: warning: strict comparison of `f32` or `f64`
+crates/pi-ai/tests/openai_tool_call_provider_compat.rs:113:10: warning: calling `OpenAiCodexResponsesRequestOptions::default()` is more clear than this expression: help: try: `OpenAiCodexResponsesRequestOptions::default()`
+crates/pi-ai/tests/cache_retention.rs:95:9: warning: this `MutexGuard` is held across an await point
+crates/pi-ai/tests/cache_retention.rs:97:25: warning: redundant closure: help: replace the closure with the method itself: `std::sync::PoisonError::into_inner`
+crates/pi-ai/tests/cache_retention.rs:141:9: warning: this `MutexGuard` is held across an await point
+crates/pi-ai/tests/cache_retention.rs:143:25: warning: redundant closure: help: replace the closure with the method itself: `std::sync::PoisonError::into_inner`
+crates/pi-ai/tests/cache_retention.rs:188:9: warning: this `MutexGuard` is held across an await point
+crates/pi-ai/tests/cache_retention.rs:190:25: warning: redundant closure: help: replace the closure with the method itself: `std::sync::PoisonError::into_inner`
+crates/pi-ai/tests/cache_retention.rs:244:9: warning: this `MutexGuard` is held across an await point
+crates/pi-ai/tests/cache_retention.rs:246:25: warning: redundant closure: help: replace the closure with the method itself: `std::sync::PoisonError::into_inner`
+crates/pi-ai/tests/image_tool_result.rs:243:9: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Text(_)`
+crates/pi-ai/tests/image_tool_result.rs:238:21: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Text(_)`
+crates/pi-ai/tests/image_tool_result.rs:277:9: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Text(_)`
+crates/pi-ai/tests/image_tool_result.rs:273:17: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ AnthropicMessageContent::Text(_)`
+crates/pi-ai/tests/image_tool_result.rs:314:17: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ ResponsesFunctionCallOutput::Text(_)`
+crates/pi-ai/tests/image_tool_result.rs:355:17: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ OpenAiCompletionsContentPart::ImageUrl { .. }`
+crates/pi-ai/tests/image_tool_result.rs:361:17: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ OpenAiCompletionsContentPart::Text { .. }`
+crates/pi-ai/tests/image_tool_result.rs:373:10: warning: calling `OpenAiCodexResponsesRequestOptions::default()` is more clear than this expression: help: try: `OpenAiCodexResponsesRequestOptions::default()`
+crates/pi-ai/tests/image_tool_result.rs:401:17: warning: wildcard matches only a single variant and will also match any future added variants: help: try: `other @ ResponsesFunctionCallOutput::Text(_)`
+warning: `pi-ai` (bin "pi-ai") generated 3 warnings (3 duplicates)
+warning: `pi-ai` (test "openai_responses_stream") generated 2 warnings
+warning: `pi-ai` (test "openai_completions_params") generated 1 warning
+warning: `pi-ai` (test "cross_provider_handoff") generated 3 warnings
+warning: `pi-ai` (test "openai_completions_usage") generated 2 warnings
+warning: `pi-ai` (test "openai_tool_call_provider_compat") generated 1 warning
+warning: `pi-ai` (test "cache_retention") generated 8 warnings (run `cargo clippy --fix --test "cache_retention" -p pi-ai` to apply 4 suggestions)
+warning: `pi-ai` (test "image_tool_result") generated 9 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.14s
