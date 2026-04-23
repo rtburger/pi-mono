@@ -1119,7 +1119,7 @@ fn process_codex_events(
 ) -> Vec<AssistantEvent> {
     let mut emitted = Vec::new();
     for event in events.into_iter().map(map_codex_event) {
-        emitted.extend(state.process_event(event));
+        emitted.extend(state.process_event(&event));
         if emitted.last().is_some_and(is_terminal_event) {
             break;
         }

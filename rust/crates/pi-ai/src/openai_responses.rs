@@ -942,7 +942,7 @@ impl OpenAiResponsesStreamState {
 
     pub(crate) fn process_event(
         &mut self,
-        event: OpenAiResponsesStreamEnvelope,
+        event: &OpenAiResponsesStreamEnvelope,
     ) -> Vec<AssistantEvent> {
         let mut emitted = Vec::new();
 
@@ -1493,7 +1493,7 @@ where
                             yield Ok(state.aborted_event());
                             return;
                         }
-                        let emitted = state.process_event(event);
+                        let emitted = state.process_event(&event);
                         for assistant_event in emitted {
                             let is_terminal = is_terminal_event(&assistant_event);
                             yield Ok(assistant_event);
@@ -1516,7 +1516,7 @@ where
                             yield Ok(state.aborted_event());
                             return;
                         }
-                        let emitted = state.process_event(event);
+                        let emitted = state.process_event(&event);
                         for assistant_event in emitted {
                             let is_terminal = is_terminal_event(&assistant_event);
                             yield Ok(assistant_event);
@@ -1545,7 +1545,7 @@ pub fn stream_openai_responses_sse_events(
         yield Ok(state.start_event());
 
         for event in events {
-            let emitted = state.process_event(event);
+            let emitted = state.process_event(&event);
             for assistant_event in emitted {
                 let is_terminal = is_terminal_event(&assistant_event);
                 yield Ok(assistant_event);
