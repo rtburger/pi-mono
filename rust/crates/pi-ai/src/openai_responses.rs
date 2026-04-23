@@ -967,27 +967,7 @@ impl OpenAiResponsesStreamState {
                 emitted = self.handle_response_text_delta(event);
             }
             "response.function_call_arguments.delta" => {
-                if self.current_block_kind == Some(OpenAiResponsesBlockKind::ToolCall)
-                    && let Some(index) = self.current_block_index
-                {
-                    let delta = event
-                        .data
-                        .get("delta")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    self.current_tool_json.push_str(&delta);
-                    if let Some(AssistantContent::ToolCall { arguments, .. }) =
-                        self.output.content.get_mut(index)
-                    {
-                        *arguments = parse_streaming_json_map(&self.current_tool_json);
-                    }
-                    emitted.push(AssistantEvent::ToolCallDelta {
-                        content_index: index,
-                        delta,
-                        partial: self.output.clone(),
-                    });
-                }
+                emitted = self.handle_response_function_call_arguments_delta(event);
             }
             "response.function_call_arguments.done" => {
                 if self.current_block_kind == Some(OpenAiResponsesBlockKind::ToolCall)
@@ -1292,6 +1272,37 @@ impl OpenAiResponsesStreamState {
                 });
             }
             _ => {}
+        }
+
+        emitted
+    }
+
+    fn handle_response_function_call_arguments_delta(
+        &mut self,
+        event: &OpenAiResponsesStreamEnvelope,
+    ) -> Vec<AssistantEvent> {
+        let mut emitted = Vec::new();
+
+        if self.current_block_kind == Some(OpenAiResponsesBlockKind::ToolCall)
+            && let Some(index) = self.current_block_index
+        {
+            let delta = event
+                .data
+                .get("delta")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            self.current_tool_json.push_str(&delta);
+            if let Some(AssistantContent::ToolCall { arguments, .. }) =
+                self.output.content.get_mut(index)
+            {
+                *arguments = parse_streaming_json_map(&self.current_tool_json);
+            }
+            emitted.push(AssistantEvent::ToolCallDelta {
+                content_index: index,
+                delta,
+                partial: self.output.clone(),
+            });
         }
 
         emitted
