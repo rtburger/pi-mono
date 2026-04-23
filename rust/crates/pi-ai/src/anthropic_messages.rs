@@ -875,89 +875,97 @@ impl AnthropicStreamState {
         emitted
     }
 
+    fn handle_content_block_delta(
+        &mut self,
+        event: &AnthropicStreamEnvelope,
+    ) -> Vec<AssistantEvent> {
+        let mut emitted = Vec::new();
+        let Some(provider_index) = usize_field(&event.data, "index") else {
+            return emitted;
+        };
+        let Some(content_index) = self.block_indices.get(&provider_index).copied() else {
+            return emitted;
+        };
+        let Some(delta) = object_field(&event.data, "delta") else {
+            return emitted;
+        };
+        let Some(delta_type) = string_field(delta, "type") else {
+            return emitted;
+        };
+        match delta_type {
+            "text_delta" => {
+                let text = string_field(delta, "text").unwrap_or_default().to_string();
+                if let Some(AssistantContent::Text { text: existing, .. }) =
+                    self.output.content.get_mut(content_index)
+                {
+                    existing.push_str(&text);
+                }
+                emitted.push(AssistantEvent::TextDelta {
+                    content_index,
+                    delta: text,
+                    partial: self.output.clone(),
+                });
+            }
+            "thinking_delta" => {
+                let thinking = string_field(delta, "thinking")
+                    .unwrap_or_default()
+                    .to_string();
+                if let Some(AssistantContent::Thinking {
+                    thinking: existing, ..
+                }) = self.output.content.get_mut(content_index)
+                {
+                    existing.push_str(&thinking);
+                }
+                emitted.push(AssistantEvent::ThinkingDelta {
+                    content_index,
+                    delta: thinking,
+                    partial: self.output.clone(),
+                });
+            }
+            "input_json_delta" => {
+                let partial_json = string_field(delta, "partial_json")
+                    .unwrap_or_default()
+                    .to_string();
+                let buffer = self.partial_tool_json.entry(provider_index).or_default();
+                buffer.push_str(&partial_json);
+                if let Some(AssistantContent::ToolCall { arguments, .. }) =
+                    self.output.content.get_mut(content_index)
+                {
+                    let parsed = parse_tool_arguments_best_effort(buffer);
+                    if !parsed.is_empty() || buffer.trim() == "{}" {
+                        *arguments = parsed;
+                    }
+                }
+                emitted.push(AssistantEvent::ToolCallDelta {
+                    content_index,
+                    delta: partial_json,
+                    partial: self.output.clone(),
+                });
+            }
+            "signature_delta" => {
+                let signature = string_field(delta, "signature")
+                    .unwrap_or_default()
+                    .to_string();
+                if let Some(AssistantContent::Thinking {
+                    thinking_signature, ..
+                }) = self.output.content.get_mut(content_index)
+                {
+                    let value = thinking_signature.get_or_insert_with(String::new);
+                    value.push_str(&signature);
+                }
+            }
+            _ => {}
+        }
+
+        emitted
+    }
+
     fn process_event(&mut self, event: &AnthropicStreamEnvelope) -> Vec<AssistantEvent> {
         let mut emitted = Vec::new();
         match event.event_type.as_str() {
             "message_start" => self.handle_message_start(event),
             "content_block_start" => emitted = self.handle_content_block_start(event),
-            "content_block_delta" => {
-                let Some(provider_index) = usize_field(&event.data, "index") else {
-                    return emitted;
-                };
-                let Some(content_index) = self.block_indices.get(&provider_index).copied() else {
-                    return emitted;
-                };
-                let Some(delta) = object_field(&event.data, "delta") else {
-                    return emitted;
-                };
-                let Some(delta_type) = string_field(delta, "type") else {
-                    return emitted;
-                };
-                match delta_type {
-                    "text_delta" => {
-                        let text = string_field(delta, "text").unwrap_or_default().to_string();
-                        if let Some(AssistantContent::Text { text: existing, .. }) =
-                            self.output.content.get_mut(content_index)
-                        {
-                            existing.push_str(&text);
-                        }
-                        emitted.push(AssistantEvent::TextDelta {
-                            content_index,
-                            delta: text,
-                            partial: self.output.clone(),
-                        });
-                    }
-                    "thinking_delta" => {
-                        let thinking = string_field(delta, "thinking")
-                            .unwrap_or_default()
-                            .to_string();
-                        if let Some(AssistantContent::Thinking {
-                            thinking: existing, ..
-                        }) = self.output.content.get_mut(content_index)
-                        {
-                            existing.push_str(&thinking);
-                        }
-                        emitted.push(AssistantEvent::ThinkingDelta {
-                            content_index,
-                            delta: thinking,
-                            partial: self.output.clone(),
-                        });
-                    }
-                    "input_json_delta" => {
-                        let partial_json = string_field(delta, "partial_json")
-                            .unwrap_or_default()
-                            .to_string();
-                        let buffer = self.partial_tool_json.entry(provider_index).or_default();
-                        buffer.push_str(&partial_json);
-                        if let Some(AssistantContent::ToolCall { arguments, .. }) =
-                            self.output.content.get_mut(content_index)
-                        {
-                            let parsed = parse_tool_arguments_best_effort(buffer);
-                            if !parsed.is_empty() || buffer.trim() == "{}" {
-                                *arguments = parsed;
-                            }
-                        }
-                        emitted.push(AssistantEvent::ToolCallDelta {
-                            content_index,
-                            delta: partial_json,
-                            partial: self.output.clone(),
-                        });
-                    }
-                    "signature_delta" => {
-                        let signature = string_field(delta, "signature")
-                            .unwrap_or_default()
-                            .to_string();
-                        if let Some(AssistantContent::Thinking {
-                            thinking_signature, ..
-                        }) = self.output.content.get_mut(content_index)
-                        {
-                            let value = thinking_signature.get_or_insert_with(String::new);
-                            value.push_str(&signature);
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            "content_block_delta" => emitted = self.handle_content_block_delta(event),
             "content_block_stop" => {
                 let Some(provider_index) = usize_field(&event.data, "index") else {
                     return emitted;
