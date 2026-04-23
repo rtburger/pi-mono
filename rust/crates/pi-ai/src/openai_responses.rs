@@ -982,24 +982,7 @@ impl OpenAiResponsesStreamState {
                 emitted = self.handle_response_failed(event);
             }
             "error" => {
-                self.output.stop_reason = StopReason::Error;
-                self.output.error_message = Some(format!(
-                    "Error Code {}: {}",
-                    event
-                        .data
-                        .get("code")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown"),
-                    event
-                        .data
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Unknown error")
-                ));
-                emitted.push(AssistantEvent::Error {
-                    reason: StopReason::Error,
-                    error: self.output.clone(),
-                });
+                emitted = self.handle_error(event);
             }
             _ => {}
         }
@@ -1090,6 +1073,31 @@ impl OpenAiResponsesStreamState {
                 })
                 .unwrap_or_else(|| "Unknown error (no error details in response)".into()),
         );
+        emitted.push(AssistantEvent::Error {
+            reason: StopReason::Error,
+            error: self.output.clone(),
+        });
+
+        emitted
+    }
+
+    fn handle_error(&mut self, event: &OpenAiResponsesStreamEnvelope) -> Vec<AssistantEvent> {
+        let mut emitted = Vec::new();
+
+        self.output.stop_reason = StopReason::Error;
+        self.output.error_message = Some(format!(
+            "Error Code {}: {}",
+            event
+                .data
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            event
+                .data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Unknown error")
+        ));
         emitted.push(AssistantEvent::Error {
             reason: StopReason::Error,
             error: self.output.clone(),
