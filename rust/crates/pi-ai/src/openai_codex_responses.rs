@@ -416,6 +416,31 @@ impl AcquiredCodexWebSocket {
     }
 }
 
+struct CodexSocketGuard {
+    websocket: Option<AcquiredCodexWebSocket>,
+    socket: Option<CodexWebSocket>,
+}
+
+impl CodexSocketGuard {
+    fn new(mut websocket: AcquiredCodexWebSocket) -> Self {
+        let socket = websocket.socket.take().expect("websocket missing socket");
+        Self {
+            websocket: Some(websocket),
+            socket: Some(socket),
+        }
+    }
+
+    fn socket_mut(&mut self) -> &mut CodexWebSocket {
+        self.socket.as_mut().expect("websocket missing socket")
+    }
+
+    async fn release(mut self, keep: bool) {
+        let mut websocket = self.websocket.take().expect("websocket missing socket");
+        websocket.socket = self.socket.take();
+        websocket.release(keep).await;
+    }
+}
+
 fn codex_websocket_cache() -> &'static Mutex<BTreeMap<String, Arc<CachedCodexWebSocketEntry>>> {
     static CACHE: OnceLock<Mutex<BTreeMap<String, Arc<CachedCodexWebSocketEntry>>>> =
         OnceLock::new();
@@ -474,13 +499,11 @@ fn stream_openai_codex_connected_websocket(
 ) -> AssistantEventStream {
     Box::pin(stream! {
         let mut signal = signal;
-        let mut websocket = websocket;
-        let mut socket = websocket.socket.take().expect("websocket missing socket");
+        let mut socket = CodexSocketGuard::new(websocket);
         let mut state = OpenAiResponsesStreamState::new(&model);
 
         if is_signal_aborted(&signal) {
-            websocket.socket = Some(socket);
-            websocket.release(false).await;
+            socket.release(false).await;
             yield Ok(state.aborted_event());
             return;
         }
@@ -488,14 +511,13 @@ fn stream_openai_codex_connected_websocket(
         yield Ok(state.start_event());
 
         loop {
-            let next_message = socket.next();
+            let next_message = socket.socket_mut().next();
             tokio::pin!(next_message);
             let next_message = if let Some(signal) = signal.as_mut() {
                 tokio::select! {
                     message = &mut next_message => message,
                     _ = wait_for_abort(signal) => {
-                        websocket.socket = Some(socket);
-                        websocket.release(false).await;
+                        socket.release(false).await;
                         yield Ok(state.aborted_event());
                         return;
                     }
@@ -505,8 +527,7 @@ fn stream_openai_codex_connected_websocket(
             };
 
             let Some(result) = next_message else {
-                websocket.socket = Some(socket);
-                websocket.release(false).await;
+                socket.release(false).await;
                 yield Ok(state.error_event("WebSocket stream closed before response.completed"));
                 return;
             };
@@ -519,15 +540,13 @@ fn stream_openai_codex_connected_websocket(
                     let detail = frame
                         .map(|frame| format!("WebSocket closed {} {}", u16::from(frame.code), frame.reason))
                         .unwrap_or_else(|| "WebSocket closed before response.completed".into());
-                    websocket.socket = Some(socket);
-                    websocket.release(false).await;
+                    socket.release(false).await;
                     yield Ok(state.error_event(detail.trim().to_string()));
                     return;
                 }
                 Ok(_) => None,
                 Err(error) => {
-                    websocket.socket = Some(socket);
-                    websocket.release(false).await;
+                    socket.release(false).await;
                     yield Ok(state.error_event(format!("WebSocket error: {error}")));
                     return;
                 }
@@ -541,8 +560,7 @@ fn stream_openai_codex_connected_websocket(
                 Ok(Some(event)) => event,
                 Ok(None) => continue,
                 Err(error) => {
-                    websocket.socket = Some(socket);
-                    websocket.release(false).await;
+                    socket.release(false).await;
                     yield Ok(state.error_event(error));
                     return;
                 }
@@ -553,8 +571,7 @@ fn stream_openai_codex_connected_websocket(
                 let terminal = is_terminal_event(&assistant_event);
                 yield Ok(assistant_event);
                 if terminal {
-                    websocket.socket = Some(socket);
-                    websocket.release(keep).await;
+                    socket.release(keep).await;
                     return;
                 }
             }
