@@ -960,7 +960,9 @@ impl OpenAiResponsesStreamState {
             "response.reasoning_summary_part.done" => {
                 emitted = self.handle_response_reasoning_summary_part_done(event);
             }
-            "response.content_part.added" => {}
+            "response.content_part.added" => {
+                self.handle_response_content_part_added(event);
+            }
             "response.output_text.delta" | "response.refusal.delta" => {
                 if self.current_block_kind == Some(OpenAiResponsesBlockKind::Text)
                     && let Some(index) = self.current_block_index
@@ -1375,6 +1377,17 @@ impl OpenAiResponsesStreamState {
         clippy::unused_self
     )]
     fn handle_response_reasoning_summary_part_added(
+        &mut self,
+        _event: &OpenAiResponsesStreamEnvelope,
+    ) {
+    }
+
+    #[allow(
+        clippy::missing_const_for_fn,
+        clippy::needless_pass_by_ref_mut,
+        clippy::unused_self
+    )]
+    fn handle_response_content_part_added(
         &mut self,
         _event: &OpenAiResponsesStreamEnvelope,
     ) {
