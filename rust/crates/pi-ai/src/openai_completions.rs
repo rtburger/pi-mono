@@ -502,16 +502,8 @@ pub fn convert_openai_completions_messages(
 
         match message {
             Message::User { content, .. } => {
-                if let Some(content) = convert_user_content(content, model) {
-                    params.push(OpenAiCompletionsMessageParam {
-                        role: "user".into(),
-                        content,
-                        tool_calls: None,
-                        tool_call_id: None,
-                        name: None,
-                        extra: BTreeMap::new(),
-                    });
-                    last_role = Some("user");
+                if let Some(role) = push_user_message(&mut params, content, model) {
+                    last_role = Some(role);
                 }
                 index += 1;
             }
@@ -851,6 +843,23 @@ fn convert_user_content(
     }
 
     (!parts.is_empty()).then_some(OpenAiCompletionsMessageContent::Parts(parts))
+}
+
+fn push_user_message(
+    params: &mut Vec<OpenAiCompletionsMessageParam>,
+    content: &[UserContent],
+    model: &Model,
+) -> Option<&'static str> {
+    let content = convert_user_content(content, model)?;
+    params.push(OpenAiCompletionsMessageParam {
+        role: "user".into(),
+        content,
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+        extra: BTreeMap::new(),
+    });
+    Some("user")
 }
 
 fn assistant_bridge_message() -> OpenAiCompletionsMessageParam {
