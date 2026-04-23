@@ -973,97 +973,7 @@ impl OpenAiResponsesStreamState {
                 emitted = self.handle_response_function_call_arguments_done(event);
             }
             "response.output_item.done" => {
-                let item = event
-                    .data
-                    .get("item")
-                    .and_then(Value::as_object)
-                    .cloned()
-                    .unwrap_or_default();
-                match item.get("type").and_then(Value::as_str) {
-                    Some("message")
-                        if self.current_block_kind == Some(OpenAiResponsesBlockKind::Text) =>
-                    {
-                        if let Some(index) = self.current_block_index {
-                            let content = message_item_text(&item)
-                                .or_else(|| text_content(&self.output, index))
-                                .unwrap_or_default();
-                            if let Some(AssistantContent::Text {
-                                text,
-                                text_signature,
-                            }) = self.output.content.get_mut(index)
-                            {
-                                *text = content.clone();
-                                *text_signature =
-                                    item.get("id").and_then(Value::as_str).map(|id| {
-                                        encode_text_signature_v1(
-                                            id,
-                                            item.get("phase").and_then(Value::as_str),
-                                        )
-                                    });
-                            }
-                            emitted.push(AssistantEvent::TextEnd {
-                                content_index: index,
-                                content,
-                                partial: self.output.clone(),
-                            });
-                            self.reset_current_block();
-                        }
-                    }
-                    Some("function_call")
-                        if self.current_block_kind == Some(OpenAiResponsesBlockKind::ToolCall) =>
-                    {
-                        if let Some(index) = self.current_block_index {
-                            let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
-                            let call_id = item
-                                .get("call_id")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default();
-                            let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
-                            let arguments = item
-                                .get("arguments")
-                                .and_then(Value::as_str)
-                                .unwrap_or(self.current_tool_json.as_str());
-                            let tool_call = AssistantContent::ToolCall {
-                                id: format!("{call_id}|{id}"),
-                                name: name.to_string(),
-                                arguments: parse_streaming_json_map(arguments),
-                                thought_signature: None,
-                            };
-                            self.output.content[index] = tool_call.clone();
-                            emitted.push(AssistantEvent::ToolCallEnd {
-                                content_index: index,
-                                tool_call,
-                                partial: self.output.clone(),
-                            });
-                            self.reset_current_block();
-                        }
-                    }
-                    Some("reasoning")
-                        if self.current_block_kind == Some(OpenAiResponsesBlockKind::Thinking) =>
-                    {
-                        if let Some(index) = self.current_block_index {
-                            let content = reasoning_summary_text(&item)
-                                .or_else(|| thinking_content(&self.output, index))
-                                .unwrap_or_default();
-                            if let Some(AssistantContent::Thinking {
-                                thinking,
-                                thinking_signature,
-                                ..
-                            }) = self.output.content.get_mut(index)
-                            {
-                                *thinking = content.clone();
-                                *thinking_signature = Some(Value::Object(item.clone()).to_string());
-                            }
-                            emitted.push(AssistantEvent::ThinkingEnd {
-                                content_index: index,
-                                content,
-                                partial: self.output.clone(),
-                            });
-                            self.reset_current_block();
-                        }
-                    }
-                    _ => {}
-                }
+                emitted = self.handle_response_output_item_done(event);
             }
             "response.completed" => {
                 let response = event
@@ -1244,6 +1154,103 @@ impl OpenAiResponsesStreamState {
                     content_index: index,
                     partial: self.output.clone(),
                 });
+            }
+            _ => {}
+        }
+
+        emitted
+    }
+
+    fn handle_response_output_item_done(
+        &mut self,
+        event: &OpenAiResponsesStreamEnvelope,
+    ) -> Vec<AssistantEvent> {
+        let mut emitted = Vec::new();
+        let item = event
+            .data
+            .get("item")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        match item.get("type").and_then(Value::as_str) {
+            Some("message") if self.current_block_kind == Some(OpenAiResponsesBlockKind::Text) => {
+                if let Some(index) = self.current_block_index {
+                    let content = message_item_text(&item)
+                        .or_else(|| text_content(&self.output, index))
+                        .unwrap_or_default();
+                    if let Some(AssistantContent::Text {
+                        text,
+                        text_signature,
+                    }) = self.output.content.get_mut(index)
+                    {
+                        *text = content.clone();
+                        *text_signature = item.get("id").and_then(Value::as_str).map(|id| {
+                            encode_text_signature_v1(
+                                id,
+                                item.get("phase").and_then(Value::as_str),
+                            )
+                        });
+                    }
+                    emitted.push(AssistantEvent::TextEnd {
+                        content_index: index,
+                        content,
+                        partial: self.output.clone(),
+                    });
+                    self.reset_current_block();
+                }
+            }
+            Some("function_call")
+                if self.current_block_kind == Some(OpenAiResponsesBlockKind::ToolCall) =>
+            {
+                if let Some(index) = self.current_block_index {
+                    let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or(self.current_tool_json.as_str());
+                    let tool_call = AssistantContent::ToolCall {
+                        id: format!("{call_id}|{id}"),
+                        name: name.to_string(),
+                        arguments: parse_streaming_json_map(arguments),
+                        thought_signature: None,
+                    };
+                    self.output.content[index] = tool_call.clone();
+                    emitted.push(AssistantEvent::ToolCallEnd {
+                        content_index: index,
+                        tool_call,
+                        partial: self.output.clone(),
+                    });
+                    self.reset_current_block();
+                }
+            }
+            Some("reasoning")
+                if self.current_block_kind == Some(OpenAiResponsesBlockKind::Thinking) =>
+            {
+                if let Some(index) = self.current_block_index {
+                    let content = reasoning_summary_text(&item)
+                        .or_else(|| thinking_content(&self.output, index))
+                        .unwrap_or_default();
+                    if let Some(AssistantContent::Thinking {
+                        thinking,
+                        thinking_signature,
+                        ..
+                    }) = self.output.content.get_mut(index)
+                    {
+                        *thinking = content.clone();
+                        *thinking_signature = Some(Value::Object(item.clone()).to_string());
+                    }
+                    emitted.push(AssistantEvent::ThinkingEnd {
+                        content_index: index,
+                        content,
+                        partial: self.output.clone(),
+                    });
+                    self.reset_current_block();
+                }
             }
             _ => {}
         }
