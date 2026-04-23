@@ -947,15 +947,7 @@ impl OpenAiResponsesStreamState {
         let mut emitted = Vec::new();
 
         match event.event_type.as_str() {
-            "response.created" => {
-                self.output.response_id = event
-                    .data
-                    .get("response")
-                    .and_then(Value::as_object)
-                    .and_then(|response| response.get("id"))
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned);
-            }
+            "response.created" => self.handle_response_created(event),
             "response.output_item.added" => {
                 let item = event
                     .data
@@ -1331,6 +1323,16 @@ impl OpenAiResponsesStreamState {
         }
 
         emitted
+    }
+
+    fn handle_response_created(&mut self, event: &OpenAiResponsesStreamEnvelope) {
+        self.output.response_id = event
+            .data
+            .get("response")
+            .and_then(Value::as_object)
+            .and_then(|response| response.get("id"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
     }
 
     fn reset_current_block(&mut self) {
