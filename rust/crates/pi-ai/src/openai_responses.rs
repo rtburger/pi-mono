@@ -949,70 +949,7 @@ impl OpenAiResponsesStreamState {
         match event.event_type.as_str() {
             "response.created" => self.handle_response_created(event),
             "response.output_item.added" => {
-                let item = event
-                    .data
-                    .get("item")
-                    .and_then(Value::as_object)
-                    .cloned()
-                    .unwrap_or_default();
-                match item.get("type").and_then(Value::as_str) {
-                    Some("message") => {
-                        self.output.content.push(AssistantContent::Text {
-                            text: String::new(),
-                            text_signature: None,
-                        });
-                        let index = self.output.content.len() - 1;
-                        self.current_block_index = Some(index);
-                        self.current_block_kind = Some(OpenAiResponsesBlockKind::Text);
-                        self.current_tool_json.clear();
-                        emitted.push(AssistantEvent::TextStart {
-                            content_index: index,
-                            partial: self.output.clone(),
-                        });
-                    }
-                    Some("function_call") => {
-                        let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
-                        let call_id = item
-                            .get("call_id")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
-                        self.current_tool_json = item
-                            .get("arguments")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string();
-                        self.output.content.push(AssistantContent::ToolCall {
-                            id: format!("{call_id}|{id}"),
-                            name: name.to_string(),
-                            arguments: BTreeMap::new(),
-                            thought_signature: None,
-                        });
-                        let index = self.output.content.len() - 1;
-                        self.current_block_index = Some(index);
-                        self.current_block_kind = Some(OpenAiResponsesBlockKind::ToolCall);
-                        emitted.push(AssistantEvent::ToolCallStart {
-                            content_index: index,
-                            partial: self.output.clone(),
-                        });
-                    }
-                    Some("reasoning") => {
-                        self.output.content.push(AssistantContent::Thinking {
-                            thinking: String::new(),
-                            thinking_signature: None,
-                            redacted: false,
-                        });
-                        let index = self.output.content.len() - 1;
-                        self.current_block_index = Some(index);
-                        self.current_block_kind = Some(OpenAiResponsesBlockKind::Thinking);
-                        self.current_tool_json.clear();
-                        emitted.push(AssistantEvent::ThinkingStart {
-                            content_index: index,
-                            partial: self.output.clone(),
-                        });
-                    }
-                    _ => {}
-                }
+                emitted = self.handle_response_output_item_added(event);
             }
             "response.reasoning_summary_part.added" => {}
             "response.reasoning_summary_text.delta" => {
@@ -1333,6 +1270,79 @@ impl OpenAiResponsesStreamState {
             .and_then(|response| response.get("id"))
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
+    }
+
+    fn handle_response_output_item_added(
+        &mut self,
+        event: &OpenAiResponsesStreamEnvelope,
+    ) -> Vec<AssistantEvent> {
+        let mut emitted = Vec::new();
+        let item = event
+            .data
+            .get("item")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        match item.get("type").and_then(Value::as_str) {
+            Some("message") => {
+                self.output.content.push(AssistantContent::Text {
+                    text: String::new(),
+                    text_signature: None,
+                });
+                let index = self.output.content.len() - 1;
+                self.current_block_index = Some(index);
+                self.current_block_kind = Some(OpenAiResponsesBlockKind::Text);
+                self.current_tool_json.clear();
+                emitted.push(AssistantEvent::TextStart {
+                    content_index: index,
+                    partial: self.output.clone(),
+                });
+            }
+            Some("function_call") => {
+                let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+                let call_id = item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
+                self.current_tool_json = item
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                self.output.content.push(AssistantContent::ToolCall {
+                    id: format!("{call_id}|{id}"),
+                    name: name.to_string(),
+                    arguments: BTreeMap::new(),
+                    thought_signature: None,
+                });
+                let index = self.output.content.len() - 1;
+                self.current_block_index = Some(index);
+                self.current_block_kind = Some(OpenAiResponsesBlockKind::ToolCall);
+                emitted.push(AssistantEvent::ToolCallStart {
+                    content_index: index,
+                    partial: self.output.clone(),
+                });
+            }
+            Some("reasoning") => {
+                self.output.content.push(AssistantContent::Thinking {
+                    thinking: String::new(),
+                    thinking_signature: None,
+                    redacted: false,
+                });
+                let index = self.output.content.len() - 1;
+                self.current_block_index = Some(index);
+                self.current_block_kind = Some(OpenAiResponsesBlockKind::Thinking);
+                self.current_tool_json.clear();
+                emitted.push(AssistantEvent::ThinkingStart {
+                    content_index: index,
+                    partial: self.output.clone(),
+                });
+            }
+            _ => {}
+        }
+
+        emitted
     }
 
     fn reset_current_block(&mut self) {
