@@ -976,37 +976,7 @@ impl OpenAiResponsesStreamState {
                 emitted = self.handle_response_output_item_done(event);
             }
             "response.completed" => {
-                let response = event
-                    .data
-                    .get("response")
-                    .and_then(Value::as_object)
-                    .cloned()
-                    .unwrap_or_default();
-                self.output.response_id = response
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .or(self.output.response_id.clone());
-                apply_usage_from_response(&mut self.output, &response, self.model_cost);
-                apply_service_tier_pricing(
-                    &mut self.output.usage,
-                    response_service_tier(&response).or(self.requested_service_tier),
-                );
-                self.output.stop_reason =
-                    map_response_status(response.get("status").and_then(Value::as_str));
-                if self
-                    .output
-                    .content
-                    .iter()
-                    .any(|block| matches!(block, AssistantContent::ToolCall { .. }))
-                    && self.output.stop_reason == StopReason::Stop
-                {
-                    self.output.stop_reason = StopReason::ToolUse;
-                }
-                emitted.push(AssistantEvent::Done {
-                    reason: self.output.stop_reason.clone(),
-                    message: self.output.clone(),
-                });
+                emitted = self.handle_response_completed(event);
             }
             "response.failed" => {
                 let response = event
@@ -1074,6 +1044,46 @@ impl OpenAiResponsesStreamState {
             }
             _ => {}
         }
+
+        emitted
+    }
+
+    fn handle_response_completed(
+        &mut self,
+        event: &OpenAiResponsesStreamEnvelope,
+    ) -> Vec<AssistantEvent> {
+        let mut emitted = Vec::new();
+        let response = event
+            .data
+            .get("response")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        self.output.response_id = response
+            .get("id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .or(self.output.response_id.clone());
+        apply_usage_from_response(&mut self.output, &response, self.model_cost);
+        apply_service_tier_pricing(
+            &mut self.output.usage,
+            response_service_tier(&response).or(self.requested_service_tier),
+        );
+        self.output.stop_reason =
+            map_response_status(response.get("status").and_then(Value::as_str));
+        if self
+            .output
+            .content
+            .iter()
+            .any(|block| matches!(block, AssistantContent::ToolCall { .. }))
+            && self.output.stop_reason == StopReason::Stop
+        {
+            self.output.stop_reason = StopReason::ToolUse;
+        }
+        emitted.push(AssistantEvent::Done {
+            reason: self.output.stop_reason.clone(),
+            message: self.output.clone(),
+        });
 
         emitted
     }
