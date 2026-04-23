@@ -796,83 +796,90 @@ impl AnthropicStreamState {
         }
     }
 
+    fn handle_content_block_start(
+        &mut self,
+        event: &AnthropicStreamEnvelope,
+    ) -> Vec<AssistantEvent> {
+        let mut emitted = Vec::new();
+        let Some(provider_index) = usize_field(&event.data, "index") else {
+            return emitted;
+        };
+        let Some(content_block) = object_field(&event.data, "content_block") else {
+            return emitted;
+        };
+        let Some(block_type) = string_field(content_block, "type") else {
+            return emitted;
+        };
+        let content_index = self.output.content.len();
+        self.block_indices.insert(provider_index, content_index);
+
+        match block_type {
+            "text" => {
+                self.output.content.push(AssistantContent::Text {
+                    text: String::new(),
+                    text_signature: None,
+                });
+                emitted.push(AssistantEvent::TextStart {
+                    content_index,
+                    partial: self.output.clone(),
+                });
+            }
+            "thinking" => {
+                self.output.content.push(AssistantContent::Thinking {
+                    thinking: String::new(),
+                    thinking_signature: Some(String::new()),
+                    redacted: false,
+                });
+                emitted.push(AssistantEvent::ThinkingStart {
+                    content_index,
+                    partial: self.output.clone(),
+                });
+            }
+            "redacted_thinking" => {
+                self.output.content.push(AssistantContent::Thinking {
+                    thinking: "[Reasoning redacted]".into(),
+                    thinking_signature: string_field(content_block, "data").map(ToOwned::to_owned),
+                    redacted: true,
+                });
+                emitted.push(AssistantEvent::ThinkingStart {
+                    content_index,
+                    partial: self.output.clone(),
+                });
+            }
+            "tool_use" => {
+                let name = string_field(content_block, "name").unwrap_or_default();
+                let normalized_name = if self.is_oauth_token {
+                    from_claude_code_name(name, &self.tools)
+                } else {
+                    name.to_string()
+                };
+                self.output.content.push(AssistantContent::ToolCall {
+                    id: string_field(content_block, "id")
+                        .unwrap_or_default()
+                        .to_string(),
+                    name: normalized_name,
+                    arguments: object_field(content_block, "input")
+                        .map(value_object_to_btree)
+                        .unwrap_or_default(),
+                    thought_signature: None,
+                });
+                self.partial_tool_json.insert(provider_index, String::new());
+                emitted.push(AssistantEvent::ToolCallStart {
+                    content_index,
+                    partial: self.output.clone(),
+                });
+            }
+            _ => {}
+        }
+
+        emitted
+    }
+
     fn process_event(&mut self, event: &AnthropicStreamEnvelope) -> Vec<AssistantEvent> {
         let mut emitted = Vec::new();
         match event.event_type.as_str() {
             "message_start" => self.handle_message_start(event),
-            "content_block_start" => {
-                let Some(provider_index) = usize_field(&event.data, "index") else {
-                    return emitted;
-                };
-                let Some(content_block) = object_field(&event.data, "content_block") else {
-                    return emitted;
-                };
-                let Some(block_type) = string_field(content_block, "type") else {
-                    return emitted;
-                };
-                let content_index = self.output.content.len();
-                self.block_indices.insert(provider_index, content_index);
-
-                match block_type {
-                    "text" => {
-                        self.output.content.push(AssistantContent::Text {
-                            text: String::new(),
-                            text_signature: None,
-                        });
-                        emitted.push(AssistantEvent::TextStart {
-                            content_index,
-                            partial: self.output.clone(),
-                        });
-                    }
-                    "thinking" => {
-                        self.output.content.push(AssistantContent::Thinking {
-                            thinking: String::new(),
-                            thinking_signature: Some(String::new()),
-                            redacted: false,
-                        });
-                        emitted.push(AssistantEvent::ThinkingStart {
-                            content_index,
-                            partial: self.output.clone(),
-                        });
-                    }
-                    "redacted_thinking" => {
-                        self.output.content.push(AssistantContent::Thinking {
-                            thinking: "[Reasoning redacted]".into(),
-                            thinking_signature: string_field(content_block, "data")
-                                .map(ToOwned::to_owned),
-                            redacted: true,
-                        });
-                        emitted.push(AssistantEvent::ThinkingStart {
-                            content_index,
-                            partial: self.output.clone(),
-                        });
-                    }
-                    "tool_use" => {
-                        let name = string_field(content_block, "name").unwrap_or_default();
-                        let normalized_name = if self.is_oauth_token {
-                            from_claude_code_name(name, &self.tools)
-                        } else {
-                            name.to_string()
-                        };
-                        self.output.content.push(AssistantContent::ToolCall {
-                            id: string_field(content_block, "id")
-                                .unwrap_or_default()
-                                .to_string(),
-                            name: normalized_name,
-                            arguments: object_field(content_block, "input")
-                                .map(value_object_to_btree)
-                                .unwrap_or_default(),
-                            thought_signature: None,
-                        });
-                        self.partial_tool_json.insert(provider_index, String::new());
-                        emitted.push(AssistantEvent::ToolCallStart {
-                            content_index,
-                            partial: self.output.clone(),
-                        });
-                    }
-                    _ => {}
-                }
-            }
+            "content_block_start" => emitted = self.handle_content_block_start(event),
             "content_block_delta" => {
                 let Some(provider_index) = usize_field(&event.data, "index") else {
                     return emitted;
