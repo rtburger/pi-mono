@@ -955,26 +955,7 @@ impl OpenAiResponsesStreamState {
                 self.handle_response_reasoning_summary_part_added(event);
             }
             "response.reasoning_summary_text.delta" => {
-                if self.current_block_kind == Some(OpenAiResponsesBlockKind::Thinking)
-                    && let Some(index) = self.current_block_index
-                {
-                    let delta = event
-                        .data
-                        .get("delta")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    if let Some(AssistantContent::Thinking { thinking, .. }) =
-                        self.output.content.get_mut(index)
-                    {
-                        thinking.push_str(&delta);
-                    }
-                    emitted.push(AssistantEvent::ThinkingDelta {
-                        content_index: index,
-                        delta,
-                        partial: self.output.clone(),
-                    });
-                }
+                emitted = self.handle_response_reasoning_summary_text_delta(event);
             }
             "response.reasoning_summary_part.done" => {
                 if self.current_block_kind == Some(OpenAiResponsesBlockKind::Thinking)
@@ -1342,6 +1323,36 @@ impl OpenAiResponsesStreamState {
                 });
             }
             _ => {}
+        }
+
+        emitted
+    }
+
+    fn handle_response_reasoning_summary_text_delta(
+        &mut self,
+        event: &OpenAiResponsesStreamEnvelope,
+    ) -> Vec<AssistantEvent> {
+        let mut emitted = Vec::new();
+
+        if self.current_block_kind == Some(OpenAiResponsesBlockKind::Thinking)
+            && let Some(index) = self.current_block_index
+        {
+            let delta = event
+                .data
+                .get("delta")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if let Some(AssistantContent::Thinking { thinking, .. }) =
+                self.output.content.get_mut(index)
+            {
+                thinking.push_str(&delta);
+            }
+            emitted.push(AssistantEvent::ThinkingDelta {
+                content_index: index,
+                delta,
+                partial: self.output.clone(),
+            });
         }
 
         emitted
