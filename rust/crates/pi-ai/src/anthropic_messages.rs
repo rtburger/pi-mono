@@ -699,12 +699,11 @@ fn flush_sse_event(
         return Ok(None);
     }
 
-    let value: Value = serde_json::from_str(&data)
-        .map_err(|error| format!("invalid Anthropic SSE JSON: {error}"))?;
-    let object = value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| "Anthropic SSE payload must be a JSON object".to_string())?;
+    let Value::Object(object) = serde_json::from_str::<Value>(&data)
+        .map_err(|error| format!("invalid Anthropic SSE JSON: {error}"))?
+    else {
+        return Err("Anthropic SSE payload must be a JSON object".to_string());
+    };
 
     Ok(Some(AnthropicStreamEnvelope {
         event_type,

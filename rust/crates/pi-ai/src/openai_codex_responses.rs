@@ -1116,11 +1116,10 @@ fn map_codex_event(mut event: OpenAiResponsesStreamEnvelope) -> OpenAiResponsesS
             let original_type = event.event_type.clone();
             event.event_type = "response.completed".into();
 
-            let mut response = event
-                .data
-                .remove("response")
-                .and_then(|value| value.as_object().cloned())
-                .unwrap_or_default();
+            let mut response = match event.data.remove("response") {
+                Some(Value::Object(response)) => response,
+                _ => serde_json::Map::new(),
+            };
 
             let fallback_status = match original_type.as_str() {
                 "response.done" | "response.completed" => Some("completed"),
