@@ -944,50 +944,41 @@ impl OpenAiResponsesStreamState {
         &mut self,
         event: &OpenAiResponsesStreamEnvelope,
     ) -> Vec<AssistantEvent> {
-        let mut emitted = Vec::new();
-
         match event.event_type.as_str() {
-            "response.created" => self.handle_response_created(event),
-            "response.output_item.added" => {
-                emitted = self.handle_response_output_item_added(event);
+            "response.created" => {
+                self.handle_response_created(event);
+                Vec::new()
             }
+            "response.output_item.added" => self.handle_response_output_item_added(event),
             "response.reasoning_summary_part.added" => {
                 self.handle_response_reasoning_summary_part_added(event);
+                Vec::new()
             }
             "response.reasoning_summary_text.delta" => {
-                emitted = self.handle_response_reasoning_summary_text_delta(event);
+                self.handle_response_reasoning_summary_text_delta(event)
             }
             "response.reasoning_summary_part.done" => {
-                emitted = self.handle_response_reasoning_summary_part_done(event);
+                self.handle_response_reasoning_summary_part_done(event)
             }
             "response.content_part.added" => {
                 self.handle_response_content_part_added(event);
+                Vec::new()
             }
             "response.output_text.delta" | "response.refusal.delta" => {
-                emitted = self.handle_response_text_delta(event);
+                self.handle_response_text_delta(event)
             }
             "response.function_call_arguments.delta" => {
-                emitted = self.handle_response_function_call_arguments_delta(event);
+                self.handle_response_function_call_arguments_delta(event)
             }
             "response.function_call_arguments.done" => {
-                emitted = self.handle_response_function_call_arguments_done(event);
+                self.handle_response_function_call_arguments_done(event)
             }
-            "response.output_item.done" => {
-                emitted = self.handle_response_output_item_done(event);
-            }
-            "response.completed" => {
-                emitted = self.handle_response_completed(event);
-            }
-            "response.failed" => {
-                emitted = self.handle_response_failed(event);
-            }
-            "error" => {
-                emitted = self.handle_error(event);
-            }
-            _ => {}
+            "response.output_item.done" => self.handle_response_output_item_done(event),
+            "response.completed" => self.handle_response_completed(event),
+            "response.failed" => self.handle_response_failed(event),
+            "error" => self.handle_error(event),
+            _ => Vec::new(),
         }
-
-        emitted
     }
 
     fn handle_response_completed(
