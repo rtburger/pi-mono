@@ -1029,6 +1029,14 @@ impl AnthropicStreamState {
         Vec::new()
     }
 
+    fn handle_error(&mut self, event: &AnthropicStreamEnvelope) -> Vec<AssistantEvent> {
+        let message = object_field(&event.data, "error")
+            .and_then(|error| string_field(error, "message"))
+            .unwrap_or("Unknown error")
+            .to_string();
+        vec![self.error_event(message)]
+    }
+
     fn process_event(&mut self, event: &AnthropicStreamEnvelope) -> Vec<AssistantEvent> {
         let mut emitted = Vec::new();
         match event.event_type.as_str() {
@@ -1037,13 +1045,7 @@ impl AnthropicStreamState {
             "content_block_delta" => emitted = self.handle_content_block_delta(event),
             "content_block_stop" => emitted = self.handle_content_block_stop(event),
             "message_delta" => emitted = self.handle_message_delta(event),
-            "error" => {
-                let message = object_field(&event.data, "error")
-                    .and_then(|error| string_field(error, "message"))
-                    .unwrap_or("Unknown error")
-                    .to_string();
-                emitted.push(self.error_event(message));
-            }
+            "error" => emitted = self.handle_error(event),
             _ => {}
         }
         emitted
