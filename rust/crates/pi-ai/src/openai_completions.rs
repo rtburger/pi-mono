@@ -1233,7 +1233,7 @@ impl OpenAiCompletionsStreamState {
 
     fn process_chunk(&mut self, chunk: OpenAiCompletionsChunk) -> Vec<AssistantEvent> {
         let mut emitted = Vec::new();
-        self.output.response_id = chunk.id.or(self.output.response_id.clone());
+        self.output.response_id = chunk.id.or_else(|| self.output.response_id.take());
 
         if let Some(usage) = chunk.usage.as_ref() {
             self.output.usage = parse_chunk_usage(usage);

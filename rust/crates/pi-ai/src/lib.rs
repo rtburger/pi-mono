@@ -733,7 +733,7 @@ fn finalize_message(
     state: &Arc<Mutex<FauxState>>,
     options: &StreamOptions,
 ) -> AssistantMessage {
-    message.error_message = error_message.or(message.error_message.clone());
+    message.error_message = error_message.or_else(|| message.error_message.take());
     message.timestamp = now_ms();
     message.usage = estimate_usage(message.content.as_slice(), context, state, options);
     message
