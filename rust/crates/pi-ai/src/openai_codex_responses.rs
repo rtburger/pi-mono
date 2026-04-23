@@ -10,6 +10,7 @@ use crate::{
     unicode::sanitize_provider_text,
 };
 use async_stream::stream;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::{SinkExt, StreamExt};
 use pi_events::{
     AssistantEvent, AssistantMessage, Context, Model, StopReason, ToolDefinition, Usage,
@@ -1199,31 +1200,7 @@ fn extract_openai_codex_account_id(token: &str) -> Option<String> {
 }
 
 fn decode_base64_token_component(input: &str) -> Option<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut accumulator = 0u32;
-    let mut bits = 0u8;
-
-    for byte in input.bytes() {
-        let value = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
-            b'=' => break,
-            _ => return None,
-        } as u32;
-
-        accumulator = (accumulator << 6) | value;
-        bits += 6;
-
-        while bits >= 8 {
-            bits -= 8;
-            output.push(((accumulator >> bits) & 0xff) as u8);
-        }
-    }
-
-    Some(output)
+    URL_SAFE_NO_PAD.decode(input.trim_end_matches('=')).ok()
 }
 
 fn default_user_agent() -> String {
