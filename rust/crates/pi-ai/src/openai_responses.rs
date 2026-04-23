@@ -979,48 +979,7 @@ impl OpenAiResponsesStreamState {
                 emitted = self.handle_response_completed(event);
             }
             "response.failed" => {
-                let response = event
-                    .data
-                    .get("response")
-                    .and_then(Value::as_object)
-                    .cloned()
-                    .unwrap_or_default();
-                self.output.response_id = response
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .or(self.output.response_id.clone());
-                apply_usage_from_response(&mut self.output, &response, self.model_cost);
-                self.output.stop_reason = StopReason::Error;
-                self.output.error_message = Some(
-                    response
-                        .get("error")
-                        .and_then(Value::as_object)
-                        .map(|error| {
-                            let code = error
-                                .get("code")
-                                .and_then(Value::as_str)
-                                .unwrap_or("unknown");
-                            let message = error
-                                .get("message")
-                                .and_then(Value::as_str)
-                                .unwrap_or("no message");
-                            format!("{code}: {message}")
-                        })
-                        .or_else(|| {
-                            response
-                                .get("incomplete_details")
-                                .and_then(Value::as_object)
-                                .and_then(|details| details.get("reason"))
-                                .and_then(Value::as_str)
-                                .map(|reason| format!("incomplete: {reason}"))
-                        })
-                        .unwrap_or_else(|| "Unknown error (no error details in response)".into()),
-                );
-                emitted.push(AssistantEvent::Error {
-                    reason: StopReason::Error,
-                    error: self.output.clone(),
-                });
+                emitted = self.handle_response_failed(event);
             }
             "error" => {
                 self.output.stop_reason = StopReason::Error;
@@ -1083,6 +1042,57 @@ impl OpenAiResponsesStreamState {
         emitted.push(AssistantEvent::Done {
             reason: self.output.stop_reason.clone(),
             message: self.output.clone(),
+        });
+
+        emitted
+    }
+
+    fn handle_response_failed(
+        &mut self,
+        event: &OpenAiResponsesStreamEnvelope,
+    ) -> Vec<AssistantEvent> {
+        let mut emitted = Vec::new();
+        let response = event
+            .data
+            .get("response")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        self.output.response_id = response
+            .get("id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .or(self.output.response_id.clone());
+        apply_usage_from_response(&mut self.output, &response, self.model_cost);
+        self.output.stop_reason = StopReason::Error;
+        self.output.error_message = Some(
+            response
+                .get("error")
+                .and_then(Value::as_object)
+                .map(|error| {
+                    let code = error
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let message = error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("no message");
+                    format!("{code}: {message}")
+                })
+                .or_else(|| {
+                    response
+                        .get("incomplete_details")
+                        .and_then(Value::as_object)
+                        .and_then(|details| details.get("reason"))
+                        .and_then(Value::as_str)
+                        .map(|reason| format!("incomplete: {reason}"))
+                })
+                .unwrap_or_else(|| "Unknown error (no error details in response)".into()),
+        );
+        emitted.push(AssistantEvent::Error {
+            reason: StopReason::Error,
+            error: self.output.clone(),
         });
 
         emitted
