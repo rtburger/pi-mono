@@ -936,11 +936,21 @@ impl CallbackServer {
         }
     }
 
-    fn close(&mut self) {
+    fn shutdown(&mut self) {
         self.cancel_wait();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+
+    fn close(&mut self) {
+        self.shutdown();
+    }
+}
+
+impl Drop for CallbackServer {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
