@@ -392,7 +392,6 @@ fn map_simple_stream_options(model: &Model, options: SimpleStreamOptions) -> Str
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AdjustedThinkingTokens {
     max_tokens: u64,
-    thinking_budget: u64,
 }
 
 fn adjust_max_tokens_for_thinking(
@@ -409,18 +408,9 @@ fn adjust_max_tokens_for_thinking(
         ThinkingLevel::Xhigh => unreachable!(),
     };
 
-    let min_output_tokens = 1_024;
     let max_tokens = (base_max_tokens + thinking_budget).min(model_max_tokens);
-    let thinking_budget = if max_tokens <= thinking_budget {
-        max_tokens.saturating_sub(min_output_tokens)
-    } else {
-        thinking_budget
-    };
 
-    AdjustedThinkingTokens {
-        max_tokens,
-        thinking_budget,
-    }
+    AdjustedThinkingTokens { max_tokens }
 }
 
 fn anthropic_supports_adaptive_thinking(model_id: &str) -> bool {
