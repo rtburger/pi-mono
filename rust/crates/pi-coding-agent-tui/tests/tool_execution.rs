@@ -681,15 +681,8 @@ fn built_in_edit_renderer_prefers_diff_details_over_success_text() {
 #[test]
 fn startup_shell_can_render_tool_execution_component_in_transcript() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
 
     let mut component = ToolExecutionComponent::new(
         "edit",

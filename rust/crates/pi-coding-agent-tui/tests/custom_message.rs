@@ -132,15 +132,8 @@ fn custom_message_component_renders_only_text_blocks_from_block_content() {
 #[test]
 fn startup_shell_can_render_custom_message_component_in_transcript() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.add_transcript_item(Box::new(CustomMessageComponent::new(
         string_custom_message(),
     )));

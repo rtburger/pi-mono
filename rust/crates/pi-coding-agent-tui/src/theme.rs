@@ -361,48 +361,6 @@ impl StartupHeaderStyler for ThemedKeyHintStyler {
         let theme = current_theme();
         theme.fg("accent", theme.bold(text))
     }
-
-    fn bold(&self, text: &str) -> String {
-        current_theme().bold(text)
-    }
-
-    fn border(&self, text: &str) -> String {
-        current_theme().fg("borderMuted", text)
-    }
-
-    fn heading(&self, text: &str) -> String {
-        let theme = current_theme();
-        theme.fg("mdHeading", theme.bold(text))
-    }
-
-    fn link(&self, text: &str) -> String {
-        current_theme().fg("mdLink", text)
-    }
-
-    fn link_url(&self, text: &str) -> String {
-        current_theme().fg("mdLinkUrl", text)
-    }
-
-    fn code(&self, text: &str) -> String {
-        current_theme().fg("mdCode", text)
-    }
-
-    fn code_block(&self, text: &str) -> String {
-        current_theme().fg("mdCodeBlock", text)
-    }
-
-    fn code_block_border(&self, text: &str) -> String {
-        current_theme().fg("mdCodeBlockBorder", text)
-    }
-
-    fn list_bullet(&self, text: &str) -> String {
-        current_theme().fg("mdListBullet", text)
-    }
-
-    fn strikethrough(&self, text: &str) -> String {
-        let theme = current_theme();
-        theme.fg("dim", theme.strikethrough(text))
-    }
 }
 
 pub fn markdown_theme() -> MarkdownTheme {

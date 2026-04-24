@@ -533,7 +533,6 @@ fn settings_selector_toggles_boolean_and_restores_theme_preview_on_cancel() {
             current_theme: String::from("dark"),
             available_themes: vec![String::from("dark"), String::from("light")],
             hide_thinking_block: false,
-            collapse_changelog: true,
             double_escape_action: DoubleEscapeAction::Tree,
             tree_filter_mode: TreeFilterMode::Default,
             show_hardware_cursor: false,

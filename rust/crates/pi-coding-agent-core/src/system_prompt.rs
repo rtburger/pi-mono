@@ -35,9 +35,6 @@ pub struct BuildSystemPromptOptions {
     pub context_files: Vec<ContextFile>,
     pub skills: Vec<Skill>,
     pub date: Option<String>,
-    pub readme_path: Option<PathBuf>,
-    pub docs_path: Option<PathBuf>,
-    pub examples_path: Option<PathBuf>,
 }
 
 pub fn build_default_pi_system_prompt(
@@ -86,9 +83,6 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions) -> String {
         context_files,
         skills,
         date,
-        readme_path,
-        docs_path,
-        examples_path,
     } = options;
 
     let resolved_cwd = cwd.unwrap_or_else(current_dir_fallback);
@@ -119,8 +113,6 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions) -> String {
         return prompt;
     }
 
-    let (readme_path, docs_path, examples_path) =
-        default_pi_docs_paths(readme_path, docs_path, examples_path);
     let visible_tools = selected_tools
         .iter()
         .filter_map(|name| {
@@ -174,10 +166,7 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions) -> String {
         .join("\n");
 
     let mut prompt = format!(
-        "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.\n\nAvailable tools:\n{tools_list}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n\nGuidelines:\n{guidelines}\n\nPi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: {}\n- Additional docs: {}\n- Examples: {} (extensions, custom tools, SDK)\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md)\n- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing\n- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)",
-        readme_path.display(),
-        docs_path.display(),
-        examples_path.display(),
+        "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.\n\nAvailable tools:\n{tools_list}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n\nGuidelines:\n{guidelines}",
     );
 
     if !append_section.is_empty() {
@@ -329,25 +318,6 @@ fn join_prompt_sections(sections: &[String]) -> Option<String> {
     } else {
         Some(non_empty.join("\n\n"))
     }
-}
-
-fn default_pi_docs_paths(
-    readme_path: Option<PathBuf>,
-    docs_path: Option<PathBuf>,
-    examples_path: Option<PathBuf>,
-) -> (PathBuf, PathBuf, PathBuf) {
-    let reference_dir = coding_agent_reference_dir();
-    (
-        readme_path.unwrap_or_else(|| reference_dir.join("README.md")),
-        docs_path.unwrap_or_else(|| reference_dir.join("docs")),
-        examples_path.unwrap_or_else(|| reference_dir.join("examples")),
-    )
-}
-
-fn coding_agent_reference_dir() -> PathBuf {
-    let candidate =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../support/coding-agent-reference");
-    candidate.canonicalize().unwrap_or(candidate)
 }
 
 fn current_dir_fallback() -> PathBuf {

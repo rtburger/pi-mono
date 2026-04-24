@@ -129,15 +129,8 @@ fn skill_invocation_component_renders_expanded_skill_content_without_user_messag
 #[test]
 fn startup_shell_can_render_skill_invocation_component_in_transcript() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.add_transcript_item(Box::new(SkillInvocationMessageComponent::new(
         parsed_skill_block(),
         &keybindings,

@@ -594,8 +594,6 @@ impl StartupShellComponent {
         keybindings: &KeybindingsManager,
         styler: &impl StartupHeaderStyler,
         quiet: bool,
-        changelog_markdown: Option<&str>,
-        show_condensed_changelog: bool,
     ) -> Self {
         let input_text = Arc::new(Mutex::new(String::new()));
         let mut input = CustomEditor::new(keybindings);
@@ -607,15 +605,7 @@ impl StartupShellComponent {
         }
 
         Self {
-            header: BuiltInHeaderComponent::new(
-                app_name,
-                version,
-                keybindings,
-                styler,
-                quiet,
-                changelog_markdown,
-                show_condensed_changelog,
-            ),
+            header: BuiltInHeaderComponent::new(app_name, version, keybindings, styler, quiet),
             transcript: RefCell::new(TranscriptComponent::new()),
             pending_messages: RefCell::new(PendingMessagesComponent::new(keybindings)),
             input: RefCell::new(input),

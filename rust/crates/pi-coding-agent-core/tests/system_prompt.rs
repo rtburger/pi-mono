@@ -106,51 +106,34 @@ fn build_system_prompt_renders_default_prompt_context_and_footer() {
             path: String::from("/work/tree/AGENTS.md"),
             content: String::from("Follow repo rules.\n"),
         }],
-        readme_path: Some(PathBuf::from("/pkg/README.md")),
-        docs_path: Some(PathBuf::from("/pkg/docs")),
-        examples_path: Some(PathBuf::from("/pkg/examples")),
         ..BuildSystemPromptOptions::default()
     });
 
     assert!(prompt.contains("Available tools:\n- read: Read file contents"));
-    assert!(prompt.contains("- Main documentation: /pkg/README.md"));
+    assert!(!prompt.contains("Pi documentation"));
+    assert!(!prompt.contains("/pkg/README.md"));
     assert!(prompt.contains("# Project Context"));
     assert!(prompt.contains("## /work/tree/AGENTS.md"));
     assert!(prompt.ends_with("Current date: 2026-04-15\nCurrent working directory: /work/tree"));
 }
 
 #[test]
-fn build_system_prompt_defaults_to_rust_reference_bundle() {
+fn build_system_prompt_omits_pi_documentation_references() {
     let prompt = build_system_prompt(BuildSystemPromptOptions {
         cwd: Some(PathBuf::from("/work/tree")),
         date: Some(String::from("2026-04-15")),
         ..BuildSystemPromptOptions::default()
     });
 
-    let reference_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../support/coding-agent-reference")
-        .canonicalize()
-        .unwrap();
-
-    assert!(reference_dir.join("README.md").exists());
-    assert!(reference_dir.join("docs").exists());
-    assert!(reference_dir.join("examples").exists());
-    assert!(prompt.contains(&format!(
-        "- Main documentation: {}",
-        reference_dir.join("README.md").display()
-    )));
-    assert!(prompt.contains(&format!(
-        "- Additional docs: {}",
-        reference_dir.join("docs").display()
-    )));
-    assert!(prompt.contains(&format!(
-        "- Examples: {}",
-        reference_dir.join("examples").display()
-    )));
-    assert!(
-        !prompt.contains("packages/coding-agent"),
-        "prompt: {prompt}"
-    );
+    for unwanted in [
+        "Pi documentation",
+        "Main documentation",
+        "Additional docs",
+        "Examples:",
+        "packages/coding-agent",
+    ] {
+        assert!(!prompt.contains(unwanted), "prompt: {prompt}");
+    }
 }
 
 #[test]

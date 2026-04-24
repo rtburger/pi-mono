@@ -113,15 +113,8 @@ fn user_message_component_renders_markdown_inside_the_message_bubble() {
 #[test]
 fn startup_shell_can_render_user_message_component_in_transcript() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.add_transcript_item(Box::new(UserMessageComponent::new(
         "Please review the diff before editing files.",
     )));
@@ -158,15 +151,8 @@ fn parsed_skill_block_and_trailing_user_message_can_render_as_separate_transcrip
     )
     .expect("skill block should parse");
 
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.add_transcript_item(Box::new(SkillInvocationMessageComponent::new(
         skill_block.clone(),
         &keybindings,

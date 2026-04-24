@@ -1,1 +1,3 @@
 - Pre-existing clippy warnings remain in `rust/crates/pi-ai/src/anthropic_messages.rs`, `rust/crates/pi-ai/src/openai_completions.rs`, `rust/crates/pi-ai/src/oauth.rs`, and `rust/crates/pi-ai/src/lib.rs`; not addressed in the retry/backoff task.
+- Wave 4 deletion left `CHANGELOG.md` mentions in `rust/crates/pi-coding-agent-tui/tests/tool_execution.rs`; those are generic path-rendering fixtures, not the removed changelog feature.
+- Wave 4 system prompt tests retain negative assertions for removed docs prompt text (`Pi documentation`, `Main documentation`, `Additional docs`).

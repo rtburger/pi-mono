@@ -36,7 +36,6 @@ pub struct SettingsConfig {
     pub current_theme: String,
     pub available_themes: Vec<String>,
     pub hide_thinking_block: bool,
-    pub collapse_changelog: bool,
     pub double_escape_action: DoubleEscapeAction,
     pub tree_filter_mode: TreeFilterMode,
     pub show_hardware_cursor: bool,
@@ -59,7 +58,6 @@ pub enum SettingsChange {
     ThinkingLevel(ThinkingLevel),
     Theme(String),
     HideThinkingBlock(bool),
-    CollapseChangelog(bool),
     DoubleEscapeAction(DoubleEscapeAction),
     TreeFilterMode(TreeFilterMode),
     ShowHardwareCursor(bool),
@@ -82,7 +80,6 @@ enum SettingId {
     Thinking,
     Theme,
     HideThinking,
-    CollapseChangelog,
     QuietStartup,
     DoubleEscapeAction,
     TreeFilterMode,
@@ -227,12 +224,6 @@ impl SettingsSelectorComponent {
                 label: "Hide thinking",
                 description: "Hide thinking blocks in assistant responses",
                 value: bool_label(self.config.hide_thinking_block).to_owned(),
-            },
-            SettingRow {
-                id: SettingId::CollapseChangelog,
-                label: "Collapse changelog",
-                description: "Show condensed changelog after updates",
-                value: bool_label(self.config.collapse_changelog).to_owned(),
             },
             SettingRow {
                 id: SettingId::QuietStartup,
@@ -532,12 +523,6 @@ impl SettingsSelectorComponent {
                 self.config.hide_thinking_block = !self.config.hide_thinking_block;
                 self.emit_change(SettingsChange::HideThinkingBlock(
                     self.config.hide_thinking_block,
-                ));
-            }
-            SettingId::CollapseChangelog => {
-                self.config.collapse_changelog = !self.config.collapse_changelog;
-                self.emit_change(SettingsChange::CollapseChangelog(
-                    self.config.collapse_changelog,
                 ));
             }
             SettingId::QuietStartup => {

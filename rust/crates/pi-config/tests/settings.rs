@@ -47,7 +47,6 @@ fn defaults_runtime_settings_when_settings_are_missing() {
     assert_eq!(loaded.settings.shell_path, None);
     assert!(!loaded.settings.quiet_startup);
     assert_eq!(loaded.settings.shell_command_prefix, None);
-    assert!(!loaded.settings.collapse_changelog);
     assert!(loaded.settings.enable_skill_commands);
     assert!(loaded.settings.terminal.show_images);
     assert!(!loaded.settings.terminal.clear_on_shrink);
@@ -101,7 +100,6 @@ fn project_settings_override_extended_runtime_settings() {
   "shellPath": "/bin/zsh",
   "quietStartup": true,
   "shellCommandPrefix": "source ~/.aliases",
-  "collapseChangelog": true,
   "enableSkillCommands": false,
   "terminal": {
     "showImages": false,
@@ -193,7 +191,6 @@ fn project_settings_override_extended_runtime_settings() {
         loaded.settings.shell_command_prefix.as_deref(),
         Some("source ~/.aliases")
     );
-    assert!(loaded.settings.collapse_changelog);
     assert!(!loaded.settings.enable_skill_commands);
     assert!(loaded.settings.terminal.show_images);
     assert!(loaded.settings.terminal.clear_on_shrink);

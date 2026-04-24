@@ -303,7 +303,6 @@ struct SettingsPickerSelection {
     thinking_level: ThinkingLevel,
     current_theme: String,
     hide_thinking_block: bool,
-    collapse_changelog: bool,
     double_escape_action: DoubleEscapeAction,
     tree_filter_mode: TreeFilterMode,
     show_hardware_cursor: bool,
@@ -2102,15 +2101,8 @@ async fn run_interactive_iteration(
         build_all_rpc_tools(&cwd, runtime_settings.settings.images.auto_resize_images);
     let mut tool_source_info = builtin_rpc_tool_source_info_map(&all_tools);
 
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        &version,
-        &keybindings,
-        &ThemedKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", &version, &keybindings, &ThemedKeyHintStyler, true);
     shell.set_clipboard_image_source(SystemClipboardImageSource::default(), env::temp_dir());
     shell.set_show_images(runtime_settings.settings.terminal.show_images);
     shell.set_hide_thinking_blocks(runtime_settings.settings.hide_thinking_block);
@@ -4129,7 +4121,6 @@ fn settings_selection_from_loaded(
             .clone()
             .unwrap_or_else(|| String::from("dark")),
         hide_thinking_block: loaded.settings.hide_thinking_block,
-        collapse_changelog: loaded.settings.collapse_changelog,
         double_escape_action: double_escape_action_from_runtime_setting(
             &loaded.settings.double_escape_action,
         ),
@@ -4157,7 +4148,6 @@ fn apply_settings_selection(
     next.settings.transport = selection.transport;
     next.settings.theme = Some(selection.current_theme.clone());
     next.settings.hide_thinking_block = selection.hide_thinking_block;
-    next.settings.collapse_changelog = selection.collapse_changelog;
     next.settings.double_escape_action =
         double_escape_action_to_runtime_setting(selection.double_escape_action).to_owned();
     next.settings.tree_filter_mode =
@@ -4213,9 +4203,6 @@ fn persist_runtime_settings_changes(
         if selection.hide_thinking_block != previous.hide_thinking_block {
             set_bool(config, "hideThinkingBlock", selection.hide_thinking_block);
         }
-        if selection.collapse_changelog != previous.collapse_changelog {
-            set_bool(config, "collapseChangelog", selection.collapse_changelog);
-        }
         if selection.double_escape_action != previous.double_escape_action {
             set_string(
                 config,
@@ -4269,7 +4256,6 @@ fn persistent_settings_changed(
         || previous.transport != next.transport
         || previous.current_theme != next.current_theme
         || previous.hide_thinking_block != next.hide_thinking_block
-        || previous.collapse_changelog != next.collapse_changelog
         || previous.double_escape_action != next.double_escape_action
         || previous.tree_filter_mode != next.tree_filter_mode
         || previous.show_hardware_cursor != next.show_hardware_cursor
@@ -4820,7 +4806,6 @@ async fn select_settings(
                 .unwrap_or_else(|| String::from("dark")),
             available_themes: get_available_themes(),
             hide_thinking_block: runtime_settings.settings.hide_thinking_block,
-            collapse_changelog: runtime_settings.settings.collapse_changelog,
             double_escape_action: double_escape_action_from_runtime_setting(
                 &runtime_settings.settings.double_escape_action,
             ),
@@ -4858,7 +4843,6 @@ async fn select_settings(
                     let _ = set_theme(&value);
                 }
                 SettingsChange::HideThinkingBlock(value) => selection.hide_thinking_block = value,
-                SettingsChange::CollapseChangelog(value) => selection.collapse_changelog = value,
                 SettingsChange::DoubleEscapeAction(value) => selection.double_escape_action = value,
                 SettingsChange::TreeFilterMode(value) => selection.tree_filter_mode = value,
                 SettingsChange::ShowHardwareCursor(value) => selection.show_hardware_cursor = value,
@@ -10810,7 +10794,6 @@ fn build_interactive_slash_commands(
         simple_slash_command("copy", "Copy last assistant message to clipboard"),
         simple_slash_command("name", "Set session display name"),
         simple_slash_command("session", "Show session info and stats"),
-        simple_slash_command("changelog", "Show changelog entries"),
         simple_slash_command("hotkeys", "Show keyboard shortcuts"),
         simple_slash_command("fork", "Fork from a previous user message"),
         simple_slash_command("tree", "Show or switch the session tree"),
@@ -11662,50 +11645,6 @@ fn capitalize_key_id(key: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
-}
-
-fn render_changelog_text() -> Result<String, String> {
-    let changelog_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../support/coding-agent-reference/CHANGELOG.md");
-    let content = fs::read_to_string(&changelog_path)
-        .map_err(|error| format!("{}: {error}", changelog_path.display()))?;
-
-    let mut sections = Vec::<String>::new();
-    let mut current = Vec::<String>::new();
-    for line in content.lines() {
-        if line.starts_with("## ") {
-            if !current.is_empty() {
-                sections.push(current.join("\n").trim().to_owned());
-                current.clear();
-            }
-        }
-        if !current.is_empty() || line.starts_with("## ") {
-            current.push(line.to_owned());
-        }
-    }
-    if !current.is_empty() {
-        sections.push(current.join("\n").trim().to_owned());
-    }
-
-    let mut selected = Vec::<String>::new();
-    if let Some(unreleased) = sections
-        .iter()
-        .find(|section| section.starts_with("## [Unreleased]"))
-    {
-        selected.push(unreleased.clone());
-    }
-    if let Some(latest_release) = sections
-        .iter()
-        .find(|section| section.starts_with("## [") && !section.starts_with("## [Unreleased]"))
-    {
-        selected.push(latest_release.clone());
-    }
-
-    if selected.is_empty() {
-        return Ok(String::from("No changelog entries found."));
-    }
-
-    Ok(selected.join("\n\n").trim().to_owned())
 }
 
 fn resolve_interactive_debug_log_path(context: &InteractiveSlashCommandContext) -> PathBuf {
@@ -13238,14 +13177,6 @@ fn handle_interactive_slash_command(
                     format!("Session name set: {name}"),
                 );
             }
-            Err(error) => status_handle.set_message(format!("Error: {error}")),
-        }
-        return true;
-    }
-
-    if text == "/changelog" {
-        match render_changelog_text() {
-            Ok(changelog) => append_transcript_custom_message(shell, "changelog", changelog),
             Err(error) => status_handle.set_message(format!("Error: {error}")),
         }
         return true;
@@ -15501,15 +15432,8 @@ export default function (pi) {
         .expect("expected coding agent core");
         let core = created.core;
         let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
+        let mut shell =
+            StartupShellComponent::new("Pi", "0.1.0", &keybindings, &PlainKeyHintStyler, true);
         let session_manager = Arc::new(Mutex::new(SessionManager::in_memory("/tmp/pi-session")));
         let status_handle = shell.status_handle();
         let footer_state_handle = shell.footer_state_handle();
@@ -15587,7 +15511,6 @@ export default function (pi) {
             "copy",
             "name",
             "session",
-            "changelog",
             "hotkeys",
             "fork",
             "tree",
@@ -15639,15 +15562,8 @@ export default function (pi) {
         .expect("expected coding agent core");
         let core = created.core;
         let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
+        let mut shell =
+            StartupShellComponent::new("Pi", "0.1.0", &keybindings, &PlainKeyHintStyler, true);
         let status_handle = shell.status_handle();
         let footer_state_handle = shell.footer_state_handle();
         let exit_requested = Arc::new(AtomicBool::new(false));
@@ -15944,15 +15860,8 @@ export default function (pi) {
         .expect("expected coding agent core");
         let core = created.core;
         let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
+        let mut shell =
+            StartupShellComponent::new("Pi", "0.1.0", &keybindings, &PlainKeyHintStyler, true);
         let status_handle = shell.status_handle();
         let footer_state_handle = shell.footer_state_handle();
         let exit_requested = Arc::new(AtomicBool::new(false));
@@ -16113,15 +16022,8 @@ export default function (pi) {
         .expect("expected coding agent core");
         let core = created.core;
         let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
+        let mut shell =
+            StartupShellComponent::new("Pi", "0.1.0", &keybindings, &PlainKeyHintStyler, true);
         let status_handle = shell.status_handle();
         let footer_state_handle = shell.footer_state_handle();
         let exit_requested = Arc::new(AtomicBool::new(false));
@@ -16183,17 +16085,10 @@ export default function (pi) {
     }
 
     #[test]
-    fn slash_commands_render_hotkeys_and_changelog() {
+    fn slash_command_renders_hotkeys() {
         let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
+        let mut shell =
+            StartupShellComponent::new("Pi", "0.1.0", &keybindings, &PlainKeyHintStyler, true);
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             provider: "slash-render-commands-faux".into(),
             models: vec![FauxModelDefinition {
@@ -16238,35 +16133,23 @@ export default function (pi) {
         let transition_request = Arc::new(Mutex::new(None));
         let slash_command_context = test_slash_command_context(&keybindings, cwd);
 
-        for command in ["/hotkeys", "/changelog"] {
-            assert!(handle_interactive_slash_command(
-                &mut shell,
-                command,
-                &core,
-                core.model_registry().as_ref(),
-                &[],
-                Some(&session_manager),
-                &slash_command_context,
-                &status_handle,
-                &footer_state_handle,
-                &exit_requested,
-                &transition_request,
-            ));
-        }
+        assert!(handle_interactive_slash_command(
+            &mut shell,
+            "/hotkeys",
+            &core,
+            core.model_registry().as_ref(),
+            &[],
+            Some(&session_manager),
+            &slash_command_context,
+            &status_handle,
+            &footer_state_handle,
+            &exit_requested,
+            &transition_request,
+        ));
 
         let rendered = strip_terminal_control_sequences(&shell.render(120).join("\n"));
-        let expected_changelog_heading = render_changelog_text()
-            .expect("expected changelog text")
-            .lines()
-            .find(|line| line.starts_with("## ["))
-            .map(|line| line.trim_start_matches("## ").to_owned())
-            .expect("expected changelog heading");
         assert!(
             rendered.contains("Keyboard Shortcuts"),
-            "output: {rendered}"
-        );
-        assert!(
-            rendered.contains(&expected_changelog_heading),
             "output: {rendered}"
         );
 
@@ -16424,15 +16307,8 @@ export default function (pi) {
         .expect("expected coding agent core");
         let core = created.core;
         let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
+        let mut shell =
+            StartupShellComponent::new("Pi", "0.1.0", &keybindings, &PlainKeyHintStyler, true);
         let status_handle = shell.status_handle();
         let footer_state_handle = shell.footer_state_handle();
         let exit_requested = Arc::new(AtomicBool::new(false));
@@ -16499,15 +16375,8 @@ export default function (pi) {
         .expect("expected coding agent core");
         let core = created.core;
         let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
+        let mut shell =
+            StartupShellComponent::new("Pi", "0.1.0", &keybindings, &PlainKeyHintStyler, true);
         let status_handle = shell.status_handle();
         let footer_state_handle = shell.footer_state_handle();
         let exit_requested = Arc::new(AtomicBool::new(false));
@@ -16588,15 +16457,8 @@ export default function (pi) {
         .expect("expected coding agent core");
         let core = created.core;
         let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
+        let mut shell =
+            StartupShellComponent::new("Pi", "0.1.0", &keybindings, &PlainKeyHintStyler, true);
         let status_handle = shell.status_handle();
         let footer_state_handle = shell.footer_state_handle();
         let exit_requested = Arc::new(AtomicBool::new(false));
@@ -16677,15 +16539,8 @@ export default function (pi) {
         .expect("expected coding agent core");
         let core = created.core;
         let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
+        let mut shell =
+            StartupShellComponent::new("Pi", "0.1.0", &keybindings, &PlainKeyHintStyler, true);
         let status_handle = shell.status_handle();
         let footer_state_handle = shell.footer_state_handle();
         let exit_requested = Arc::new(AtomicBool::new(false));
@@ -17069,15 +16924,8 @@ export default function (pi) {
         .expect("expected coding agent core");
         let core = created.core;
         let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
+        let mut shell =
+            StartupShellComponent::new("Pi", "0.1.0", &keybindings, &PlainKeyHintStyler, true);
         let status_handle = shell.status_handle();
         let footer_state_handle = shell.footer_state_handle();
         let exit_requested = Arc::new(AtomicBool::new(false));
@@ -17270,15 +17118,8 @@ export default function (pi) {
         .expect("expected coding agent core");
         let core = created.core;
         let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
+        let mut shell =
+            StartupShellComponent::new("Pi", "0.1.0", &keybindings, &PlainKeyHintStyler, true);
         let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
         manager
             .append_message(Message::User {
@@ -17352,15 +17193,8 @@ export default function (pi) {
         .expect("expected coding agent core");
         let core = created.core;
         let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
+        let mut shell =
+            StartupShellComponent::new("Pi", "0.1.0", &keybindings, &PlainKeyHintStyler, true);
         let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
         manager
             .append_message(Message::User {
@@ -17777,15 +17611,8 @@ export default function (pi) {
         .expect("expected coding agent core");
         let core = created.core;
         let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
+        let mut shell =
+            StartupShellComponent::new("Pi", "0.1.0", &keybindings, &PlainKeyHintStyler, true);
         let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
         manager
             .append_message(Message::User {
@@ -18050,15 +17877,8 @@ export default function (pi) {
         .expect("expected coding agent core");
         let core = created.core;
         let keybindings = create_keybindings_manager(None);
-        let mut shell = StartupShellComponent::new(
-            "Pi",
-            "0.1.0",
-            &keybindings,
-            &PlainKeyHintStyler,
-            true,
-            None,
-            false,
-        );
+        let mut shell =
+            StartupShellComponent::new("Pi", "0.1.0", &keybindings, &PlainKeyHintStyler, true);
         let mut manager = SessionManager::in_memory(cwd.to_str().unwrap());
         let root_user_id = manager
             .append_message(Message::User {

@@ -91,15 +91,7 @@ impl ClipboardImageSource for StaticClipboardImageSource {
 
 fn shell() -> StartupShellComponent {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    )
+    StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true)
 }
 
 #[test]

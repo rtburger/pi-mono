@@ -85,8 +85,7 @@ pub use settings_selector::{
 pub use show_images_selector::ShowImagesSelectorComponent;
 pub use skill_invocation::SkillInvocationMessageComponent;
 pub use startup_header::{
-    BuiltInHeaderComponent, StartupHeaderComponent, StartupHeaderStyler,
-    build_condensed_changelog_notice, build_startup_header_text,
+    BuiltInHeaderComponent, StartupHeaderComponent, StartupHeaderStyler, build_startup_header_text,
 };
 pub use startup_shell::{
     ExtensionWidgetPlacement, ShellUpdateHandle, StartupShellComponent, StatusHandle,

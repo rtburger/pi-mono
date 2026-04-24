@@ -317,15 +317,7 @@ impl ClipboardImageSource for StaticClipboardImageSource {
 #[test]
 fn startup_shell_tracks_show_images_setting() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let shell = StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
 
     assert!(shell.show_images());
     shell.set_show_images(false);
@@ -335,15 +327,7 @@ fn startup_shell_tracks_show_images_setting() {
 #[test]
 fn startup_shell_renders_header_above_prompt() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        false,
-        None,
-        false,
-    );
+    let shell = StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, false);
 
     let mut tui = Tui::new(NoopTerminal);
     let shell_id = tui.add_child(Box::new(shell));
@@ -356,17 +340,9 @@ fn startup_shell_renders_header_above_prompt() {
 }
 
 #[test]
-fn quiet_startup_shell_without_changelog_renders_prompt_on_first_line() {
+fn quiet_startup_shell_renders_prompt_on_first_line() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let shell = StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
 
     let mut tui = Tui::new(NoopTerminal);
     let shell_id = tui.add_child(Box::new(shell));
@@ -383,15 +359,8 @@ fn startup_shell_routes_input_and_submit_through_tui() {
     let submitted_for_callback = Arc::clone(&submitted);
 
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_submit(move |value| {
         *submitted_for_callback
             .lock()
@@ -431,15 +400,8 @@ fn startup_shell_supports_multiline_prompt_editing_via_custom_editor_bindings() 
         ]),
         None,
     );
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_submit(move |value| {
         *submitted_for_callback
             .lock()
@@ -482,15 +444,8 @@ fn startup_shell_uses_shared_keybindings_for_header_and_input() {
         ]),
         None,
     );
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        false,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, false);
     shell.set_on_submit(move |value| {
         *submitted_for_callback
             .lock()
@@ -528,15 +483,8 @@ fn startup_shell_interrupt_uses_app_keybinding_binding_and_escape_callback() {
     let interrupted_for_callback = Arc::clone(&interrupted);
 
     let keybindings = KeybindingsManager::new(config(&[("app.interrupt", &["ctrl+x"])]), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_escape(move || {
         *interrupted_for_callback
             .lock()
@@ -600,15 +548,8 @@ fn startup_shell_interrupt_cancels_autocomplete_before_escape_callback() {
     let interrupted_for_callback = Arc::clone(&interrupted);
 
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_autocomplete_provider(Arc::new(MultiSuggestionProvider));
     shell.set_on_escape(move || {
         *interrupted_for_callback
@@ -679,15 +620,8 @@ fn startup_shell_submit_accepts_autocomplete_before_submitting_prompt() {
     let submitted_for_callback = Arc::clone(&submitted);
 
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_autocomplete_provider(Arc::new(ReadmeSuggestionProvider));
     shell.set_on_submit(move |value| {
         submitted_for_callback
@@ -733,15 +667,8 @@ fn startup_shell_clear_binding_clears_input_by_default() {
     let exits_for_callback = Arc::clone(&exits);
 
     let keybindings = KeybindingsManager::new(config(&[("app.clear", &["ctrl+x"])]), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_exit(move || {
         *exits_for_callback.lock().expect("exit mutex poisoned") += 1;
     });
@@ -759,15 +686,8 @@ fn startup_shell_second_clear_binding_within_window_uses_exit_handler() {
     let exits_for_callback = Arc::clone(&exits);
 
     let keybindings = KeybindingsManager::new(config(&[("app.clear", &["ctrl+x"])]), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_exit(move || {
         *exits_for_callback.lock().expect("exit mutex poisoned") += 1;
     });
@@ -787,15 +707,8 @@ fn startup_shell_extension_shortcut_can_consume_or_fall_through() {
     let seen_for_callback = Arc::clone(&seen);
 
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_extension_shortcut(move |data| {
         seen_for_callback
             .lock()
@@ -824,15 +737,8 @@ fn startup_shell_extension_shortcut_runs_before_paste_image_binding() {
 
     let keybindings =
         KeybindingsManager::new(config(&[("app.clipboard.pasteImage", &["ctrl+x"])]), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_extension_shortcut(move |data| {
         if data == "\x18" {
             *shortcut_calls_for_callback
@@ -862,15 +768,8 @@ fn startup_shell_paste_image_uses_app_keybinding_binding() {
 
     let keybindings =
         KeybindingsManager::new(config(&[("app.clipboard.pasteImage", &["ctrl+x"])]), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("draft prompt");
     shell.set_on_paste_image(move || {
         *paste_calls_for_callback
@@ -889,15 +788,8 @@ fn startup_shell_default_paste_image_writes_temp_file_and_inserts_path() {
     let temp_dir = TestDir::new("startup-shell-paste-image");
     let keybindings =
         KeybindingsManager::new(config(&[("app.clipboard.pasteImage", &["ctrl+x"])]), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("prefix  suffix");
     shell.set_input_cursor("prefix ".len());
     shell.set_clipboard_image_source(
@@ -932,15 +824,8 @@ fn startup_shell_default_paste_image_ignores_empty_clipboard() {
     let temp_dir = TestDir::new("startup-shell-empty-paste-image");
     let keybindings =
         KeybindingsManager::new(config(&[("app.clipboard.pasteImage", &["ctrl+x"])]), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("draft prompt");
     shell.set_clipboard_image_source(StaticClipboardImageSource { image: None }, temp_dir.path());
 
@@ -960,15 +845,8 @@ fn startup_shell_can_show_extension_editor_and_restore_hidden_prompt_after_submi
     let submitted = Arc::new(Mutex::new(None::<String>));
     let submitted_for_callback = Arc::clone(&submitted);
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("hidden prompt");
     shell.show_extension_editor(
         "Extension editor",
@@ -1005,15 +883,8 @@ fn startup_shell_can_cancel_extension_editor_and_restore_hidden_prompt() {
     let cancelled = Arc::new(Mutex::new(0usize));
     let cancelled_for_callback = Arc::clone(&cancelled);
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("hidden prompt");
     shell.show_extension_editor(
         "Extension editor",
@@ -1038,15 +909,8 @@ fn startup_shell_can_cancel_extension_editor_and_restore_hidden_prompt() {
 #[test]
 fn startup_shell_app_editor_external_opens_prompt_extension_editor_and_restores_edited_prompt() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     let host = RecordingExternalEditorHost::default();
     let host_events = Arc::clone(&host.events);
     let runner =
@@ -1100,15 +964,8 @@ fn startup_shell_registered_external_editor_action_overrides_default_prompt_edit
     let external_calls_for_handler = Arc::clone(&external_calls);
 
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("draft prompt");
     shell.on_action("app.editor.external", move || {
         *external_calls_for_handler
@@ -1133,15 +990,8 @@ fn startup_shell_can_show_model_selector_and_restore_hidden_prompt_after_submit(
     let selected = Arc::new(Mutex::new(None::<String>));
     let selected_for_callback = Arc::clone(&selected);
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("hidden prompt");
     shell.show_model_selector(
         Some(model("alpha", "openai", true)),
@@ -1179,15 +1029,8 @@ fn startup_shell_can_cancel_model_selector_and_restore_hidden_prompt() {
     let cancelled = Arc::new(Mutex::new(0usize));
     let cancelled_for_callback = Arc::clone(&cancelled);
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("hidden prompt");
     shell.show_model_selector(
         Some(model("alpha", "openai", true)),
@@ -1220,15 +1063,8 @@ fn startup_shell_paste_image_callback_overrides_default_clipboard_insert() {
 
     let keybindings =
         KeybindingsManager::new(config(&[("app.clipboard.pasteImage", &["ctrl+x"])]), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("draft prompt");
     shell.set_clipboard_image_source(
         StaticClipboardImageSource {
@@ -1263,15 +1099,8 @@ fn startup_shell_can_run_registered_app_action_handlers() {
     let clear_calls_for_handler = Arc::clone(&clear_calls);
 
     let keybindings = KeybindingsManager::new(config(&[("app.clear", &["ctrl+x"])]), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.on_action("app.clear", move || {
         *clear_calls_for_handler
             .lock()
@@ -1288,15 +1117,8 @@ fn startup_shell_can_run_registered_app_action_handlers() {
 #[test]
 fn startup_shell_shell_aware_action_handler_can_open_model_selector() {
     let keybindings = KeybindingsManager::new(config(&[("app.model.select", &["ctrl+x"])]), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("hidden prompt");
     shell.on_action_with_shell("app.model.select", |shell| {
         shell.show_model_selector(
@@ -1327,15 +1149,8 @@ fn startup_shell_follow_up_binding_submits_current_input_by_default() {
 
     let keybindings =
         KeybindingsManager::new(config(&[("app.message.followUp", &["ctrl+x"])]), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("queued message");
     shell.set_on_submit(move |value| {
         *submitted_for_callback
@@ -1361,15 +1176,8 @@ fn startup_shell_follow_up_binding_ignores_whitespace_only_input() {
 
     let keybindings =
         KeybindingsManager::new(config(&[("app.message.followUp", &["ctrl+x"])]), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("   ");
     shell.set_on_submit(move |_| {
         *submitted_for_callback
@@ -1391,15 +1199,8 @@ fn startup_shell_registered_follow_up_action_overrides_default_submit() {
 
     let keybindings =
         KeybindingsManager::new(config(&[("app.message.followUp", &["ctrl+x"])]), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("queued message");
     shell.set_on_submit(move |_| {
         *submitted_for_callback
@@ -1427,15 +1228,8 @@ fn startup_shell_exit_handler_only_runs_when_input_is_empty() {
     let exits_for_callback = Arc::clone(&exits);
 
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_exit(move || {
         *exits_for_callback.lock().expect("exit mutex poisoned") += 1;
     });
@@ -1454,15 +1248,8 @@ fn startup_shell_exit_handler_only_runs_when_input_is_empty() {
 #[test]
 fn startup_shell_renders_transcript_before_pending_messages_and_prompt() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.add_transcript_item(Box::new(Text::new("first transcript item", 0, 0)));
     shell.add_transcript_item(Box::new(Text::new("second transcript item", 0, 0)));
     shell.set_pending_messages(
@@ -1503,15 +1290,8 @@ fn startup_shell_renders_transcript_before_pending_messages_and_prompt() {
 #[test]
 fn startup_shell_renders_status_message_between_pending_messages_and_prompt() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_pending_messages(
         &PlainKeyHintStyler,
         ["queued steering message"],
@@ -1541,15 +1321,8 @@ fn startup_shell_renders_status_message_between_pending_messages_and_prompt() {
 #[test]
 fn startup_shell_budgets_transcript_height_for_status_line() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     for index in 1..=6 {
         shell.add_transcript_item(Box::new(Text::new(format!("line {index}"), 0, 0)));
     }
@@ -1572,15 +1345,8 @@ fn startup_shell_budgets_transcript_height_for_status_line() {
 #[test]
 fn startup_shell_truncates_and_clears_status_message() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_status_message("this is a very long working message that must be truncated");
 
     let lines = shell.render(24);
@@ -1600,15 +1366,7 @@ fn startup_shell_truncates_and_clears_status_message() {
 #[test]
 fn startup_shell_status_handle_updates_shell_after_component_is_moved() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let shell = StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     let status_handle = shell.status_handle();
 
     let mut tui = Tui::new(NoopTerminal);
@@ -1633,15 +1391,7 @@ fn startup_shell_status_handle_can_queue_tui_rerenders() {
     let render_handle = tui.render_handle();
 
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let shell = StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     let status_handle = shell.status_handle_with_render_handle(render_handle);
 
     let shell_id = tui.add_child(Box::new(shell));
@@ -1676,15 +1426,8 @@ fn startup_shell_status_handle_can_queue_tui_rerenders() {
 #[test]
 fn startup_shell_clips_transcript_to_remaining_viewport_height() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     for index in 1..=6 {
         shell.add_transcript_item(Box::new(Text::new(format!("line {index}"), 0, 0)));
     }
@@ -1701,15 +1444,8 @@ fn startup_shell_clips_transcript_to_remaining_viewport_height() {
 #[test]
 fn startup_shell_can_scroll_transcript_without_hiding_prompt() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     for index in 1..=6 {
         shell.add_transcript_item(Box::new(Text::new(format!("line {index}"), 0, 0)));
     }
@@ -1740,15 +1476,8 @@ fn startup_shell_can_scroll_transcript_without_hiding_prompt() {
 #[test]
 fn startup_shell_page_keys_scroll_transcript_by_visible_page() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     for index in 1..=8 {
         shell.add_transcript_item(Box::new(Text::new(format!("line {index}"), 0, 0)));
     }
@@ -1788,15 +1517,8 @@ fn startup_shell_page_keys_use_configured_keybindings() {
         ]),
         None,
     );
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     for index in 1..=8 {
         shell.add_transcript_item(Box::new(Text::new(format!("line {index}"), 0, 0)));
     }
@@ -1813,15 +1535,8 @@ fn startup_shell_page_keys_use_configured_keybindings() {
 #[test]
 fn startup_shell_budgets_transcript_height_for_footer_lines() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     for index in 1..=4 {
         shell.add_transcript_item(Box::new(Text::new(format!("line {index}"), 0, 0)));
     }
@@ -1863,15 +1578,8 @@ fn startup_shell_can_apply_footer_data_snapshot_without_overwriting_session_foot
     };
 
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_footer_state(FooterState {
         model: Some(model("gpt-5", "openai", true)),
         thinking_level: "high".to_owned(),
@@ -1905,15 +1613,8 @@ fn startup_shell_can_bind_live_footer_data_provider_without_manual_snapshot_push
     let provider = FooterDataProvider::new(&first_repo);
 
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_footer_state(FooterState {
         model: Some(model("gpt-5", "openai", true)),
         thinking_level: "high".to_owned(),
@@ -1959,15 +1660,8 @@ fn startup_shell_live_footer_binding_can_queue_tui_rerenders() {
     let render_handle = tui.render_handle();
 
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_footer_state(FooterState {
         model: Some(model("gpt-5", "openai", true)),
         thinking_level: "high".to_owned(),
@@ -1999,15 +1693,8 @@ fn startup_shell_live_footer_binding_can_queue_tui_rerenders() {
 #[test]
 fn startup_shell_preserves_scrolled_transcript_view_when_new_items_arrive() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     for index in 1..=6 {
         shell.add_transcript_item(Box::new(Text::new(format!("line {index}"), 0, 0)));
     }
@@ -2030,15 +1717,8 @@ fn startup_shell_preserves_scrolled_transcript_view_when_new_items_arrive() {
 #[test]
 fn startup_shell_truncates_pending_messages_and_can_remove_or_clear_transcript_items() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     let first_id = shell.add_transcript_item(Box::new(Text::new("first item", 0, 0)));
     shell.add_transcript_item(Box::new(Text::new("second item", 0, 0)));
     shell.set_pending_messages(
@@ -2061,15 +1741,8 @@ fn startup_shell_truncates_pending_messages_and_can_remove_or_clear_transcript_i
     assert!(!lines.iter().any(|line| line.contains("first item")));
     assert!(lines.iter().any(|line| line.contains("...")));
 
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.add_transcript_item(Box::new(Text::new("temporary transcript", 0, 0)));
     shell.set_pending_messages(
         &PlainKeyHintStyler,

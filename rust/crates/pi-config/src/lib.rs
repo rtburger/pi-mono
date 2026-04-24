@@ -163,7 +163,6 @@ pub struct RuntimeSettings {
     pub shell_path: Option<String>,
     pub quiet_startup: bool,
     pub shell_command_prefix: Option<String>,
-    pub collapse_changelog: bool,
     pub enable_skill_commands: bool,
     pub terminal: TerminalSettings,
     pub images: ImageSettings,
@@ -195,7 +194,6 @@ impl Default for RuntimeSettings {
             shell_path: None,
             quiet_startup: false,
             shell_command_prefix: None,
-            collapse_changelog: false,
             enable_skill_commands: true,
             terminal: TerminalSettings::default(),
             images: ImageSettings::default(),
@@ -330,8 +328,6 @@ pub struct MarkdownConfig {
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_changelog_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
@@ -361,8 +357,6 @@ pub struct Settings {
     pub shell_command_prefix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub npm_command: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub collapse_changelog: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub packages: Option<Vec<PackageSource>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -751,17 +745,6 @@ impl<S: SettingsStorage> SettingsManager<S> {
         std::mem::take(&mut self.errors)
     }
 
-    pub fn last_changelog_version(&self) -> Option<String> {
-        self.settings.last_changelog_version.clone()
-    }
-
-    pub fn set_last_changelog_version(&mut self, version: impl Into<String>) {
-        let version = version.into();
-        self.update_global("lastChangelogVersion", None, move |settings| {
-            settings.last_changelog_version = Some(version);
-        });
-    }
-
     pub fn session_dir(&self) -> Option<String> {
         self.settings.session_dir.clone()
     }
@@ -1056,16 +1039,6 @@ impl<S: SettingsStorage> SettingsManager<S> {
     pub fn set_npm_command(&mut self, command: Option<Vec<String>>) {
         self.update_global("npmCommand", None, move |settings| {
             settings.npm_command = command;
-        });
-    }
-
-    pub fn collapse_changelog(&self) -> bool {
-        self.settings.collapse_changelog.unwrap_or(false)
-    }
-
-    pub fn set_collapse_changelog(&mut self, collapse: bool) {
-        self.update_global("collapseChangelog", None, move |settings| {
-            settings.collapse_changelog = Some(collapse);
         });
     }
 
@@ -1668,7 +1641,6 @@ fn resolve_runtime_settings(settings: &Settings) -> RuntimeSettings {
     resolved.shell_path = settings.shell_path.clone();
     resolved.quiet_startup = settings.quiet_startup.unwrap_or(false);
     resolved.shell_command_prefix = settings.shell_command_prefix.clone();
-    resolved.collapse_changelog = settings.collapse_changelog.unwrap_or(false);
     resolved.enable_skill_commands = settings.enable_skill_commands.unwrap_or(true);
     resolved.enabled_models = settings.enabled_models.clone();
     resolved.double_escape_action = settings
@@ -1808,9 +1780,6 @@ fn apply_runtime_scope(
     }
     if let Some(shell_command_prefix) = settings.shell_command_prefix.clone() {
         loaded.settings.shell_command_prefix = Some(shell_command_prefix);
-    }
-    if let Some(collapse_changelog) = settings.collapse_changelog {
-        loaded.settings.collapse_changelog = collapse_changelog;
     }
     if let Some(enable_skill_commands) = settings.enable_skill_commands {
         loaded.settings.enable_skill_commands = enable_skill_commands;

@@ -182,15 +182,8 @@ async fn interactive_binding_submits_prompt_and_renders_user_and_assistant_messa
     .unwrap();
 
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
 
     let terminal = RecordingTerminal::new();
     let inspector = terminal.clone();
@@ -254,15 +247,8 @@ async fn interactive_shell_external_editor_action_mounts_extension_editor_and_re
     .unwrap();
 
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
 
     let terminal = RecordingTerminal::new();
     let mut tui = Tui::new(terminal);
@@ -360,15 +346,8 @@ async fn interactive_binding_queues_follow_up_messages_during_streaming_and_clea
     .unwrap();
 
     let keybindings = keybindings(&[("app.message.followUp", "ctrl+x")]);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
 
     let terminal = RecordingTerminal::new();
     let mut tui = Tui::new(terminal);
@@ -451,15 +430,8 @@ async fn interactive_binding_queues_steering_messages_during_streaming_and_updat
     .unwrap();
 
     let keybindings = keybindings(&[("app.message.followUp", "ctrl+x")]);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
 
     let terminal = RecordingTerminal::new();
     let mut tui = Tui::new(terminal);
@@ -560,15 +532,8 @@ async fn interactive_binding_dequeue_restores_queued_follow_up_to_the_prompt() {
         ("app.message.followUp", "ctrl+x"),
         ("app.message.dequeue", "ctrl+u"),
     ]);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
 
     let terminal = RecordingTerminal::new();
     let mut tui = Tui::new(terminal);
@@ -650,15 +615,8 @@ async fn interactive_binding_dequeue_restores_queued_steering_and_follow_up_to_t
         ("app.message.followUp", "ctrl+x"),
         ("app.message.dequeue", "ctrl+u"),
     ]);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
 
     let terminal = RecordingTerminal::new();
     let mut tui = Tui::new(terminal);
@@ -763,15 +721,8 @@ async fn interactive_binding_interrupt_restores_queued_steering_and_follow_up_an
         ("app.message.followUp", "ctrl+x"),
         ("app.interrupt", "ctrl+o"),
     ]);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
 
     let terminal = RecordingTerminal::new();
     let mut tui = Tui::new(terminal);
@@ -824,15 +775,8 @@ async fn interactive_binding_interrupt_restores_queued_steering_and_follow_up_an
 #[tokio::test]
 async fn interactive_shell_external_editor_action_respects_registered_override() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("draft prompt");
     shell.set_input_cursor("draft prompt".len());
 
@@ -906,15 +850,8 @@ async fn interactive_binding_renders_tool_execution_updates() {
     .unwrap();
 
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
 
     let terminal = RecordingTerminal::new();
     let mut tui = Tui::new(terminal);
@@ -979,15 +916,8 @@ async fn interactive_binding_replays_existing_state_when_bound_late() {
     created.core.prompt_text("earlier prompt").await.unwrap();
 
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let mut shell = StartupShellComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainKeyHintStyler,
-        true,
-        None,
-        false,
-    );
+    let mut shell =
+        StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
 
     let terminal = RecordingTerminal::new();
     let mut tui = Tui::new(terminal);

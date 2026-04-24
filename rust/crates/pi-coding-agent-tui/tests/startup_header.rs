@@ -1,6 +1,6 @@
 use pi_coding_agent_tui::{
     BuiltInHeaderComponent, KeyHintStyler, KeyId, KeybindingsManager, StartupHeaderComponent,
-    StartupHeaderStyler, build_condensed_changelog_notice, build_startup_header_text,
+    StartupHeaderStyler, build_startup_header_text,
 };
 use pi_tui::{Component, Terminal, Tui, TuiError};
 use std::{collections::BTreeMap, time::Duration};
@@ -125,8 +125,7 @@ fn startup_header_text_matches_typescript_instruction_shape() {
             "!! to run bash (no context)\n",
             "alt+enter to queue follow-up\n",
             "alt+up to edit all queued messages\n",
-            "ctrl+v to paste image\n\n",
-            "Pi can explain its own features and look up its docs. Ask it how to use or extend Pi."
+            "ctrl+v to paste image"
         )
     );
 }
@@ -192,107 +191,23 @@ fn startup_header_component_renders_through_tui_and_wraps_long_lines() {
             .first()
             .is_some_and(|line| line.starts_with("Pi v1.2.3"))
     );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("Pi can explain its own"))
-    );
-    assert!(lines.iter().any(|line| line.contains("Ask it how")));
 }
 
 #[test]
-fn condensed_changelog_notice_uses_latest_version_from_markdown() {
-    assert_eq!(
-        build_condensed_changelog_notice(
-            "# Changelog\n\n## [0.9.0]\n- Added stuff\n",
-            "1.2.3",
-            &PlainStyler,
-        ),
-        "Updated to v0.9.0. Use /changelog to view full changelog."
-    );
-}
-
-#[test]
-fn built_in_header_component_renders_spacers_borders_and_condensed_notice() {
+fn built_in_header_component_renders_startup_header_only() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let component = BuiltInHeaderComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainStyler,
-        false,
-        Some("## [0.9.0]\n- Added stuff\n"),
-        true,
-    );
+    let component = BuiltInHeaderComponent::new("Pi", "1.2.3", &keybindings, &PlainStyler, false);
 
     let lines = component.render(60);
 
     assert_eq!(lines.first().map(String::as_str), Some(""));
-    assert!(lines.iter().any(|line| line == &"─".repeat(60)));
-    assert!(
-        lines
-            .iter()
-            .any(|line| { line == "Updated to v0.9.0. Use /changelog to view full changelog." })
-    );
+    assert!(lines.iter().any(|line| line.contains("Pi v1.2.3")));
 }
 
 #[test]
-fn built_in_header_component_renders_expanded_changelog_markdown() {
+fn built_in_header_component_in_quiet_mode_renders_no_lines() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let component = BuiltInHeaderComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainStyler,
-        false,
-        Some(
-            "## [0.9.0]\n\n### Added\n\n- Added **foo**\n- See [docs](docs.md)\n\n```ts\nconsole.log(\"hi\");\n```\n",
-        ),
-        false,
-    );
-
-    let lines = component.render(80);
-
-    assert!(lines.iter().any(|line| line == "What's New"));
-    assert!(lines.iter().any(|line| line == "[0.9.0]"));
-    assert!(lines.iter().any(|line| line == "### Added"));
-    assert!(lines.iter().any(|line| line == "- Added foo"));
-    assert!(lines.iter().any(|line| line == "- See docs (docs.md)"));
-    assert!(lines.iter().any(|line| line == "```ts"));
-    assert!(lines.iter().any(|line| line == "  console.log(\"hi\");"));
-    assert!(lines.iter().any(|line| line == "```"));
-    assert!(!lines.iter().any(|line| line.contains("Updated to v0.9.0")));
-}
-
-#[test]
-fn built_in_header_component_in_quiet_mode_only_shows_condensed_notice() {
-    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let component = BuiltInHeaderComponent::new(
-        "Pi",
-        "1.2.3",
-        &keybindings,
-        &PlainStyler,
-        true,
-        Some("## [0.9.0]\n- Added stuff\n"),
-        false,
-    );
-
-    let lines = component.render(80);
-
-    assert_eq!(
-        lines,
-        vec![
-            String::new(),
-            "Updated to v0.9.0. Use /changelog to view full changelog.".to_owned(),
-        ]
-    );
-}
-
-#[test]
-fn built_in_header_component_in_quiet_mode_without_changelog_renders_no_lines() {
-    let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
-    let component =
-        BuiltInHeaderComponent::new("Pi", "1.2.3", &keybindings, &PlainStyler, true, None, false);
+    let component = BuiltInHeaderComponent::new("Pi", "1.2.3", &keybindings, &PlainStyler, true);
 
     assert_eq!(component.render(80), Vec::<String>::new());
 }
