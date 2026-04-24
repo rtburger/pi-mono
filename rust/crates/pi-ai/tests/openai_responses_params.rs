@@ -1,7 +1,6 @@
 use pi_ai::openai_responses::{
-    OpenAiResponsesConvertOptions, OpenAiResponsesParamsOptions, OpenAiResponsesReasoning,
-    OpenAiResponsesServiceTier, ResponsesInputItem, ResponsesToolDefinition,
-    build_openai_responses_request_params,
+    OpenAiResponsesConvertOptions, OpenAiResponsesParamsOptions, OpenAiResponsesServiceTier,
+    ResponsesInputItem, ResponsesToolDefinition, build_openai_responses_request_params,
 };
 use pi_events::{Context, Message, Model, ToolDefinition, UserContent};
 use serde_json::{Value, json};
@@ -40,7 +39,7 @@ fn simple_context() -> Context {
 }
 
 #[test]
-fn defaults_reasoning_for_openai_reasoning_models_when_not_requested() {
+fn omits_reasoning_summary_and_include_when_reasoning_not_requested() {
     let params = build_openai_responses_request_params(
         &model("openai", "gpt-5-mini", true),
         &simple_context(),
@@ -48,17 +47,13 @@ fn defaults_reasoning_for_openai_reasoning_models_when_not_requested() {
         OpenAiResponsesConvertOptions::default(),
         OpenAiResponsesParamsOptions::default(),
     );
+    let serialized = serde_json::to_value(&params).unwrap();
 
     assert_eq!(params.model, "gpt-5-mini");
     assert!(params.stream);
     assert!(!params.store);
-    assert_eq!(
-        params.reasoning,
-        Some(OpenAiResponsesReasoning {
-            effort: "none".into(),
-            summary: "auto".into(),
-        })
-    );
+    assert_eq!(serialized["reasoning"], json!({ "effort": "none" }));
+    assert!(serialized.get("include").is_none());
 
     let first_role = match params.input.first().unwrap() {
         ResponsesInputItem::Message { role, .. } => role.as_str(),
@@ -153,7 +148,7 @@ fn includes_service_tier_when_requested() {
 }
 
 #[test]
-fn enables_reasoning_and_prompt_cache_for_openai_when_requested() {
+fn includes_reasoning_summary_and_prompt_cache_when_reasoning_effort_is_requested() {
     let params = build_openai_responses_request_params(
         &model("openai", "gpt-5-mini", true),
         &simple_context(),
@@ -161,20 +156,51 @@ fn enables_reasoning_and_prompt_cache_for_openai_when_requested() {
         OpenAiResponsesConvertOptions::default(),
         OpenAiResponsesParamsOptions {
             reasoning_effort: Some("high".into()),
-            reasoning_summary: Some("detailed".into()),
             session_id: Some("session-1".into()),
             cache_retention: Some("long".into()),
             ..Default::default()
         },
     );
+    let serialized = serde_json::to_value(&params).unwrap();
 
-    let reasoning = params.reasoning.expect("expected reasoning block");
-    assert_eq!(reasoning.effort, "high");
-    assert_eq!(reasoning.summary, "detailed");
+    assert_eq!(
+        serialized["reasoning"],
+        json!({
+            "effort": "high",
+            "summary": "auto"
+        })
+    );
+    assert_eq!(
+        serialized["include"],
+        json!(["reasoning.encrypted_content"])
+    );
     assert_eq!(params.prompt_cache_key.as_deref(), Some("session-1"));
     assert_eq!(params.prompt_cache_retention.as_deref(), Some("24h"));
+}
+
+#[test]
+fn defaults_reasoning_effort_when_reasoning_summary_is_requested() {
+    let params = build_openai_responses_request_params(
+        &model("openai", "gpt-5-mini", true),
+        &simple_context(),
+        &["openai", "openai-codex"],
+        OpenAiResponsesConvertOptions::default(),
+        OpenAiResponsesParamsOptions {
+            reasoning_summary: Some("detailed".into()),
+            ..Default::default()
+        },
+    );
+    let serialized = serde_json::to_value(&params).unwrap();
+
     assert_eq!(
-        params.include,
-        Some(vec!["reasoning.encrypted_content".into()])
+        serialized["reasoning"],
+        json!({
+            "effort": "medium",
+            "summary": "detailed"
+        })
+    );
+    assert_eq!(
+        serialized["include"],
+        json!(["reasoning.encrypted_content"])
     );
 }

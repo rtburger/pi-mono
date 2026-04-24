@@ -136,10 +136,12 @@ pub fn build_openai_codex_responses_request_params(
             .as_ref()
             .map(|effort| OpenAiResponsesReasoning {
                 effort: clamp_reasoning_effort(&model.id, effort),
-                summary: options
-                    .reasoning_summary
-                    .clone()
-                    .unwrap_or_else(|| "auto".into()),
+                summary: Some(
+                    options
+                        .reasoning_summary
+                        .clone()
+                        .unwrap_or_else(|| "auto".into()),
+                ),
             }),
     }
 }
@@ -396,15 +398,14 @@ impl AcquiredCodexWebSocket {
             return;
         };
 
-        if keep {
-            if let (Some(entry), Some(session_id)) = (cache_entry.as_ref(), session_id.as_ref()) {
-                {
-                    let mut guard = entry.socket.lock().await;
-                    *guard = Some(socket);
-                }
-                schedule_session_websocket_expiry(session_id.clone(), entry.clone());
-                return;
+        if keep && let (Some(entry), Some(session_id)) = (cache_entry.as_ref(), session_id.as_ref())
+        {
+            {
+                let mut guard = entry.socket.lock().await;
+                *guard = Some(socket);
             }
+            schedule_session_websocket_expiry(session_id.clone(), entry.clone());
+            return;
         }
 
         if let (Some(entry), Some(session_id)) = (cache_entry.as_ref(), session_id.as_deref()) {

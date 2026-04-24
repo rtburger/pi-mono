@@ -43,7 +43,8 @@ pub struct OpenAiResponsesParamsOptions {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenAiResponsesReasoning {
     pub effort: String,
-    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -165,17 +166,21 @@ pub fn build_openai_responses_request_params(
     );
     let cache_retention = resolve_cache_retention(options.cache_retention.as_deref());
 
+    let reasoning_requested =
+        options.reasoning_effort.is_some() || options.reasoning_summary.is_some();
     let reasoning = if model.reasoning {
-        if options.reasoning_effort.is_some() || options.reasoning_summary.is_some() {
+        if reasoning_requested {
             Some(OpenAiResponsesReasoning {
                 effort: options.reasoning_effort.unwrap_or_else(|| "medium".into()),
-                summary: options.reasoning_summary.unwrap_or_else(|| "auto".into()),
+                summary: Some(options.reasoning_summary.unwrap_or_else(|| "auto".into())),
             })
-        } else {
+        } else if model.provider != "github-copilot" {
             Some(OpenAiResponsesReasoning {
                 effort: "none".into(),
-                summary: "auto".into(),
+                summary: None,
             })
+        } else {
+            None
         }
     } else {
         None
@@ -200,9 +205,7 @@ pub fn build_openai_responses_request_params(
         },
         max_output_tokens: options.max_output_tokens,
         temperature: options.temperature,
-        include: reasoning
-            .as_ref()
-            .map(|_| vec!["reasoning.encrypted_content".into()]),
+        include: reasoning_requested.then(|| vec!["reasoning.encrypted_content".into()]),
         reasoning,
         tools: if context.tools.is_empty() {
             None
@@ -297,12 +300,11 @@ pub fn convert_openai_responses_messages(
                         AssistantContent::Thinking {
                             thinking_signature, ..
                         } => {
-                            if let Some(thinking_signature) = thinking_signature {
-                                if let Ok(reasoning_item) =
+                            if let Some(thinking_signature) = thinking_signature
+                                && let Ok(reasoning_item) =
                                     serde_json::from_str::<ResponsesInputItem>(thinking_signature)
-                                {
-                                    items.push(reasoning_item);
-                                }
+                            {
+                                items.push(reasoning_item);
                             }
                         }
                         AssistantContent::ToolCall {
@@ -643,13 +645,12 @@ fn parse_text_signature(signature: Option<&str>) -> Option<ParsedTextSignature> 
     let signature = signature?;
     if signature.starts_with('{')
         && let Ok(parsed) = serde_json::from_str::<TextSignatureV1>(signature)
+        && parsed.v == 1
     {
-        if parsed.v == 1 {
-            return Some(ParsedTextSignature {
-                id: parsed.id,
-                phase: parsed.phase,
-            });
-        }
+        return Some(ParsedTextSignature {
+            id: parsed.id,
+            phase: parsed.phase,
+        });
     }
     Some(ParsedTextSignature {
         id: signature.to_string(),
@@ -1204,10 +1205,7 @@ impl OpenAiResponsesStreamState {
                     {
                         *text = content.clone();
                         *text_signature = item.get("id").and_then(Value::as_str).map(|id| {
-                            encode_text_signature_v1(
-                                id,
-                                item.get("phase").and_then(Value::as_str),
-                            )
+                            encode_text_signature_v1(id, item.get("phase").and_then(Value::as_str))
                         });
                     }
                     emitted.push(AssistantEvent::TextEnd {
@@ -1360,8 +1358,7 @@ impl OpenAiResponsesStreamState {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            if let Some(AssistantContent::Text { text, .. }) = self.output.content.get_mut(index)
-            {
+            if let Some(AssistantContent::Text { text, .. }) = self.output.content.get_mut(index) {
                 text.push_str(&delta);
             }
             emitted.push(AssistantEvent::TextDelta {
@@ -1445,11 +1442,7 @@ impl OpenAiResponsesStreamState {
         clippy::needless_pass_by_ref_mut,
         clippy::unused_self
     )]
-    fn handle_response_content_part_added(
-        &mut self,
-        _event: &OpenAiResponsesStreamEnvelope,
-    ) {
-    }
+    fn handle_response_content_part_added(&mut self, _event: &OpenAiResponsesStreamEnvelope) {}
 
     fn reset_current_block(&mut self) {
         self.current_block_index = None;
