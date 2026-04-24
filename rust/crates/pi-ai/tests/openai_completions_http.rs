@@ -172,7 +172,7 @@ async fn emits_terminal_error_for_http_failure() {
             .collect::<Vec<_>>()
             .await;
 
-    mock.assert();
+    mock.assert_hits(3);
     match collected.last().unwrap().as_ref().unwrap() {
         AssistantEvent::Error { error, .. } => {
             assert!(
