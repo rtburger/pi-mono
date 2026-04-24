@@ -2,6 +2,7 @@ use crate::{
     AiProvider, AssistantEventStream, StreamOptions,
     models::{calculate_cost_with, get_model_headers, get_provider_headers},
     register_provider,
+    retry::{RetryError, RetryOptions, send_request_with_retry},
 };
 use async_stream::stream;
 use futures::StreamExt;
@@ -1510,65 +1511,28 @@ where
             return;
         }
 
-        let mut request_builder = reqwest::Client::new()
-            .post(format!("{}/responses", model.base_url.trim_end_matches('/')))
-            .bearer_auth(api_key)
-            .header("accept", "text/event-stream");
-        for (name, value) in &request_headers {
-            request_builder = request_builder.header(name, value);
-        }
-        let send_future = request_builder.json(&params).send();
-        tokio::pin!(send_future);
-
-        let mut response = if let Some(signal) = signal.as_mut() {
-            tokio::select! {
-                response = &mut send_future => {
-                    match response {
-                        Ok(response) => response,
-                        Err(error) => {
-                            yield Ok(state.error_event(format!("HTTP request failed: {error}")));
-                            return;
-                        }
-                    }
-                }
-                _ = wait_for_abort(signal) => {
-                    yield Ok(state.aborted_event());
-                    return;
-                }
+        let client = reqwest::Client::new();
+        let url = format!("{}/responses", model.base_url.trim_end_matches('/'));
+        let mut response = match send_request_with_retry(RetryOptions::default(), &mut signal, || {
+            let mut request_builder = client
+                .post(&url)
+                .bearer_auth(&api_key)
+                .header("accept", "text/event-stream");
+            for (name, value) in &request_headers {
+                request_builder = request_builder.header(name, value);
             }
-        } else {
-            match send_future.await {
-                Ok(response) => response,
-                Err(error) => {
-                    yield Ok(state.error_event(format!("HTTP request failed: {error}")));
-                    return;
-                }
+            async { request_builder.json(&params).send().await }
+        }).await {
+            Ok(response) => response,
+            Err(RetryError::Aborted) => {
+                yield Ok(state.aborted_event());
+                return;
+            }
+            Err(RetryError::Message(error)) => {
+                yield Ok(state.error_event(error));
+                return;
             }
         };
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text_future = response.text();
-            tokio::pin!(text_future);
-            let body = if let Some(signal) = signal.as_mut() {
-                tokio::select! {
-                    body = &mut text_future => body.unwrap_or_default(),
-                    _ = wait_for_abort(signal) => {
-                        yield Ok(state.aborted_event());
-                        return;
-                    }
-                }
-            } else {
-                text_future.await.unwrap_or_default()
-            };
-            let detail = if body.is_empty() {
-                format!("HTTP request failed with status {status}")
-            } else {
-                format!("HTTP request failed with status {status}: {body}")
-            };
-            yield Ok(state.error_event(detail));
-            return;
-        }
 
         yield Ok(state.start_event());
 
