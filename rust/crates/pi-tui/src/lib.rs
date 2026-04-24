@@ -433,7 +433,4 @@ pub use utils::{
 pub enum TuiError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
-
-    #[error("tui migration pending")]
-    Pending,
 }

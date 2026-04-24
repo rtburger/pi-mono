@@ -110,8 +110,13 @@ pub use tree_selector::{TreeFilterMode, TreeSelectorComponent};
 pub use user_message::UserMessageComponent;
 pub use user_message_selector::{UserMessageSelectorComponent, UserMessageSelectorItem};
 
-#[derive(Debug, thiserror::Error)]
-pub enum CodingAgentTuiError {
-    #[error("coding-agent tui migration pending")]
-    Pending,
+#[derive(Debug)]
+pub enum CodingAgentTuiError {}
+
+impl std::fmt::Display for CodingAgentTuiError {
+    fn fmt(&self, _formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {}
+    }
 }
+
+impl std::error::Error for CodingAgentTuiError {}
