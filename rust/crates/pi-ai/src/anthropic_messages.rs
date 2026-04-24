@@ -2,6 +2,7 @@ use crate::{
     AiProvider, AssistantEventStream, CacheRetention, StreamOptions, get_env_api_key,
     models::{calculate_cost_with, get_model_headers, get_provider_headers},
     register_provider,
+    retry::{RetryError, RetryOptions, send_request_with_retry},
 };
 use async_stream::stream;
 use futures::StreamExt;
@@ -434,71 +435,31 @@ where
             return;
         }
 
+        let client = reqwest::Client::new();
+        let url = format!("{}/messages", model.base_url.trim_end_matches('/'));
         let use_bearer_auth = is_oauth_token;
-        let mut request_builder = reqwest::Client::new()
-            .post(format!("{}/messages", model.base_url.trim_end_matches('/')))
-            .header("accept", "text/event-stream");
-        if use_bearer_auth {
-            request_builder = request_builder.bearer_auth(api_key);
-        } else {
-            request_builder = request_builder.header("x-api-key", api_key);
-        }
-        for (name, value) in &request_headers {
-            request_builder = request_builder.header(name, value);
-        }
-
-        let send_future = request_builder.json(&params).send();
-        tokio::pin!(send_future);
-
-        let mut response = if let Some(signal) = signal.as_mut() {
-            tokio::select! {
-                response = &mut send_future => {
-                    match response {
-                        Ok(response) => response,
-                        Err(error) => {
-                            yield Ok(state.error_event(format!("HTTP request failed: {error}")));
-                            return;
-                        }
-                    }
-                }
-                _ = wait_for_abort(signal) => {
-                    yield Ok(state.aborted_event());
-                    return;
-                }
+        let mut response = match send_request_with_retry(RetryOptions::default(), &mut signal, || {
+            let mut request_builder = client.post(&url).header("accept", "text/event-stream");
+            if use_bearer_auth {
+                request_builder = request_builder.bearer_auth(&api_key);
+            } else {
+                request_builder = request_builder.header("x-api-key", &api_key);
             }
-        } else {
-            match send_future.await {
-                Ok(response) => response,
-                Err(error) => {
-                    yield Ok(state.error_event(format!("HTTP request failed: {error}")));
-                    return;
-                }
+            for (name, value) in &request_headers {
+                request_builder = request_builder.header(name, value);
+            }
+            async { request_builder.json(&params).send().await }
+        }).await {
+            Ok(response) => response,
+            Err(RetryError::Aborted) => {
+                yield Ok(state.aborted_event());
+                return;
+            }
+            Err(RetryError::Message(error)) => {
+                yield Ok(state.error_event(error));
+                return;
             }
         };
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text_future = response.text();
-            tokio::pin!(text_future);
-            let body = if let Some(signal) = signal.as_mut() {
-                tokio::select! {
-                    body = &mut text_future => body.unwrap_or_default(),
-                    _ = wait_for_abort(signal) => {
-                        yield Ok(state.aborted_event());
-                        return;
-                    }
-                }
-            } else {
-                text_future.await.unwrap_or_default()
-            };
-            let detail = if body.is_empty() {
-                format!("HTTP request failed with status {status}")
-            } else {
-                format!("HTTP request failed with status {status}: {body}")
-            };
-            yield Ok(state.error_event(detail));
-            return;
-        }
 
         yield Ok(state.start_event());
 
