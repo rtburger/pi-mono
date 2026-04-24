@@ -6,6 +6,7 @@ use crate::{
         OpenAiResponsesStreamEnvelope, OpenAiResponsesStreamState, ResponsesInputItem,
         convert_openai_responses_messages, is_signal_aborted, is_terminal_event, wait_for_abort,
     },
+    provider_http::shared_http_client,
     register_provider,
     retry::{RetryError, RetryOptions, send_request_with_retry},
     unicode::sanitize_provider_text,
@@ -786,7 +787,7 @@ async fn send_codex_http_request_with_retry<T>(
 where
     T: Serialize + Sync,
 {
-    let client = reqwest::Client::new();
+    let client = shared_http_client();
     let url = resolve_codex_url(&model.base_url);
 
     send_request_with_retry(

@@ -1,6 +1,7 @@
 use crate::{
     AiProvider, AssistantEventStream, CacheRetention, StreamOptions, get_env_api_key,
     models::{calculate_cost_with, get_model_headers, get_provider_headers},
+    provider_http::shared_http_client,
     register_provider,
     retry::{RetryError, RetryOptions, send_request_with_retry},
 };
@@ -435,7 +436,7 @@ where
             return;
         }
 
-        let client = reqwest::Client::new();
+        let client = shared_http_client();
         let url = format!("{}/messages", model.base_url.trim_end_matches('/'));
         let use_bearer_auth = is_oauth_token;
         let mut response = match send_request_with_retry(RetryOptions::default(), &mut signal, || {
