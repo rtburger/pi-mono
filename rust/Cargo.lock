@@ -1460,6 +1460,7 @@ dependencies = [
  "indexmap",
  "pi-ai",
  "pi-events",
+ "pi-json-utils",
  "reqwest",
  "serde",
  "serde_json",
@@ -1476,6 +1477,7 @@ dependencies = [
  "futures",
  "httpmock",
  "pi-events",
+ "pi-json-utils",
  "rand 0.8.5",
  "regex",
  "reqwest",
@@ -1587,6 +1589,13 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "pi-json-utils"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

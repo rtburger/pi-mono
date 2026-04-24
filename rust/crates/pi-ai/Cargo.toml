@@ -9,6 +9,7 @@ async-stream.workspace = true
 base64 = "0.22"
 futures.workspace = true
 pi-events = { path = "../pi-events" }
+pi-json-utils = { path = "../pi-json-utils" }
 rand = "0.8"
 regex = "1"
 reqwest.workspace = true

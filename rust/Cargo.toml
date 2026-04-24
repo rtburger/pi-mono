@@ -4,6 +4,7 @@ members = [
   "crates/pi-config",
   "crates/pi-events",
   "crates/pi-test-harness",
+  "crates/pi-json-utils",
   "crates/pi-ai",
   "crates/pi-agent",
   "crates/pi-tui",

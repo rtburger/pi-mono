@@ -9,6 +9,7 @@ async-stream.workspace = true
 futures.workspace = true
 pi-ai = { path = "../pi-ai" }
 pi-events = { path = "../pi-events" }
+pi-json-utils = { path = "../pi-json-utils" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
