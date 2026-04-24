@@ -1,10 +1,13 @@
 use crate::{
     AiProvider, AssistantEventStream, StreamOptions, Transport,
-    models::{get_model_headers, get_provider_headers},
     openai_responses::{
         OpenAiResponsesConvertOptions, OpenAiResponsesReasoning, OpenAiResponsesSseDecoder,
         OpenAiResponsesStreamEnvelope, OpenAiResponsesStreamState, ResponsesInputItem,
-        convert_openai_responses_messages, is_signal_aborted, is_terminal_event, wait_for_abort,
+        convert_openai_responses_messages,
+    },
+    provider_http::{
+        build_runtime_request_headers, is_signal_aborted, is_terminal_event, now_ms,
+        shared_http_client, wait_for_abort,
     },
     register_provider,
     retry::{RetryError, RetryOptions, send_request_with_retry},
@@ -25,7 +28,7 @@ use std::{
         Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio_tungstenite::{
     connect_async,
@@ -786,7 +789,7 @@ async fn send_codex_http_request_with_retry<T>(
 where
     T: Serialize + Sync,
 {
-    let client = reqwest::Client::new();
+    let client = shared_http_client();
     let url = resolve_codex_url(&model.base_url);
 
     send_request_with_retry(
@@ -976,11 +979,7 @@ fn build_codex_base_headers(
     let account_id = extract_openai_codex_account_id(api_key)
         .ok_or_else(|| "Failed to extract accountId from token".to_string())?;
 
-    let mut headers = get_model_headers(&model.provider, &model.id)
-        .or_else(|| get_provider_headers(&model.provider))
-        .unwrap_or_default();
-    headers.extend(option_headers.clone());
-
+    let mut headers = build_runtime_request_headers(model, BTreeMap::new(), option_headers);
     headers.insert("Authorization".into(), format!("Bearer {api_key}"));
     headers.insert("chatgpt-account-id".into(), account_id);
     headers.insert("originator".into(), "pi".into());
@@ -1162,13 +1161,6 @@ fn terminal_error_stream(model: &Model, error_message: &str) -> AssistantEventSt
             error,
         });
     })
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 #[cfg(test)]

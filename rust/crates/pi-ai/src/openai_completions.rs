@@ -1,6 +1,11 @@
 use crate::{
     AiProvider, AssistantEventStream, StreamOptions,
-    models::{calculate_cost_with, get_model_headers, get_provider_headers},
+    models::calculate_cost_with,
+    provider_http::{
+        assistant_text_content, assistant_thinking_content, build_runtime_request_headers,
+        is_signal_aborted, is_terminal_event, now_ms, parse_streaming_json_map, shared_http_client,
+        terminal_error_message, wait_for_abort,
+    },
     register_provider,
     retry::{RetryError, RetryOptions, send_request_with_retry},
     unicode::sanitize_provider_text,
@@ -15,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1495,7 +1499,7 @@ impl OpenAiCompletionsStreamState {
 
         match self.current_block_kind {
             Some(OpenAiCompletionsBlockKind::Text) => {
-                let content = text_content(&self.output, index).unwrap_or_default();
+                let content = assistant_text_content(&self.output, index).unwrap_or_default();
                 emitted.push(AssistantEvent::TextEnd {
                     content_index: index,
                     content,
@@ -1503,7 +1507,7 @@ impl OpenAiCompletionsStreamState {
                 });
             }
             Some(OpenAiCompletionsBlockKind::Thinking) => {
-                let content = thinking_content(&self.output, index).unwrap_or_default();
+                let content = assistant_thinking_content(&self.output, index).unwrap_or_default();
                 emitted.push(AssistantEvent::ThinkingEnd {
                     content_index: index,
                     content,
@@ -1697,7 +1701,7 @@ where
             return;
         }
 
-        let client = reqwest::Client::new();
+        let client = shared_http_client();
         let url = format!("{}/chat/completions", model.base_url.trim_end_matches('/'));
         let mut response = match send_request_with_retry(RetryOptions::default(), &mut signal, || {
             let mut request_builder = client
@@ -1832,12 +1836,16 @@ impl AiProvider for OpenAiCompletionsProvider {
                 Err(error) => {
                     yield Ok(AssistantEvent::Error {
                         reason: StopReason::Error,
-                        error: error_message(&model, error.to_string()),
+                        error: terminal_error_message(&model, error.to_string()),
                     });
                     return;
                 }
             };
-            let request_headers = build_runtime_request_headers(&model, &options.headers);
+            let request_headers = build_runtime_request_headers(
+                &model,
+                BTreeMap::new(),
+                &options.headers,
+            );
 
             let api_key = options
                 .api_key
@@ -1855,7 +1863,7 @@ impl AiProvider for OpenAiCompletionsProvider {
                 None => Box::pin(stream! {
                     yield Ok(AssistantEvent::Error {
                         reason: StopReason::Error,
-                        error: error_message(&model, "OpenAI Completions API key is required".into()),
+                        error: terminal_error_message(&model, "OpenAI Completions API key is required"),
                     });
                 }),
             };
@@ -1869,17 +1877,6 @@ impl AiProvider for OpenAiCompletionsProvider {
 
 pub fn register_openai_completions_provider() {
     register_provider("openai-completions", Arc::new(OpenAiCompletionsProvider));
-}
-
-fn build_runtime_request_headers(
-    model: &Model,
-    option_headers: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    let mut headers = get_model_headers(&model.provider, &model.id)
-        .or_else(|| get_provider_headers(&model.provider))
-        .unwrap_or_default();
-    headers.extend(option_headers.clone());
-    headers
 }
 
 fn parse_reasoning_effort(value: Option<&str>) -> Option<ReasoningEffort> {
@@ -1926,10 +1923,6 @@ fn flush_openai_completions_sse_event(
         .map_err(|error| {
             crate::AiError::Message(format!("Invalid OpenAI Completions SSE event: {error}"))
         })
-}
-
-fn parse_streaming_json_map(input: &str) -> BTreeMap<String, Value> {
-    crate::partial_json::parse_partial_json_map(input)
 }
 
 fn parse_chunk_usage(raw_usage: &OpenAiCompletionsRawUsage) -> Usage {
@@ -1985,62 +1978,4 @@ fn map_stop_reason(reason: &str) -> (StopReason, Option<String>) {
             Some(format!("Provider finish_reason: {other}")),
         ),
     }
-}
-
-fn error_message(model: &Model, error_message: String) -> AssistantMessage {
-    AssistantMessage {
-        role: "assistant".into(),
-        content: Vec::new(),
-        api: model.api.clone(),
-        provider: model.provider.clone(),
-        model: model.id.clone(),
-        response_id: None,
-        usage: Usage::default(),
-        stop_reason: StopReason::Error,
-        error_message: Some(error_message),
-        timestamp: now_ms(),
-    }
-}
-
-fn text_content(output: &AssistantMessage, index: usize) -> Option<String> {
-    match output.content.get(index) {
-        Some(AssistantContent::Text { text, .. }) => Some(text.clone()),
-        _ => None,
-    }
-}
-
-fn thinking_content(output: &AssistantMessage, index: usize) -> Option<String> {
-    match output.content.get(index) {
-        Some(AssistantContent::Thinking { thinking, .. }) => Some(thinking.clone()),
-        _ => None,
-    }
-}
-
-fn is_terminal_event(event: &AssistantEvent) -> bool {
-    matches!(
-        event,
-        AssistantEvent::Done { .. } | AssistantEvent::Error { .. }
-    )
-}
-
-fn is_signal_aborted(signal: &Option<tokio::sync::watch::Receiver<bool>>) -> bool {
-    signal
-        .as_ref()
-        .map(|signal| *signal.borrow())
-        .unwrap_or(false)
-}
-
-async fn wait_for_abort(signal: &mut tokio::sync::watch::Receiver<bool>) {
-    while !*signal.borrow() {
-        if signal.changed().await.is_err() {
-            return;
-        }
-    }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
