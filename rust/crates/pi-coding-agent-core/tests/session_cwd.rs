@@ -1,8 +1,8 @@
 use pi_ai::{StreamOptions, register_faux_provider};
 use pi_coding_agent_core::{
     AgentSessionOptions, AgentSessionRuntimeError, AgentSessionRuntimeRequest,
-    CodingAgentCoreOptions, CreateAgentSessionRuntimeFactory, MemoryAuthStorage,
-    SessionBootstrapOptions, SessionCwdIssue, SessionManager, CURRENT_SESSION_VERSION,
+    CURRENT_SESSION_VERSION, CodingAgentCoreOptions, CreateAgentSessionRuntimeFactory,
+    MemoryAuthStorage, SessionBootstrapOptions, SessionCwdIssue, SessionManager,
     assert_session_cwd_exists, create_agent_session, create_agent_session_runtime,
     get_missing_session_cwd_issue,
 };
@@ -44,9 +44,7 @@ fn write_session_file(path: &Path, cwd: &Path) {
     .unwrap();
 }
 
-fn build_runtime_factory(
-    cwd: &Path,
-) -> (CreateAgentSessionRuntimeFactory, impl FnOnce()) {
+fn build_runtime_factory(cwd: &Path) -> (CreateAgentSessionRuntimeFactory, impl FnOnce()) {
     let faux = register_faux_provider(Default::default());
     let model = faux.get_model(None).expect("expected faux model");
     let auth_source = Arc::new(MemoryAuthStorage::with_api_keys([(
@@ -76,13 +74,10 @@ fn build_runtime_factory(
     });
 
     let cleanup_cwd = cwd.to_path_buf();
-    (
-        factory,
-        move || {
-            faux.unregister();
-            let _ = fs::remove_dir_all(cleanup_cwd);
-        },
-    )
+    (factory, move || {
+        faux.unregister();
+        let _ = fs::remove_dir_all(cleanup_cwd);
+    })
 }
 
 #[test]
@@ -129,7 +124,10 @@ fn supports_overriding_the_effective_cwd_when_opening_a_session() {
     )
     .unwrap();
 
-    assert_eq!(session_manager.get_cwd(), fallback_cwd.to_string_lossy().as_ref());
+    assert_eq!(
+        session_manager.get_cwd(),
+        fallback_cwd.to_string_lossy().as_ref()
+    );
     assert!(get_missing_session_cwd_issue(&session_manager, &fallback_cwd).is_none());
     assert!(assert_session_cwd_exists(&session_manager, &fallback_cwd).is_ok());
 
@@ -168,9 +166,18 @@ async fn create_agent_session_runtime_errors_before_factory_when_stored_cwd_is_m
 
     match error {
         AgentSessionRuntimeError::MissingSessionCwd(issue) => {
-            assert_eq!(issue.session_file, Some(session_file.to_string_lossy().into_owned()));
-            assert_eq!(issue.session_cwd, missing_cwd.to_string_lossy().into_owned());
-            assert_eq!(issue.fallback_cwd, fallback_cwd.to_string_lossy().into_owned());
+            assert_eq!(
+                issue.session_file,
+                Some(session_file.to_string_lossy().into_owned())
+            );
+            assert_eq!(
+                issue.session_cwd,
+                missing_cwd.to_string_lossy().into_owned()
+            );
+            assert_eq!(
+                issue.fallback_cwd,
+                fallback_cwd.to_string_lossy().into_owned()
+            );
         }
         other => panic!("expected missing session cwd error, got {other:?}"),
     }
@@ -207,9 +214,18 @@ async fn switch_session_reports_missing_session_cwd_with_current_runtime_as_fall
 
     match error {
         AgentSessionRuntimeError::MissingSessionCwd(issue) => {
-            assert_eq!(issue.session_file, Some(session_file.to_string_lossy().into_owned()));
-            assert_eq!(issue.session_cwd, missing_cwd.to_string_lossy().into_owned());
-            assert_eq!(issue.fallback_cwd, fallback_cwd.to_string_lossy().into_owned());
+            assert_eq!(
+                issue.session_file,
+                Some(session_file.to_string_lossy().into_owned())
+            );
+            assert_eq!(
+                issue.session_cwd,
+                missing_cwd.to_string_lossy().into_owned()
+            );
+            assert_eq!(
+                issue.fallback_cwd,
+                fallback_cwd.to_string_lossy().into_owned()
+            );
         }
         other => panic!("expected missing session cwd error, got {other:?}"),
     }

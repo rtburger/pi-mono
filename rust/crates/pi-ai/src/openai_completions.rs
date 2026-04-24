@@ -797,9 +797,7 @@ fn push_assistant_message(
             let thinking_text = thinking_blocks.join("\n\n");
             assistant.content = match assistant.content {
                 OpenAiCompletionsMessageContent::Text(ref existing) if !existing.is_empty() => {
-                    OpenAiCompletionsMessageContent::Text(format!(
-                        "{thinking_text}\n\n{existing}"
-                    ))
+                    OpenAiCompletionsMessageContent::Text(format!("{thinking_text}\n\n{existing}"))
                 }
                 _ => OpenAiCompletionsMessageContent::Text(thinking_text),
             };
@@ -831,8 +829,7 @@ fn push_assistant_message(
                     call_type: "function".into(),
                     function: OpenAiCompletionsToolCallFunction {
                         name: name.clone(),
-                        arguments: serde_json::to_string(arguments)
-                            .unwrap_or_else(|_| "{}".into()),
+                        arguments: serde_json::to_string(arguments).unwrap_or_else(|_| "{}".into()),
                     },
                 },
                 thought_signature.clone(),

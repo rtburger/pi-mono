@@ -8,7 +8,9 @@ use crate::{
     create_bash_execution_message, estimate_context_tokens, filter_blocked_images,
     generate_branch_summary_with_details, get_latest_compaction_entry, latest_compaction_timestamp,
     model_resolver::{parse_thinking_level, restore_model_from_session},
-    prepare_compaction, session_cwd::assert_session_cwd_exists, should_compact,
+    prepare_compaction,
+    session_cwd::assert_session_cwd_exists,
+    should_compact,
     tree_navigation::{
         TreeNavigationResult, TreeNavigationSummary, apply_tree_navigation, prepare_tree_navigation,
     },
