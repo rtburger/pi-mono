@@ -1,7 +1,10 @@
 use crate::{
     AiProvider, AssistantEventStream, CacheRetention, StreamOptions, get_env_api_key,
-    models::{calculate_cost_with, get_model_headers, get_provider_headers},
-    provider_http::shared_http_client,
+    models::calculate_cost_with,
+    provider_http::{
+        is_signal_aborted, is_terminal_event, merge_request_headers, now_ms,
+        provider_request_headers, shared_http_client, wait_for_abort,
+    },
     register_provider,
     retry::{RetryError, RetryOptions, send_request_with_retry},
 };
@@ -16,7 +19,6 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -1080,7 +1082,7 @@ impl AiProvider for AnthropicMessagesProvider {
                     return;
                 }
             };
-            let request_headers = build_runtime_request_headers(
+            let request_headers = build_anthropic_runtime_request_headers(
                 &model,
                 &context,
                 &anthropic_options.headers,
@@ -1165,23 +1167,21 @@ fn anthropic_tool_choice_from_stream_choice(
     }
 }
 
-fn build_runtime_request_headers(
+fn build_anthropic_runtime_request_headers(
     model: &Model,
     _context: &Context,
     option_headers: &BTreeMap<String, String>,
     interleaved_thinking: bool,
     is_oauth_token: bool,
 ) -> BTreeMap<String, String> {
-    let mut headers = BTreeMap::from([
-        ("accept".to_string(), "text/event-stream".to_string()),
-        ("anthropic-version".to_string(), "2023-06-01".to_string()),
-    ]);
-
-    if let Some(model_headers) = get_model_headers(&model.provider, &model.id)
-        .or_else(|| get_provider_headers(&model.provider))
-    {
-        headers.extend(model_headers);
-    }
+    let mut headers = merge_request_headers(
+        BTreeMap::from([
+            ("accept".to_string(), "text/event-stream".to_string()),
+            ("anthropic-version".to_string(), "2023-06-01".to_string()),
+        ]),
+        provider_request_headers(model),
+        &BTreeMap::new(),
+    );
 
     if is_oauth_token {
         let mut betas = vec![
@@ -1812,33 +1812,4 @@ fn usize_field(object: &serde_json::Map<String, Value>, key: &str) -> Option<usi
 
 fn u64_from_map(object: &serde_json::Map<String, Value>, key: &str) -> Option<u64> {
     object.get(key)?.as_u64()
-}
-
-fn is_terminal_event(event: &AssistantEvent) -> bool {
-    matches!(
-        event,
-        AssistantEvent::Done { .. } | AssistantEvent::Error { .. }
-    )
-}
-
-fn is_signal_aborted(signal: &Option<tokio::sync::watch::Receiver<bool>>) -> bool {
-    signal
-        .as_ref()
-        .map(|signal| *signal.borrow())
-        .unwrap_or(false)
-}
-
-async fn wait_for_abort(signal: &mut tokio::sync::watch::Receiver<bool>) {
-    while !*signal.borrow() {
-        if signal.changed().await.is_err() {
-            break;
-        }
-    }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }

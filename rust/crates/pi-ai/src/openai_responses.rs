@@ -1,7 +1,11 @@
 use crate::{
     AiProvider, AssistantEventStream, StreamOptions,
-    models::{calculate_cost_with, get_model_headers, get_provider_headers},
-    provider_http::shared_http_client,
+    models::calculate_cost_with,
+    provider_http::{
+        assistant_text_content, assistant_thinking_content, build_runtime_request_headers,
+        is_signal_aborted, is_terminal_event, now_ms, parse_streaming_json_map, shared_http_client,
+        terminal_error_message, wait_for_abort,
+    },
     register_provider,
     retry::{RetryError, RetryOptions, send_request_with_retry},
 };
@@ -16,7 +20,6 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const OPENAI_RESPONSES_ALLOWED_TOOL_CALL_PROVIDERS: &[&str] =
     &["openai", "openai-codex", "opencode"];
@@ -1198,7 +1201,7 @@ impl OpenAiResponsesStreamState {
             Some("message") if self.current_block_kind == Some(OpenAiResponsesBlockKind::Text) => {
                 if let Some(index) = self.current_block_index {
                     let content = message_item_text(&item)
-                        .or_else(|| text_content(&self.output, index))
+                        .or_else(|| assistant_text_content(&self.output, index))
                         .unwrap_or_default();
                     if let Some(AssistantContent::Text {
                         text,
@@ -1252,7 +1255,7 @@ impl OpenAiResponsesStreamState {
             {
                 if let Some(index) = self.current_block_index {
                     let content = reasoning_summary_text(&item)
-                        .or_else(|| thinking_content(&self.output, index))
+                        .or_else(|| assistant_thinking_content(&self.output, index))
                         .unwrap_or_default();
                     if let Some(AssistantContent::Thinking {
                         thinking,
@@ -1633,36 +1636,6 @@ pub fn stream_openai_responses_sse_events(
     })
 }
 
-fn error_message(model: &Model, error_message: String) -> AssistantMessage {
-    AssistantMessage {
-        role: "assistant".into(),
-        content: Vec::new(),
-        api: model.api.clone(),
-        provider: model.provider.clone(),
-        model: model.id.clone(),
-        response_id: None,
-        usage: Usage::default(),
-        stop_reason: StopReason::Error,
-        error_message: Some(error_message),
-        timestamp: now_ms(),
-    }
-}
-
-pub(crate) fn is_signal_aborted(signal: &Option<tokio::sync::watch::Receiver<bool>>) -> bool {
-    signal
-        .as_ref()
-        .map(|signal| *signal.borrow())
-        .unwrap_or(false)
-}
-
-pub(crate) async fn wait_for_abort(signal: &mut tokio::sync::watch::Receiver<bool>) {
-    while !*signal.borrow() {
-        if signal.changed().await.is_err() {
-            return;
-        }
-    }
-}
-
 fn flush_sse_event(
     current_data_lines: &mut Vec<String>,
 ) -> Result<Option<OpenAiResponsesStreamEnvelope>, crate::AiError> {
@@ -1682,10 +1655,6 @@ fn flush_sse_event(
         .map_err(|error| {
             crate::AiError::Message(format!("Invalid OpenAI Responses SSE event: {error}"))
         })
-}
-
-fn parse_streaming_json_map(input: &str) -> BTreeMap<String, Value> {
-    crate::partial_json::parse_partial_json_map(input)
 }
 
 fn response_service_tier(
@@ -1803,27 +1772,6 @@ fn reasoning_summary_text(item: &serde_json::Map<String, Value>) -> Option<Strin
         })
 }
 
-fn text_content(output: &AssistantMessage, index: usize) -> Option<String> {
-    match output.content.get(index) {
-        Some(AssistantContent::Text { text, .. }) => Some(text.clone()),
-        _ => None,
-    }
-}
-
-fn thinking_content(output: &AssistantMessage, index: usize) -> Option<String> {
-    match output.content.get(index) {
-        Some(AssistantContent::Thinking { thinking, .. }) => Some(thinking.clone()),
-        _ => None,
-    }
-}
-
-pub(crate) fn is_terminal_event(event: &AssistantEvent) -> bool {
-    matches!(
-        event,
-        AssistantEvent::Done { .. } | AssistantEvent::Error { .. }
-    )
-}
-
 #[derive(Default)]
 pub struct OpenAiResponsesProvider;
 
@@ -1859,12 +1807,16 @@ impl AiProvider for OpenAiResponsesProvider {
                 Err(error) => {
                     yield Ok(AssistantEvent::Error {
                         reason: StopReason::Error,
-                        error: error_message(&model, error.to_string()),
+                        error: terminal_error_message(&model, error.to_string()),
                     });
                     return;
                 }
             };
-            let request_headers = build_runtime_request_headers(&model, &context, &options.headers);
+            let request_headers = build_runtime_request_headers(
+                &model,
+                BTreeMap::new(),
+                &options.headers,
+            );
 
             let api_key = options
                 .api_key
@@ -1883,7 +1835,7 @@ impl AiProvider for OpenAiResponsesProvider {
                 None => Box::pin(stream! {
                     yield Ok(AssistantEvent::Error {
                         reason: StopReason::Error,
-                        error: error_message(&model, "OpenAI Responses API key is required".into()),
+                        error: terminal_error_message(&model, "OpenAI Responses API key is required"),
                     });
                 }),
             };
@@ -1897,24 +1849,4 @@ impl AiProvider for OpenAiResponsesProvider {
 
 pub fn register_openai_responses_provider() {
     register_provider("openai-responses", Arc::new(OpenAiResponsesProvider));
-}
-
-fn build_runtime_request_headers(
-    model: &Model,
-    _context: &Context,
-    option_headers: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    let mut headers = get_model_headers(&model.provider, &model.id)
-        .or_else(|| get_provider_headers(&model.provider))
-        .unwrap_or_default();
-
-    headers.extend(option_headers.clone());
-    headers
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
