@@ -1,4 +1,5 @@
 use futures::stream;
+use parking_lot::Mutex;
 use pi_ai::{
     AiProvider, AssistantEventStream, StreamOptions, Transport, register_provider,
     unregister_provider,
@@ -9,9 +10,10 @@ use pi_events::{AssistantContent, AssistantEvent, AssistantMessage, Context, Mod
 use std::{
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::Mutex as TokioMutex;
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let unique = SystemTime::now()
@@ -23,9 +25,9 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     path
 }
 
-fn provider_registry_guard() -> std::sync::MutexGuard<'static, ()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
+async fn provider_registry_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static GUARD: OnceLock<TokioMutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| TokioMutex::new(())).lock().await
 }
 
 #[derive(Clone)]
@@ -40,7 +42,7 @@ impl AiProvider for RecordingTransportProvider {
         _context: Context,
         options: StreamOptions,
     ) -> AssistantEventStream {
-        self.seen_options.lock().unwrap().push(options);
+        self.seen_options.lock().push(options);
 
         let partial =
             AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone());
@@ -85,7 +87,7 @@ fn codex_model(api: &str) -> Model {
 
 #[tokio::test]
 async fn run_command_loads_transport_from_settings() {
-    let _guard = provider_registry_guard();
+    let _guard = provider_registry_guard().await;
     let api = "test-transport-settings-api";
     let seen_options = Arc::new(Mutex::new(Vec::new()));
     register_provider(
@@ -131,7 +133,7 @@ async fn run_command_loads_transport_from_settings() {
     assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
     assert_eq!(result.stdout, "recorded transport\n");
 
-    let seen_options = seen_options.lock().unwrap().clone();
+    let seen_options = seen_options.lock().clone();
     assert_eq!(seen_options.len(), 1);
     assert_eq!(seen_options[0].transport, Some(Transport::WebSocket));
 
@@ -140,7 +142,7 @@ async fn run_command_loads_transport_from_settings() {
 
 #[tokio::test]
 async fn cli_transport_flag_overrides_settings_transport() {
-    let _guard = provider_registry_guard();
+    let _guard = provider_registry_guard().await;
     let api = "test-transport-cli-api";
     let seen_options = Arc::new(Mutex::new(Vec::new()));
     register_provider(
@@ -188,7 +190,7 @@ async fn cli_transport_flag_overrides_settings_transport() {
     assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
     assert_eq!(result.stdout, "recorded transport\n");
 
-    let seen_options = seen_options.lock().unwrap().clone();
+    let seen_options = seen_options.lock().clone();
     assert_eq!(seen_options.len(), 1);
     assert_eq!(seen_options[0].transport, Some(Transport::Auto));
 

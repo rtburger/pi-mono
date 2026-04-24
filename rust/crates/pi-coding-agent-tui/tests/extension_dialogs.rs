@@ -1,13 +1,9 @@
+use parking_lot::Mutex;
 use pi_coding_agent_tui::{
     ExtensionInputComponent, ExtensionSelectorComponent, KeybindingsManager,
 };
 use pi_tui::Component;
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-    thread,
-    time::Duration,
-};
+use std::{collections::BTreeMap, sync::Arc, thread, time::Duration};
 
 const KEY_DOWN: &str = "\x1b[B";
 const KEY_ENTER: &str = "\n";
@@ -26,7 +22,7 @@ fn extension_input_submits_entered_value() {
         &keybindings,
         "Enter a value",
         None,
-        move |value| *submitted_for_callback.lock().unwrap() = Some(value),
+        move |value| *submitted_for_callback.lock() = Some(value),
         || {},
         None,
         None,
@@ -36,7 +32,7 @@ fn extension_input_submits_entered_value() {
     component.handle_input("i");
     component.handle_input(KEY_ENTER);
 
-    assert_eq!(submitted.lock().unwrap().as_deref(), Some("hi"));
+    assert_eq!(submitted.lock().as_deref(), Some("hi"));
     assert!(component.render(80).join("\n").contains("Enter a value"));
 }
 
@@ -50,7 +46,7 @@ fn extension_selector_navigates_and_selects_option() {
         &keybindings,
         "Choose action",
         vec![String::from("Allow"), String::from("Block")],
-        move |value| *selected_for_callback.lock().unwrap() = Some(value),
+        move |value| *selected_for_callback.lock() = Some(value),
         || {},
         None,
         None,
@@ -59,7 +55,7 @@ fn extension_selector_navigates_and_selects_option() {
     component.handle_input(KEY_DOWN);
     component.handle_input(KEY_ENTER);
 
-    assert_eq!(selected.lock().unwrap().as_deref(), Some("Block"));
+    assert_eq!(selected.lock().as_deref(), Some("Block"));
     assert!(component.render(80).join("\n").contains("Choose action"));
 }
 
@@ -74,12 +70,12 @@ fn extension_input_timeout_invokes_cancel_callback() {
         "Timed input",
         None,
         |_| {},
-        move || *cancelled_for_callback.lock().unwrap() += 1,
+        move || *cancelled_for_callback.lock() += 1,
         Some(20),
         None,
     );
 
     thread::sleep(Duration::from_millis(100));
 
-    assert_eq!(*cancelled.lock().unwrap(), 1);
+    assert_eq!(*cancelled.lock(), 1);
 }

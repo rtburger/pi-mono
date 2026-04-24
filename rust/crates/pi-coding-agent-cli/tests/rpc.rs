@@ -1,4 +1,5 @@
 use futures::stream;
+use parking_lot::Mutex;
 use pi_ai::{
     AiProvider, AssistantEventStream, FauxModelDefinition, FauxResponse,
     RegisterFauxProviderOptions, StreamOptions, register_faux_provider, register_provider,
@@ -11,7 +12,7 @@ use serde_json::Value;
 use std::{
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -31,7 +32,7 @@ impl AiProvider for RecordingProvider {
         _context: pi_events::Context,
         _options: StreamOptions,
     ) -> AssistantEventStream {
-        *self.recorded.lock().unwrap() = RecordedRequest;
+        *self.recorded.lock() = RecordedRequest;
 
         let message = AssistantMessage {
             role: String::from("assistant"),

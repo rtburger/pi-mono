@@ -1,6 +1,7 @@
+use parking_lot::Mutex;
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
     },
@@ -82,7 +83,7 @@ impl StdinBuffer {
 
     pub fn subscribe(&self) -> Receiver<StdinBufferEvent> {
         let (sender, receiver) = mpsc::channel();
-        let mut inner = self.inner.lock().expect("stdin buffer mutex poisoned");
+        let mut inner = self.inner.lock();
         inner.listeners.push(sender);
         receiver
     }
@@ -91,7 +92,7 @@ impl StdinBuffer {
         self.cancel_pending_timeout();
 
         let outcome = {
-            let mut inner = self.inner.lock().expect("stdin buffer mutex poisoned");
+            let mut inner = self.inner.lock();
             let str_data = data.to_owned();
 
             if str_data.is_empty() && inner.buffer.is_empty() {
@@ -130,7 +131,7 @@ impl StdinBuffer {
     pub fn flush(&self) -> Vec<String> {
         self.cancel_pending_timeout();
 
-        let mut inner = self.inner.lock().expect("stdin buffer mutex poisoned");
+        let mut inner = self.inner.lock();
         if inner.buffer.is_empty() {
             return Vec::new();
         }
@@ -143,18 +144,14 @@ impl StdinBuffer {
     pub fn clear(&self) {
         self.cancel_pending_timeout();
 
-        let mut inner = self.inner.lock().expect("stdin buffer mutex poisoned");
+        let mut inner = self.inner.lock();
         inner.buffer.clear();
         inner.paste_mode = false;
         inner.paste_buffer.clear();
     }
 
     pub fn get_buffer(&self) -> String {
-        self.inner
-            .lock()
-            .expect("stdin buffer mutex poisoned")
-            .buffer
-            .clone()
+        self.inner.lock().buffer.clone()
     }
 
     pub fn destroy(&self) {
@@ -170,7 +167,7 @@ impl StdinBuffer {
         let inner = Arc::clone(&self.inner);
         let generation_counter = Arc::clone(&self.generation);
 
-        let timeout = inner.lock().expect("stdin buffer mutex poisoned").timeout;
+        let timeout = inner.lock().timeout;
         thread::spawn(move || {
             thread::sleep(timeout);
             if generation_counter.load(Ordering::SeqCst) != generation {
@@ -178,7 +175,7 @@ impl StdinBuffer {
             }
 
             let (events, listeners) = {
-                let mut inner = inner.lock().expect("stdin buffer mutex poisoned");
+                let mut inner = inner.lock();
                 if generation_counter.load(Ordering::SeqCst) != generation
                     || inner.buffer.is_empty()
                 {
@@ -206,13 +203,7 @@ impl StdinBuffer {
             return;
         }
 
-        let listeners = {
-            self.inner
-                .lock()
-                .expect("stdin buffer mutex poisoned")
-                .listeners
-                .clone()
-        };
+        let listeners = { self.inner.lock().listeners.clone() };
         emit_to_listeners(&self.inner, listeners, events);
     }
 }
@@ -240,7 +231,7 @@ fn emit_to_listeners(
         }
     }
 
-    let mut guard = inner.lock().expect("stdin buffer mutex poisoned");
+    let mut guard = inner.lock();
     guard.listeners = active_listeners;
 }
 

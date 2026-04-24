@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use pi_tui::{
     AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, CURSOR_MARKER,
     CombinedAutocompleteProvider, Component, Editor, EditorCursor, EditorOptions, SlashCommand,
@@ -7,7 +8,7 @@ use regex::Regex;
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, LazyLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -103,20 +104,14 @@ fn backslash_enter_inserts_newline_instead_of_submitting() {
 
     let mut editor = Editor::new();
     editor.set_on_submit(move |value| {
-        *submitted_clone.lock().expect("submitted mutex poisoned") = Some(value);
+        *submitted_clone.lock() = Some(value);
     });
 
     editor.handle_input("\\");
     editor.handle_input("\r");
 
     assert_eq!(editor.get_text(), "\n");
-    assert_eq!(
-        submitted
-            .lock()
-            .expect("submitted mutex poisoned")
-            .as_deref(),
-        None
-    );
+    assert_eq!(submitted.lock().as_deref(), None);
 }
 
 #[test]
@@ -126,7 +121,7 @@ fn submit_resets_editor_and_emits_trimmed_text() {
 
     let mut editor = Editor::new();
     editor.set_on_submit(move |value| {
-        *submitted_clone.lock().expect("submitted mutex poisoned") = Some(value);
+        *submitted_clone.lock() = Some(value);
     });
 
     editor.handle_input(" ");
@@ -142,13 +137,7 @@ fn submit_resets_editor_and_emits_trimmed_text() {
     editor.handle_input("\r");
 
     assert_eq!(editor.get_text(), "");
-    assert_eq!(
-        submitted
-            .lock()
-            .expect("submitted mutex poisoned")
-            .as_deref(),
-        Some("hi\nthere")
-    );
+    assert_eq!(submitted.lock().as_deref(), Some("hi\nthere"));
 }
 
 #[test]
@@ -440,21 +429,13 @@ fn submit_clears_the_undo_stack() {
 
     let mut editor = Editor::new();
     editor.set_on_submit(move |value| {
-        *submitted_for_callback
-            .lock()
-            .expect("submitted mutex poisoned") = Some(value);
+        *submitted_for_callback.lock() = Some(value);
     });
 
     type_text(&mut editor, "hello");
     editor.handle_input("\r");
 
-    assert_eq!(
-        submitted
-            .lock()
-            .expect("submitted mutex poisoned")
-            .as_deref(),
-        Some("hello")
-    );
+    assert_eq!(submitted.lock().as_deref(), Some("hello"));
     assert_eq!(editor.get_text(), "");
 
     undo(&mut editor);
@@ -791,9 +772,7 @@ fn submit_expands_large_paste_markers() {
 
     let mut editor = Editor::new();
     editor.set_on_submit(move |value| {
-        *submitted_for_callback
-            .lock()
-            .expect("submitted mutex poisoned") = Some(value);
+        *submitted_for_callback.lock() = Some(value);
     });
 
     let pasted_text = [
@@ -813,13 +792,7 @@ fn submit_expands_large_paste_markers() {
     paste_with_marker(&mut editor, &pasted_text);
     editor.handle_input("\r");
 
-    assert_eq!(
-        submitted
-            .lock()
-            .expect("submitted mutex poisoned")
-            .as_deref(),
-        Some(pasted_text.as_str())
-    );
+    assert_eq!(submitted.lock().as_deref(), Some(pasted_text.as_str()));
 }
 
 #[test]
@@ -924,7 +897,7 @@ fn enter_submits_a_slash_command_name_after_accepting_completion() {
         },
     ]));
     editor.set_on_submit(move |value| {
-        *submitted_clone.lock().expect("submitted mutex poisoned") = Some(value);
+        *submitted_clone.lock() = Some(value);
     });
     type_text(&mut editor, "/quit");
 
@@ -932,13 +905,7 @@ fn enter_submits_a_slash_command_name_after_accepting_completion() {
     editor.handle_input("\r");
 
     assert_eq!(editor.get_text(), "");
-    assert_eq!(
-        submitted
-            .lock()
-            .expect("submitted mutex poisoned")
-            .as_deref(),
-        Some("/quit")
-    );
+    assert_eq!(submitted.lock().as_deref(), Some("/quit"));
 }
 
 #[test]

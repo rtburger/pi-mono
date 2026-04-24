@@ -9,6 +9,7 @@ async-stream.workspace = true
 futures.workspace = true
 globset = "0.4"
 ignore = "0.4"
+parking_lot.workspace = true
 pi-agent = { path = "../pi-agent" }
 pi-ai = { path = "../pi-ai" }
 pi-coding-agent-tools = { path = "../pi-coding-agent-tools" }

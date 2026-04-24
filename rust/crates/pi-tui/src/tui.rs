@@ -3,10 +3,11 @@ use crate::{
     is_key_release, matches_key, set_cell_dimensions, slice_by_column, slice_with_width,
     visible_width,
 };
+use parking_lot::Mutex;
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -87,10 +88,7 @@ pub struct RenderHandle {
 
 impl RenderHandle {
     pub fn request_render(&self) {
-        self.pending_terminal_events
-            .lock()
-            .expect("pending terminal events mutex poisoned")
-            .request_redraw();
+        self.pending_terminal_events.lock().request_redraw();
     }
 }
 
@@ -700,11 +698,7 @@ impl<T: Terminal> Tui<T> {
 
     pub fn drain_terminal_events(&mut self) -> Result<(), TuiError> {
         loop {
-            let next_event = self
-                .pending_terminal_events
-                .lock()
-                .expect("pending terminal events mutex poisoned")
-                .pop_front();
+            let next_event = self.pending_terminal_events.lock().pop_front();
             let Some(event) = next_event else {
                 break;
             };
@@ -834,16 +828,10 @@ impl<T: Terminal> Tui<T> {
         let pending_resize = Arc::clone(&self.pending_terminal_events);
         self.terminal.start(
             Box::new(move |data| {
-                pending_input
-                    .lock()
-                    .expect("pending terminal events mutex poisoned")
-                    .push_input(data);
+                pending_input.lock().push_input(data);
             }),
             Box::new(move || {
-                pending_resize
-                    .lock()
-                    .expect("pending terminal events mutex poisoned")
-                    .request_redraw();
+                pending_resize.lock().request_redraw();
             }),
         )?;
         self.terminal.hide_cursor()?;
@@ -880,10 +868,7 @@ impl<T: Terminal> Tui<T> {
 
         self.terminal.show_cursor()?;
         self.terminal.stop()?;
-        self.pending_terminal_events
-            .lock()
-            .expect("pending terminal events mutex poisoned")
-            .clear();
+        self.pending_terminal_events.lock().clear();
         Ok(())
     }
 

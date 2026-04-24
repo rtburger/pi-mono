@@ -1,10 +1,11 @@
+use parking_lot::{Condvar, Mutex};
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Arc, Condvar, Mutex, Weak,
+        Arc, Weak,
         atomic::{AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
@@ -94,31 +95,19 @@ impl FooterDataProvider {
             .name("pi-footer-data-watcher".to_owned())
             .spawn(move || watch_git_branch_changes(watcher_inner))
             .expect("failed to spawn footer data watcher thread");
-        *inner
-            .watcher_handle
-            .lock()
-            .expect("watcher handle mutex poisoned") = Some(handle);
+        *inner.watcher_handle.lock() = Some(handle);
 
         Self { inner }
     }
 
     pub fn cwd(&self) -> PathBuf {
-        self.inner
-            .state
-            .lock()
-            .expect("footer data state mutex poisoned")
-            .cwd
-            .clone()
+        self.inner.state.lock().cwd.clone()
     }
 
     pub fn set_cwd(&self, cwd: impl Into<PathBuf>) {
         let cwd = cwd.into();
         {
-            let mut state = self
-                .inner
-                .state
-                .lock()
-                .expect("footer data state mutex poisoned");
+            let mut state = self.inner.state.lock();
             if state.cwd == cwd {
                 return;
             }
@@ -134,11 +123,7 @@ impl FooterDataProvider {
     pub fn get_git_branch(&self) -> Option<String> {
         loop {
             let (generation, git_paths, cached_branch) = {
-                let state = self
-                    .inner
-                    .state
-                    .lock()
-                    .expect("footer data state mutex poisoned");
+                let state = self.inner.state.lock();
                 (
                     state.generation,
                     state.git_paths.clone(),
@@ -151,11 +136,7 @@ impl FooterDataProvider {
             }
 
             let resolved = resolve_git_branch_from_paths(git_paths.as_ref());
-            let mut state = self
-                .inner
-                .state
-                .lock()
-                .expect("footer data state mutex poisoned");
+            let mut state = self.inner.state.lock();
             if state.generation != generation {
                 continue;
             }
@@ -165,21 +146,12 @@ impl FooterDataProvider {
     }
 
     pub fn get_extension_statuses(&self) -> BTreeMap<String, String> {
-        self.inner
-            .state
-            .lock()
-            .expect("footer data state mutex poisoned")
-            .extension_statuses
-            .clone()
+        self.inner.state.lock().extension_statuses.clone()
     }
 
     pub fn set_extension_status(&self, key: impl Into<String>, text: Option<String>) {
         let key = key.into();
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("footer data state mutex poisoned");
+        let mut state = self.inner.state.lock();
         match text {
             Some(text) => {
                 state.extension_statuses.insert(key, text);
@@ -191,28 +163,15 @@ impl FooterDataProvider {
     }
 
     pub fn clear_extension_statuses(&self) {
-        self.inner
-            .state
-            .lock()
-            .expect("footer data state mutex poisoned")
-            .extension_statuses
-            .clear();
+        self.inner.state.lock().extension_statuses.clear();
     }
 
     pub fn get_available_provider_count(&self) -> usize {
-        self.inner
-            .state
-            .lock()
-            .expect("footer data state mutex poisoned")
-            .available_provider_count
+        self.inner.state.lock().available_provider_count
     }
 
     pub fn set_available_provider_count(&self, count: usize) {
-        self.inner
-            .state
-            .lock()
-            .expect("footer data state mutex poisoned")
-            .available_provider_count = count;
+        self.inner.state.lock().available_provider_count = count;
     }
 
     pub fn on_branch_change<F>(&self, callback: F) -> BranchChangeSubscription
@@ -223,7 +182,6 @@ impl FooterDataProvider {
         self.inner
             .callbacks
             .lock()
-            .expect("footer data callback mutex poisoned")
             .insert(callback_id, Arc::new(callback));
         BranchChangeSubscription {
             callback_id: Some(callback_id),
@@ -250,11 +208,7 @@ impl FooterDataProvider {
 
     pub fn dispose(&self) {
         {
-            let mut state = self
-                .inner
-                .state
-                .lock()
-                .expect("footer data state mutex poisoned");
+            let mut state = self.inner.state.lock();
             if state.disposed {
                 return;
             }
@@ -262,21 +216,11 @@ impl FooterDataProvider {
         }
         self.inner.state_changed.notify_all();
 
-        if let Some(handle) = self
-            .inner
-            .watcher_handle
-            .lock()
-            .expect("watcher handle mutex poisoned")
-            .take()
-        {
+        if let Some(handle) = self.inner.watcher_handle.lock().take() {
             let _ = handle.join();
         }
 
-        self.inner
-            .callbacks
-            .lock()
-            .expect("footer data callback mutex poisoned")
-            .clear();
+        self.inner.callbacks.lock().clear();
     }
 }
 
@@ -288,23 +232,14 @@ impl Drop for FooterDataProvider {
 
 impl FooterDataInner {
     fn notify_branch_change(&self) {
-        let callbacks = self
-            .callbacks
-            .lock()
-            .expect("footer data callback mutex poisoned")
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let callbacks = self.callbacks.lock().values().cloned().collect::<Vec<_>>();
         for callback in callbacks {
             callback();
         }
     }
 
     fn remove_callback(&self, callback_id: usize) {
-        self.callbacks
-            .lock()
-            .expect("footer data callback mutex poisoned")
-            .remove(&callback_id);
+        self.callbacks.lock().remove(&callback_id);
     }
 }
 
@@ -335,10 +270,7 @@ fn snapshot_from_inner(inner: &FooterDataInner) -> FooterDataSnapshot {
             extension_statuses,
             available_provider_count,
         ) = {
-            let state = inner
-                .state
-                .lock()
-                .expect("footer data state mutex poisoned");
+            let state = inner.state.lock();
             (
                 state.generation,
                 state.cwd.clone(),
@@ -354,10 +286,7 @@ fn snapshot_from_inner(inner: &FooterDataInner) -> FooterDataSnapshot {
             CachedBranch::Value(branch) => branch,
         };
 
-        let mut state = inner
-            .state
-            .lock()
-            .expect("footer data state mutex poisoned");
+        let mut state = inner.state.lock();
         if state.generation != generation {
             continue;
         }
@@ -380,10 +309,7 @@ fn watch_git_branch_changes(inner: Arc<FooterDataInner>) {
 
     loop {
         let (generation, git_paths) = {
-            let state = inner
-                .state
-                .lock()
-                .expect("footer data state mutex poisoned");
+            let state = inner.state.lock();
             if state.disposed {
                 return;
             }
@@ -407,10 +333,7 @@ fn watch_git_branch_changes(inner: Arc<FooterDataInner>) {
                 refresh_deadline = None;
                 let next_branch = resolve_git_branch_from_paths(git_paths.as_ref());
                 let should_notify = {
-                    let mut state = inner
-                        .state
-                        .lock()
-                        .expect("footer data state mutex poisoned");
+                    let mut state = inner.state.lock();
                     if state.disposed {
                         return;
                     }
@@ -441,17 +364,11 @@ fn watch_git_branch_changes(inner: Arc<FooterDataInner>) {
             })
             .unwrap_or(WATCH_POLL_INTERVAL);
 
-        let state = inner
-            .state
-            .lock()
-            .expect("footer data state mutex poisoned");
+        let mut state = inner.state.lock();
         if state.disposed {
             return;
         }
-        let _ = inner
-            .state_changed
-            .wait_timeout(state, wait_duration)
-            .expect("footer data condvar wait failed");
+        let _ = inner.state_changed.wait_for(&mut state, wait_duration);
     }
 }
 

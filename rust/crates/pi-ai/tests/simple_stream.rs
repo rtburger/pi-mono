@@ -1,4 +1,5 @@
 use httpmock::prelude::*;
+use parking_lot::Mutex;
 use pi_ai::openai_completions::{
     OpenAiCompletionsFunctionChoice, OpenAiCompletionsToolChoice,
     OpenAiCompletionsToolChoiceFunction,
@@ -11,7 +12,7 @@ use pi_ai::{
 use pi_events::{AssistantContent, Context, Message, Model, ToolDefinition, UserContent};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 fn base_context() -> Context {
     Context {
@@ -148,7 +149,7 @@ async fn capture_simple_payload_with_context(
     options.on_payload = Some(PayloadHook::new(move |payload, _model| {
         let captured_for_hook = Arc::clone(&captured_for_hook);
         async move {
-            *captured_for_hook.lock().unwrap() = Some(payload.clone());
+            *captured_for_hook.lock() = Some(payload.clone());
             Ok(Some(payload))
         }
     }));
@@ -157,7 +158,6 @@ async fn capture_simple_payload_with_context(
 
     captured
         .lock()
-        .unwrap()
         .clone()
         .expect("payload should be captured before request failure")
 }

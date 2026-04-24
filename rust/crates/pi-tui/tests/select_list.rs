@@ -1,5 +1,6 @@
+use parking_lot::Mutex;
 use pi_tui::{Component, SelectItem, SelectList, SelectListLayoutOptions, SelectListTheme};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 const KEY_UP: &str = "\x1b[A";
 const KEY_DOWN: &str = "\x1b[B";
@@ -48,34 +49,24 @@ fn select_list_wraps_selection_and_invokes_callbacks() {
     );
     {
         let selected = Arc::clone(&selected);
-        list.set_on_select(move |item| {
-            *selected.lock().expect("selected mutex") = Some(item.value)
-        });
+        list.set_on_select(move |item| *selected.lock() = Some(item.value));
     }
     {
         let changed = Arc::clone(&changed);
-        list.set_on_selection_change(move |item| {
-            changed.lock().expect("changed mutex").push(item.value)
-        });
+        list.set_on_selection_change(move |item| changed.lock().push(item.value));
     }
     {
         let cancelled = Arc::clone(&cancelled);
-        list.set_on_cancel(move || *cancelled.lock().expect("cancelled mutex") = true);
+        list.set_on_cancel(move || *cancelled.lock() = true);
     }
 
     list.handle_input(KEY_UP);
     list.handle_input(KEY_ENTER);
     list.handle_input(KEY_ESCAPE);
 
-    assert_eq!(
-        *selected.lock().expect("selected mutex"),
-        Some(String::from("two"))
-    );
-    assert_eq!(
-        changed.lock().expect("changed mutex").as_slice(),
-        &[String::from("two")]
-    );
-    assert!(*cancelled.lock().expect("cancelled mutex"));
+    assert_eq!(*selected.lock(), Some(String::from("two")));
+    assert_eq!(changed.lock().as_slice(), &[String::from("two")]);
+    assert!(*cancelled.lock());
 }
 
 #[test]

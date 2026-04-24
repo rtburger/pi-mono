@@ -1,11 +1,9 @@
+use parking_lot::{Mutex, MutexGuard};
 use pi_tui::{
     decode_kitty_printable, is_key_release, is_key_repeat, is_kitty_protocol_active, matches_key,
     parse_key, set_kitty_protocol_active,
 };
-use std::{
-    ffi::OsString,
-    sync::{LazyLock, Mutex, MutexGuard},
-};
+use std::{ffi::OsString, sync::LazyLock};
 
 static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 const GUARDED_ENV_VARS: &[&str] = &["WT_SESSION", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"];
@@ -18,7 +16,7 @@ struct TestGuard {
 
 impl TestGuard {
     fn new() -> Self {
-        let lock = TEST_LOCK.lock().expect("test lock");
+        let lock = TEST_LOCK.lock();
         let previous_kitty_protocol_active = is_kitty_protocol_active();
         let previous_env = GUARDED_ENV_VARS
             .iter()

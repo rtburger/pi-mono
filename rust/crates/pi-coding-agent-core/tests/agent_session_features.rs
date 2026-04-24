@@ -1,4 +1,5 @@
 use async_stream::stream;
+use parking_lot::Mutex;
 use pi_ai::{
     AiProvider, AssistantEventStream, StreamOptions, register_provider, unregister_provider,
 };
@@ -13,7 +14,7 @@ use pi_events::{
 };
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::sleep;
@@ -100,11 +101,11 @@ impl ScriptedProvider {
     }
 
     fn call_count(&self) -> usize {
-        *self.call_count.lock().unwrap()
+        *self.call_count.lock()
     }
 
     fn contexts(&self) -> Vec<Context> {
-        self.contexts.lock().unwrap().clone()
+        self.contexts.lock().clone()
     }
 }
 
@@ -118,11 +119,10 @@ impl AiProvider for ScriptedProvider {
         let reply = self
             .replies
             .lock()
-            .unwrap()
             .pop_front()
             .expect("expected scripted reply");
-        *self.call_count.lock().unwrap() += 1;
-        self.contexts.lock().unwrap().push(context);
+        *self.call_count.lock() += 1;
+        self.contexts.lock().push(context);
         let reason = reply.stop_reason.clone();
         Box::pin(stream! {
             yield Ok(AssistantEvent::Done {
@@ -214,7 +214,7 @@ async fn manual_compaction_emits_events_and_rebuilds_session_context() {
     let events = Arc::new(Mutex::new(Vec::<AgentSessionEvent>::new()));
     let events_clone = events.clone();
     let _unsubscribe = session.subscribe(move |event| {
-        events_clone.lock().unwrap().push(event);
+        events_clone.lock().push(event);
     });
 
     session.prompt_text("hello").await.unwrap();
@@ -224,7 +224,7 @@ async fn manual_compaction_emits_events_and_rebuilds_session_context() {
     expect_first_message_role(&session, "compactionSummary");
     assert_eq!(provider_handle.call_count(), 2);
 
-    let events = events.lock().unwrap().clone();
+    let events = events.lock().clone();
     assert!(events.contains(&AgentSessionEvent::CompactionStart {
         reason: CompactionReason::Manual,
     }));
@@ -278,14 +278,14 @@ async fn retries_transient_errors_and_waits_for_recovery() {
     let retry_events = Arc::new(Mutex::new(Vec::<AgentSessionEvent>::new()));
     let retry_events_clone = retry_events.clone();
     let _unsubscribe = session.subscribe(move |event| {
-        retry_events_clone.lock().unwrap().push(event);
+        retry_events_clone.lock().push(event);
     });
 
     session.prompt_text("retry me").await.unwrap();
 
     assert_eq!(provider_handle.call_count(), 2);
     assert!(!session.is_retrying());
-    let retry_events = retry_events.lock().unwrap().clone();
+    let retry_events = retry_events.lock().clone();
     assert!(retry_events.iter().any(|event| matches!(
         event,
         AgentSessionEvent::AutoRetryStart {
@@ -403,14 +403,14 @@ async fn auto_compacts_on_threshold_and_emits_session_events() {
     let events = Arc::new(Mutex::new(Vec::<AgentSessionEvent>::new()));
     let events_clone = events.clone();
     let _unsubscribe = session.subscribe(move |event| {
-        events_clone.lock().unwrap().push(event);
+        events_clone.lock().push(event);
     });
 
     session.prompt_text("trigger threshold").await.unwrap();
 
     assert_eq!(provider_handle.call_count(), 2);
     expect_first_message_role(&session, "compactionSummary");
-    let events = events.lock().unwrap().clone();
+    let events = events.lock().clone();
     assert!(events.contains(&AgentSessionEvent::CompactionStart {
         reason: CompactionReason::Threshold,
     }));
@@ -479,7 +479,7 @@ async fn overflow_recovery_compacts_and_retries_once() {
     let events = Arc::new(Mutex::new(Vec::<AgentSessionEvent>::new()));
     let events_clone = events.clone();
     let _unsubscribe = session.subscribe(move |event| {
-        events_clone.lock().unwrap().push(event);
+        events_clone.lock().push(event);
     });
 
     session.prompt_text("warm up").await.unwrap();
@@ -500,7 +500,7 @@ async fn overflow_recovery_compacts_and_retries_once() {
         .iter()
         .any(|message| matches!(message, pi_events::Message::User { content, .. } if content.iter().any(|block| matches!(block, UserContent::Text { text } if text.contains("The conversation history before this point was compacted"))))));
 
-    let events = events.lock().unwrap().clone();
+    let events = events.lock().clone();
     assert!(events.contains(&AgentSessionEvent::CompactionStart {
         reason: CompactionReason::Overflow,
     }));

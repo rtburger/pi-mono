@@ -24,6 +24,7 @@ use crate::{
     to_print_output_mode,
     tree_picker::TreePickerItem,
 };
+use parking_lot::Mutex;
 use pi_agent::{AgentTool, AgentToolError, AgentUnsubscribe, BeforeToolCallResult, ThinkingLevel};
 use pi_ai::{
     OAuthLoginCallbacks, PayloadHook, StreamOptions, ThinkingBudgets, Transport,
@@ -76,11 +77,13 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
+#[cfg(test)]
+use tokio::sync::Mutex as TokioMutex;
 use tokio::{
     sync::{oneshot, watch},
     time::sleep,
@@ -438,9 +441,7 @@ fn build_session_support(session_manager: SessionManager) -> SessionSupport {
 
 fn build_session_support_from_arc(session_manager: Arc<Mutex<SessionManager>>) -> SessionSupport {
     let (header, existing_session, session_id) = {
-        let session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let session_manager = session_manager.lock();
         (
             session_manager.get_header().clone(),
             existing_session_selection_from_manager(&session_manager),
@@ -473,17 +474,12 @@ async fn select_resume_session(
 
     let outcome_for_select = Arc::clone(&outcome);
     picker.set_on_select(move |path| {
-        *outcome_for_select
-            .lock()
-            .expect("resume picker outcome mutex poisoned") =
-            Some(ResumePickerOutcome::Selected(path));
+        *outcome_for_select.lock() = Some(ResumePickerOutcome::Selected(path));
     });
 
     let outcome_for_cancel = Arc::clone(&outcome);
     picker.set_on_cancel(move || {
-        *outcome_for_cancel
-            .lock()
-            .expect("resume picker outcome mutex poisoned") = Some(ResumePickerOutcome::Cancelled);
+        *outcome_for_cancel.lock() = Some(ResumePickerOutcome::Cancelled);
     });
 
     let picker_id = tui.add_child(Box::new(picker));
@@ -491,11 +487,7 @@ async fn select_resume_session(
     tui.start().map_err(|error| error.to_string())?;
 
     loop {
-        if let Some(outcome) = outcome
-            .lock()
-            .expect("resume picker outcome mutex poisoned")
-            .take()
-        {
+        if let Some(outcome) = outcome.lock().take() {
             tui.clear();
             return Ok(match outcome {
                 ResumePickerOutcome::Selected(path) => Some(path),
@@ -607,25 +599,17 @@ async fn select_tree_entry(
 
     let outcome_for_select = Arc::clone(&outcome);
     picker.set_on_select(move |entry_id| {
-        *outcome_for_select
-            .lock()
-            .expect("tree picker outcome mutex poisoned") =
-            Some(TreePickerOutcome::Selected(entry_id));
+        *outcome_for_select.lock() = Some(TreePickerOutcome::Selected(entry_id));
     });
 
     let outcome_for_cancel = Arc::clone(&outcome);
     picker.set_on_cancel(move || {
-        *outcome_for_cancel
-            .lock()
-            .expect("tree picker outcome mutex poisoned") = Some(TreePickerOutcome::Cancelled);
+        *outcome_for_cancel.lock() = Some(TreePickerOutcome::Cancelled);
     });
 
     let label_changes_for_picker = Arc::clone(&label_changes);
     picker.set_on_label_change(move |change| {
-        label_changes_for_picker
-            .lock()
-            .expect("tree picker label changes mutex poisoned")
-            .push(change);
+        label_changes_for_picker.lock().push(change);
     });
 
     let picker_id = tui.add_child(Box::new(picker));
@@ -633,21 +617,14 @@ async fn select_tree_entry(
     tui.start().map_err(|error| error.to_string())?;
 
     loop {
-        if let Some(outcome) = outcome
-            .lock()
-            .expect("tree picker outcome mutex poisoned")
-            .take()
-        {
+        if let Some(outcome) = outcome.lock().take() {
             tui.clear();
             return Ok(TreePickerResult {
                 selected_entry_id: match outcome {
                     TreePickerOutcome::Selected(entry_id) => Some(entry_id),
                     TreePickerOutcome::Cancelled => None,
                 },
-                label_changes: label_changes
-                    .lock()
-                    .expect("tree picker label changes mutex poisoned")
-                    .clone(),
+                label_changes: label_changes.lock().clone(),
             });
         }
 
@@ -889,17 +866,12 @@ async fn select_oauth_provider(
 
     let outcome_for_select = Arc::clone(&outcome);
     picker.set_on_select(move |provider_id| {
-        *outcome_for_select
-            .lock()
-            .expect("oauth picker outcome mutex poisoned") =
-            Some(OAuthPickerOutcome::Selected(provider_id));
+        *outcome_for_select.lock() = Some(OAuthPickerOutcome::Selected(provider_id));
     });
 
     let outcome_for_cancel = Arc::clone(&outcome);
     picker.set_on_cancel(move || {
-        *outcome_for_cancel
-            .lock()
-            .expect("oauth picker outcome mutex poisoned") = Some(OAuthPickerOutcome::Cancelled);
+        *outcome_for_cancel.lock() = Some(OAuthPickerOutcome::Cancelled);
     });
 
     let picker_id = tui.add_child(Box::new(picker));
@@ -907,11 +879,7 @@ async fn select_oauth_provider(
     tui.start().map_err(|error| error.to_string())?;
 
     loop {
-        if let Some(outcome) = outcome
-            .lock()
-            .expect("oauth picker outcome mutex poisoned")
-            .take()
-        {
+        if let Some(outcome) = outcome.lock().take() {
             tui.clear();
             return Ok(match outcome {
                 OAuthPickerOutcome::Selected(provider_id) => Some(provider_id),
@@ -938,48 +906,30 @@ impl SharedLoginDialog {
     }
 
     fn with_mut<T>(&self, callback: impl FnOnce(&mut LoginDialogComponent) -> T) -> T {
-        let mut guard = self
-            .inner
-            .lock()
-            .expect("shared oauth login dialog mutex poisoned");
+        let mut guard = self.inner.lock();
         callback(&mut guard)
     }
 }
 
 impl Component for SharedLoginDialog {
     fn render(&self, width: usize) -> Vec<String> {
-        self.inner
-            .lock()
-            .expect("shared oauth login dialog mutex poisoned")
-            .render(width)
+        self.inner.lock().render(width)
     }
 
     fn invalidate(&mut self) {
-        self.inner
-            .lock()
-            .expect("shared oauth login dialog mutex poisoned")
-            .invalidate();
+        self.inner.lock().invalidate();
     }
 
     fn handle_input(&mut self, data: &str) {
-        self.inner
-            .lock()
-            .expect("shared oauth login dialog mutex poisoned")
-            .handle_input(data);
+        self.inner.lock().handle_input(data);
     }
 
     fn set_focused(&mut self, focused: bool) {
-        self.inner
-            .lock()
-            .expect("shared oauth login dialog mutex poisoned")
-            .set_focused(focused);
+        self.inner.lock().set_focused(focused);
     }
 
     fn set_viewport_size(&self, width: usize, height: usize) {
-        self.inner
-            .lock()
-            .expect("shared oauth login dialog mutex poisoned")
-            .set_viewport_size(width, height);
+        self.inner.lock().set_viewport_size(width, height);
     }
 }
 
@@ -989,6 +939,8 @@ struct SharedStartupShell {
 }
 
 impl SharedStartupShell {
+    // Shared between the TUI component and debug handler on the TUI thread only.
+    #[allow(clippy::arc_with_non_send_sync)]
     fn new(shell: StartupShellComponent) -> Self {
         Self {
             inner: Arc::new(Mutex::new(shell)),
@@ -996,55 +948,34 @@ impl SharedStartupShell {
     }
 
     fn with_mut<T>(&self, callback: impl FnOnce(&mut StartupShellComponent) -> T) -> T {
-        let mut shell = self
-            .inner
-            .lock()
-            .expect("shared startup shell mutex poisoned");
+        let mut shell = self.inner.lock();
         callback(&mut shell)
     }
 }
 
 impl Component for SharedStartupShell {
     fn render(&self, width: usize) -> Vec<String> {
-        self.inner
-            .lock()
-            .expect("shared startup shell mutex poisoned")
-            .render(width)
+        self.inner.lock().render(width)
     }
 
     fn invalidate(&mut self) {
-        self.inner
-            .lock()
-            .expect("shared startup shell mutex poisoned")
-            .invalidate();
+        self.inner.lock().invalidate();
     }
 
     fn handle_input(&mut self, data: &str) {
-        self.inner
-            .lock()
-            .expect("shared startup shell mutex poisoned")
-            .handle_input(data);
+        self.inner.lock().handle_input(data);
     }
 
     fn wants_key_release(&self) -> bool {
-        self.inner
-            .lock()
-            .expect("shared startup shell mutex poisoned")
-            .wants_key_release()
+        self.inner.lock().wants_key_release()
     }
 
     fn set_focused(&mut self, focused: bool) {
-        self.inner
-            .lock()
-            .expect("shared startup shell mutex poisoned")
-            .set_focused(focused);
+        self.inner.lock().set_focused(focused);
     }
 
     fn set_viewport_size(&self, width: usize, height: usize) {
-        self.inner
-            .lock()
-            .expect("shared startup shell mutex poisoned")
-            .set_viewport_size(width, height);
+        self.inner.lock().set_viewport_size(width, height);
     }
 }
 
@@ -1067,10 +998,7 @@ fn push_oauth_login_dialog_event(
     render_handle: &RenderHandle,
     event: OAuthLoginDialogEvent,
 ) {
-    events
-        .lock()
-        .expect("oauth login dialog event queue mutex poisoned")
-        .push_back(event);
+    events.lock().push_back(event);
     render_handle.request_render();
 }
 
@@ -1122,11 +1050,7 @@ async fn run_interactive_oauth_login_dialog(
     {
         let prompt_responder = Arc::clone(&prompt_responder);
         dialog.set_on_submit(move |value| {
-            if let Some(responder) = prompt_responder
-                .lock()
-                .expect("oauth login dialog prompt responder mutex poisoned")
-                .take()
-            {
+            if let Some(responder) = prompt_responder.lock().take() {
                 let _ = responder.send(Ok(value));
             }
         });
@@ -1136,11 +1060,7 @@ async fn run_interactive_oauth_login_dialog(
         let cancel_requested = Arc::clone(&cancel_requested);
         dialog.set_on_cancel(move || {
             cancel_requested.store(true, Ordering::Relaxed);
-            if let Some(responder) = prompt_responder
-                .lock()
-                .expect("oauth login dialog prompt responder mutex poisoned")
-                .take()
-            {
+            if let Some(responder) = prompt_responder.lock().take() {
                 let _ = responder.send(Err(String::from("Login cancelled")));
             }
         });
@@ -1244,12 +1164,7 @@ async fn run_interactive_oauth_login_dialog(
     };
 
     let result = loop {
-        let event = {
-            events
-                .lock()
-                .expect("oauth login dialog event queue mutex poisoned")
-                .pop_front()
-        };
+        let event = { events.lock().pop_front() };
 
         if let Some(event) = event {
             match event {
@@ -1266,10 +1181,7 @@ async fn run_interactive_oauth_login_dialog(
                     if cancel_requested.load(Ordering::Relaxed) {
                         let _ = responder.send(Err(String::from("Login cancelled")));
                     } else {
-                        *prompt_responder
-                            .lock()
-                            .expect("oauth login dialog prompt responder mutex poisoned") =
-                            Some(responder);
+                        *prompt_responder.lock() = Some(responder);
                         dialog_handle.with_mut(|dialog| {
                             dialog.show_prompt(message, placeholder.as_deref());
                         });
@@ -1340,15 +1252,11 @@ impl LiveInteractiveTerminal {
 
         state.terminal.start(
             Box::new(move |data| {
-                let mut callback = input_handler
-                    .lock()
-                    .expect("interactive terminal input handler mutex poisoned");
+                let mut callback = input_handler.lock();
                 (callback)(data);
             }),
             Box::new(move || {
-                let mut callback = resize_handler
-                    .lock()
-                    .expect("interactive terminal resize handler mutex poisoned");
+                let mut callback = resize_handler.lock();
                 (callback)();
             }),
         )?;
@@ -1357,10 +1265,7 @@ impl LiveInteractiveTerminal {
     }
 
     fn suspend_for_external_editor(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("live interactive terminal mutex poisoned");
+        let mut state = self.state.lock();
         if !state.started {
             return;
         }
@@ -1372,10 +1277,7 @@ impl LiveInteractiveTerminal {
     }
 
     fn resume_after_external_editor(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("live interactive terminal mutex poisoned");
+        let mut state = self.state.lock();
         if state.started {
             return;
         }
@@ -1392,20 +1294,14 @@ impl Terminal for LiveInteractiveTerminal {
         on_input: Box<dyn FnMut(String) + Send>,
         on_resize: Box<dyn FnMut() + Send>,
     ) -> Result<(), TuiError> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("live interactive terminal mutex poisoned");
+        let mut state = self.state.lock();
         state.input_handler = Some(Arc::new(Mutex::new(on_input)));
         state.resize_handler = Some(Arc::new(Mutex::new(on_resize)));
         Self::start_inner(&mut state)
     }
 
     fn stop(&mut self) -> Result<(), TuiError> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("live interactive terminal mutex poisoned");
+        let mut state = self.state.lock();
         if !state.started {
             return Ok(());
         }
@@ -1416,99 +1312,51 @@ impl Terminal for LiveInteractiveTerminal {
     }
 
     fn drain_input(&mut self, max: Duration, idle: Duration) -> Result<(), TuiError> {
-        self.state
-            .lock()
-            .expect("live interactive terminal mutex poisoned")
-            .terminal
-            .drain_input(max, idle)
+        self.state.lock().terminal.drain_input(max, idle)
     }
 
     fn write(&mut self, data: &str) -> Result<(), TuiError> {
-        self.state
-            .lock()
-            .expect("live interactive terminal mutex poisoned")
-            .terminal
-            .write(data)
+        self.state.lock().terminal.write(data)
     }
 
     fn columns(&self) -> u16 {
-        self.state
-            .lock()
-            .expect("live interactive terminal mutex poisoned")
-            .terminal
-            .columns()
+        self.state.lock().terminal.columns()
     }
 
     fn rows(&self) -> u16 {
-        self.state
-            .lock()
-            .expect("live interactive terminal mutex poisoned")
-            .terminal
-            .rows()
+        self.state.lock().terminal.rows()
     }
 
     fn kitty_protocol_active(&self) -> bool {
-        self.state
-            .lock()
-            .expect("live interactive terminal mutex poisoned")
-            .terminal
-            .kitty_protocol_active()
+        self.state.lock().terminal.kitty_protocol_active()
     }
 
     fn move_by(&mut self, lines: i32) -> Result<(), TuiError> {
-        self.state
-            .lock()
-            .expect("live interactive terminal mutex poisoned")
-            .terminal
-            .move_by(lines)
+        self.state.lock().terminal.move_by(lines)
     }
 
     fn hide_cursor(&mut self) -> Result<(), TuiError> {
-        self.state
-            .lock()
-            .expect("live interactive terminal mutex poisoned")
-            .terminal
-            .hide_cursor()
+        self.state.lock().terminal.hide_cursor()
     }
 
     fn show_cursor(&mut self) -> Result<(), TuiError> {
-        self.state
-            .lock()
-            .expect("live interactive terminal mutex poisoned")
-            .terminal
-            .show_cursor()
+        self.state.lock().terminal.show_cursor()
     }
 
     fn clear_line(&mut self) -> Result<(), TuiError> {
-        self.state
-            .lock()
-            .expect("live interactive terminal mutex poisoned")
-            .terminal
-            .clear_line()
+        self.state.lock().terminal.clear_line()
     }
 
     fn clear_from_cursor(&mut self) -> Result<(), TuiError> {
-        self.state
-            .lock()
-            .expect("live interactive terminal mutex poisoned")
-            .terminal
-            .clear_from_cursor()
+        self.state.lock().terminal.clear_from_cursor()
     }
 
     fn clear_screen(&mut self) -> Result<(), TuiError> {
-        self.state
-            .lock()
-            .expect("live interactive terminal mutex poisoned")
-            .terminal
-            .clear_screen()
+        self.state.lock().terminal.clear_screen()
     }
 
     fn set_title(&mut self, title: &str) -> Result<(), TuiError> {
-        self.state
-            .lock()
-            .expect("live interactive terminal mutex poisoned")
-            .terminal
-            .set_title(title)
+        self.state.lock().terminal.set_title(title)
     }
 }
 
@@ -1554,14 +1402,14 @@ pub async fn run_rpc_command(options: RunCommandOptions) -> i32 {
     let stdout_emitter: TextEmitter = Arc::new(move |text| {
         use std::io::Write as _;
 
-        let mut stdout = stdout.lock().expect("rpc stdout mutex poisoned");
+        let mut stdout = stdout.lock();
         let _ = stdout.write_all(text.as_bytes());
         let _ = stdout.flush();
     });
     let stderr_emitter: TextEmitter = Arc::new(move |text| {
         use std::io::Write as _;
 
-        let mut stderr = stderr.lock().expect("rpc stderr mutex poisoned");
+        let mut stderr = stderr.lock();
         let _ = stderr.write_all(text.as_bytes());
         let _ = stderr.flush();
     });
@@ -2380,9 +2228,7 @@ async fn run_interactive_iteration(
             };
             install_extension_host_app_request_handler(shared, &host);
 
-            *extension_host_holder
-                .lock()
-                .expect("interactive extension host mutex poisoned") = Some(host.clone());
+            *extension_host_holder.lock() = Some(host.clone());
             let host_for_events = host.clone();
             interactive_extension_event_unsubscribe = Some(_session.subscribe(move |event| {
                 let event_json = rpc_session_event_to_json(&event);
@@ -2486,11 +2332,7 @@ async fn run_interactive_iteration(
 
     let mut exit_code = 0;
     while !exit_requested.load(Ordering::Relaxed) {
-        if let Some(title) = pending_terminal_title
-            .lock()
-            .expect("interactive terminal title mutex poisoned")
-            .take()
-        {
+        if let Some(title) = pending_terminal_title.lock().take() {
             let _ = tui.terminal_mut().set_title(&title);
         }
         if let Err(error) = tui.drain_terminal_events() {
@@ -2509,10 +2351,7 @@ async fn run_interactive_iteration(
     if let Some(extension_host) = interactive_extension_host {
         let _ = extension_host.shutdown().await;
     }
-    let transition = transition_request
-        .lock()
-        .expect("interactive transition request mutex poisoned")
-        .take();
+    let transition = transition_request.lock().take();
     let final_state = core.state();
     let available_models = core.model_registry().get_available();
     let _ = tui
@@ -2598,10 +2437,7 @@ fn build_interactive_session_context(
         let session_dir;
         let cwd;
         {
-            let session_manager = session_support
-                .manager
-                .lock()
-                .expect("session manager mutex poisoned");
+            let session_manager = session_support.manager.lock();
             session_file = session_manager.get_session_file().map(str::to_owned);
             session_dir = (!session_manager.get_session_dir().is_empty())
                 .then(|| session_manager.get_session_dir().to_owned());
@@ -2610,7 +2446,7 @@ fn build_interactive_session_context(
 
         let manager = Arc::try_unwrap(session_support.manager)
             .ok()
-            .and_then(|manager| manager.into_inner().ok())
+            .map(|manager| manager.into_inner())
             .or_else(|| {
                 session_file
                     .is_none()
@@ -2664,10 +2500,7 @@ fn session_manager_from_support(session_support: SessionSupport) -> Result<Sessi
     let session_dir;
     let cwd;
     {
-        let session_manager = session_support
-            .manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let session_manager = session_support.manager.lock();
         session_file = session_manager.get_session_file().map(str::to_owned);
         session_dir = (!session_manager.get_session_dir().is_empty())
             .then(|| session_manager.get_session_dir().to_owned());
@@ -2676,7 +2509,7 @@ fn session_manager_from_support(session_support: SessionSupport) -> Result<Sessi
 
     if let Some(session_manager) = Arc::try_unwrap(session_support.manager)
         .ok()
-        .and_then(|session_manager| session_manager.into_inner().ok())
+        .map(|session_manager| session_manager.into_inner())
     {
         return Ok(session_manager);
     }
@@ -2827,21 +2660,13 @@ async fn create_interactive_session_for_transition(
     let existing_session = session_manager
         .as_ref()
         .map(|session_manager| {
-            let session_manager = session_manager
-                .lock()
-                .expect("interactive transition session manager mutex poisoned");
+            let session_manager = session_manager.lock();
             existing_session_selection_from_manager(&session_manager)
         })
         .unwrap_or_default();
     let mut stream_options = environment.stream_options.clone();
     if let Some(session_manager) = session_manager.as_ref() {
-        stream_options.session_id = Some(
-            session_manager
-                .lock()
-                .expect("interactive transition session manager mutex poisoned")
-                .get_session_id()
-                .to_owned(),
-        );
+        stream_options.session_id = Some(session_manager.lock().get_session_id().to_owned());
     }
     apply_runtime_transport_preference(&mut stream_options, &environment.parsed, &runtime_settings);
 
@@ -2946,10 +2771,9 @@ fn take_interactive_transition_runtime_manager(
             .ok_or_else(|| String::from("Session data unavailable"))?
     };
     drop(runtime);
-    Arc::try_unwrap(session_manager)
+    Ok(Arc::try_unwrap(session_manager)
         .map_err(|_| String::from("Failed to recover transition session manager"))?
-        .into_inner()
-        .map_err(|_| String::from("Transition session manager mutex poisoned"))
+        .into_inner())
 }
 
 async fn resolve_interactive_transition_with_environment(
@@ -4823,9 +4647,7 @@ async fn select_settings(
     {
         let selection = Arc::clone(&selection);
         picker.set_on_change(move |change| {
-            let mut selection = selection
-                .lock()
-                .expect("settings picker selection mutex poisoned");
+            let mut selection = selection.lock();
             match change {
                 SettingsChange::AutoCompact(value) => selection.auto_compact = value,
                 SettingsChange::ShowImages(value) => selection.show_images = value,
@@ -4862,15 +4684,7 @@ async fn select_settings(
         let outcome = Arc::clone(&outcome);
         let selection = Arc::clone(&selection);
         picker.set_on_cancel(move || {
-            *outcome
-                .lock()
-                .expect("settings picker outcome mutex poisoned") =
-                Some(SettingsPickerOutcome::Closed(
-                    selection
-                        .lock()
-                        .expect("settings picker selection mutex poisoned")
-                        .clone(),
-                ));
+            *outcome.lock() = Some(SettingsPickerOutcome::Closed(selection.lock().clone()));
         });
     }
 
@@ -4879,11 +4693,7 @@ async fn select_settings(
     tui.start().map_err(|error| error.to_string())?;
 
     loop {
-        if let Some(SettingsPickerOutcome::Closed(selection)) = outcome
-            .lock()
-            .expect("settings picker outcome mutex poisoned")
-            .take()
-        {
+        if let Some(SettingsPickerOutcome::Closed(selection)) = outcome.lock().take() {
             tui.clear();
             return Ok(selection);
         }
@@ -5445,10 +5255,7 @@ async fn select_scoped_models(
 
     let outcome_for_close = Arc::clone(&outcome);
     picker.set_on_close(move |selection| {
-        *outcome_for_close
-            .lock()
-            .expect("scoped models picker outcome mutex poisoned") =
-            Some(ScopedModelsPickerOutcome::Closed(selection));
+        *outcome_for_close.lock() = Some(ScopedModelsPickerOutcome::Closed(selection));
     });
 
     let picker_id = tui.add_child(Box::new(picker));
@@ -5456,11 +5263,7 @@ async fn select_scoped_models(
     tui.start().map_err(|error| error.to_string())?;
 
     loop {
-        if let Some(ScopedModelsPickerOutcome::Closed(selection)) = outcome
-            .lock()
-            .expect("scoped models picker outcome mutex poisoned")
-            .take()
-        {
+        if let Some(ScopedModelsPickerOutcome::Closed(selection)) = outcome.lock().take() {
             tui.clear();
             return Ok(selection);
         }
@@ -6100,7 +5903,7 @@ impl RpcShared {
     }
 
     fn snapshot(&self) -> RpcSnapshot {
-        let state = self.state.lock().expect("rpc state mutex poisoned");
+        let state = self.state.lock();
         RpcSnapshot {
             session: state.session.clone(),
             core: state.core.clone(),
@@ -6120,19 +5923,11 @@ impl RpcShared {
     }
 
     fn current_session(&self) -> AgentSession {
-        self.state
-            .lock()
-            .expect("rpc state mutex poisoned")
-            .session
-            .clone()
+        self.state.lock().session.clone()
     }
 
     fn current_core(&self) -> CodingAgentCore {
-        self.state
-            .lock()
-            .expect("rpc state mutex poisoned")
-            .core
-            .clone()
+        self.state.lock().core.clone()
     }
 
     async fn swap_state_without_shutdown(&self, mut next: RpcState) {
@@ -6142,7 +5937,7 @@ impl RpcShared {
         let next_extension_host = next.extension_host.clone();
 
         {
-            let mut state = self.state.lock().expect("rpc state mutex poisoned");
+            let mut state = self.state.lock();
             if let Some(unsubscribe) = state.event_unsubscribe.take() {
                 let _ = unsubscribe();
             }
@@ -6177,24 +5972,13 @@ impl RpcShared {
         let snapshot = self.snapshot();
         snapshot.core.abort();
         snapshot.session.abort_bash();
-        if let Some(bash_abort_tx) = self
-            .state
-            .lock()
-            .expect("rpc state mutex poisoned")
-            .bash_abort_tx
-            .clone()
-        {
+        if let Some(bash_abort_tx) = self.state.lock().bash_abort_tx.clone() {
             let _ = bash_abort_tx.send(true);
         }
     }
 
     async fn shutdown_extension_host(&self) {
-        let extension_host = self
-            .state
-            .lock()
-            .expect("rpc state mutex poisoned")
-            .extension_host
-            .clone();
+        let extension_host = self.state.lock().extension_host.clone();
         if let Some(extension_host) = extension_host {
             let _ = extension_host.shutdown().await;
         }
@@ -6312,19 +6096,13 @@ async fn run_rpc_command_buffered(
     let stdout_emitter: TextEmitter = Arc::new({
         let stdout = stdout.clone();
         move |text| {
-            stdout
-                .lock()
-                .expect("rpc stdout buffer mutex poisoned")
-                .push_str(&text);
+            stdout.lock().push_str(&text);
         }
     });
     let stderr_emitter: TextEmitter = Arc::new({
         let stderr = stderr.clone();
         move |text| {
-            stderr
-                .lock()
-                .expect("rpc stderr buffer mutex poisoned")
-                .push_str(&text);
+            stderr.lock().push_str(&text);
         }
     });
 
@@ -6339,14 +6117,8 @@ async fn run_rpc_command_buffered(
 
     RunCommandResult {
         exit_code,
-        stdout: stdout
-            .lock()
-            .expect("rpc stdout buffer mutex poisoned")
-            .clone(),
-        stderr: stderr
-            .lock()
-            .expect("rpc stderr buffer mutex poisoned")
-            .clone(),
+        stdout: stdout.lock().clone(),
+        stderr: stderr.lock().clone(),
     }
 }
 
@@ -6493,19 +6265,13 @@ async fn run_extension_aware_print_command(
     let stdout_emitter: TextEmitter = Arc::new({
         let stdout = stdout.clone();
         move |text| {
-            stdout
-                .lock()
-                .expect("print stdout buffer mutex poisoned")
-                .push_str(&text);
+            stdout.lock().push_str(&text);
         }
     });
     let stderr_emitter: TextEmitter = Arc::new({
         let stderr = stderr.clone();
         move |text| {
-            stderr
-                .lock()
-                .expect("print stderr buffer mutex poisoned")
-                .push_str(&text);
+            stderr.lock().push_str(&text);
         }
     });
 
@@ -6531,14 +6297,8 @@ async fn run_extension_aware_print_command(
             }
             return RunCommandResult {
                 exit_code: 1,
-                stdout: stdout
-                    .lock()
-                    .expect("print stdout buffer mutex poisoned")
-                    .clone(),
-                stderr: stderr
-                    .lock()
-                    .expect("print stderr buffer mutex poisoned")
-                    .clone(),
+                stdout: stdout.lock().clone(),
+                stderr: stderr.lock().clone(),
             };
         }
     };
@@ -6563,11 +6323,7 @@ async fn run_extension_aware_print_command(
     if print_mode == crate::PrintOutputMode::Json
         && let Some(session_manager) = shared.snapshot().session_manager
     {
-        let header = session_manager
-            .lock()
-            .expect("print session manager mutex poisoned")
-            .get_header()
-            .clone();
+        let header = session_manager.lock().get_header().clone();
         shared.emit_stdout(format!(
             "{}\n",
             serde_json::to_string(&json!({
@@ -6644,14 +6400,8 @@ async fn run_extension_aware_print_command(
 
     shared.shutdown_extension_host().await;
 
-    let mut stdout = stdout
-        .lock()
-        .expect("print stdout buffer mutex poisoned")
-        .clone();
-    let mut stderr = stderr
-        .lock()
-        .expect("print stderr buffer mutex poisoned")
-        .clone();
+    let mut stdout = stdout.lock().clone();
+    let mut stderr = stderr.lock().clone();
     stdout.push_str(&trailing_stdout);
     stderr.push_str(&trailing_stderr);
 
@@ -6821,21 +6571,13 @@ async fn create_rpc_session_for_runtime(
     let existing_session = session_manager
         .as_ref()
         .map(|session_manager| {
-            let session_manager = session_manager
-                .lock()
-                .expect("rpc session manager mutex poisoned");
+            let session_manager = session_manager.lock();
             existing_session_selection_from_manager(&session_manager)
         })
         .unwrap_or_default();
     let mut stream_options = options.stream_options.clone();
     if let Some(session_manager) = session_manager.as_ref() {
-        stream_options.session_id = Some(
-            session_manager
-                .lock()
-                .expect("rpc session manager mutex poisoned")
-                .get_session_id()
-                .to_owned(),
-        );
+        stream_options.session_id = Some(session_manager.lock().get_session_id().to_owned());
     }
     apply_runtime_transport_preference(&mut stream_options, &options.parsed, &runtime_settings);
 
@@ -7235,11 +6977,7 @@ async fn build_rpc_state(
             core.agent().set_before_tool_call(move |context, _signal| {
                 let before_tool_call_host = before_tool_call_host.clone();
                 async move {
-                    let input = context
-                        .args
-                        .lock()
-                        .expect("rpc before_tool_call args mutex poisoned")
-                        .clone();
+                    let input = context.args.lock().clone();
                     match before_tool_call_host
                         .tool_call(&context.tool_name, &context.tool_call_id, input)
                         .await
@@ -7869,7 +7607,7 @@ async fn handle_rpc_input_line(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             let settings = {
-                let mut state = shared.state.lock().expect("rpc state mutex poisoned");
+                let mut state = shared.state.lock();
                 state.auto_compaction_enabled = enabled;
                 state.runtime_settings.settings.compaction.enabled = enabled;
                 runtime_compaction_settings(&state.runtime_settings)
@@ -7883,7 +7621,7 @@ async fn handle_rpc_input_line(
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
             let session = {
-                let state = shared.state.lock().expect("rpc state mutex poisoned");
+                let state = shared.state.lock();
                 state.session.clone()
             };
             let mut retry_settings = session.retry_settings();
@@ -8084,9 +7822,7 @@ async fn handle_rpc_input_line(
                 .session_manager
                 .as_ref()
                 .map(|session_manager| {
-                    let session_manager = session_manager
-                        .lock()
-                        .expect("rpc session manager mutex poisoned");
+                    let session_manager = session_manager.lock();
                     collect_fork_candidates(&session_manager)
                         .into_iter()
                         .map(|candidate| {
@@ -8219,12 +7955,7 @@ async fn handle_extension_host_app_request(
             let (width, height) = snapshot
                 .interactive_ui
                 .as_ref()
-                .map(|interactive_ui| {
-                    *interactive_ui
-                        .viewport_size
-                        .lock()
-                        .expect("interactive viewport mutex poisoned")
-                })
+                .map(|interactive_ui| *interactive_ui.viewport_size.lock())
                 .unwrap_or((80, 24));
             Ok(json!({ "width": width, "height": height }))
         }
@@ -8713,7 +8444,6 @@ fn execute_extension_append_entry(
     };
     session_manager
         .lock()
-        .expect("rpc session manager mutex poisoned")
         .append_custom_entry(custom_type, data)
         .map_err(|error| error.to_string())?;
     Ok(())
@@ -8774,7 +8504,6 @@ async fn execute_extension_send_message(
     if let Some(session_manager) = snapshot.session_manager.as_ref() {
         session_manager
             .lock()
-            .expect("rpc session manager mutex poisoned")
             .append_custom_message_entry(
                 message.custom_type.clone(),
                 message.content.clone(),
@@ -9107,9 +8836,7 @@ async fn run_extension_aware_compaction(
     };
 
     let path_entries = {
-        let session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let session_manager = session_manager.lock();
         let leaf_id = session_manager.get_leaf_id().map(str::to_owned);
         session_manager.get_branch(leaf_id.as_deref())
     };
@@ -9156,9 +8883,7 @@ async fn run_extension_aware_compaction(
     };
 
     let (saved_entry, next_messages) = {
-        let mut session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let mut session_manager = session_manager.lock();
         let entry_id = session_manager
             .append_compaction(
                 result.summary.clone(),
@@ -9231,9 +8956,7 @@ async fn navigate_tree_with_extension_hooks(
     };
 
     let preparation = {
-        let session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let session_manager = session_manager.lock();
         prepare_tree_navigation(&session_manager, target_id).map_err(|error| error.to_string())?
     };
 
@@ -9316,9 +9039,7 @@ async fn navigate_tree_with_extension_hooks(
     }
 
     let (navigation, summary_entry, session_context) = {
-        let mut session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let mut session_manager = session_manager.lock();
         let navigation = apply_tree_navigation(
             &mut session_manager,
             &preparation,
@@ -9713,7 +9434,7 @@ fn refresh_rpc_extension_tools(
     });
 
     {
-        let mut state = shared.state.lock().expect("rpc state mutex poisoned");
+        let mut state = shared.state.lock();
         state.all_tools = all_tools.clone();
         state.tool_source_info = tool_source_info.clone();
         state.tool_metadata = tool_metadata;
@@ -9775,13 +9496,8 @@ async fn sync_rpc_extension_state(shared: &RpcShared) {
 fn current_rpc_session_file(
     session_manager: Option<&Arc<Mutex<SessionManager>>>,
 ) -> Option<String> {
-    session_manager.and_then(|session_manager| {
-        session_manager
-            .lock()
-            .expect("rpc session manager mutex poisoned")
-            .get_session_file()
-            .map(str::to_owned)
-    })
+    session_manager
+        .and_then(|session_manager| session_manager.lock().get_session_file().map(str::to_owned))
 }
 
 fn unknown_flags_to_json(flags: &BTreeMap<String, crate::UnknownFlagValue>) -> Value {
@@ -9962,14 +9678,12 @@ fn rpc_session_state_json(snapshot: &RpcSnapshot) -> Value {
         "sessionFile": snapshot.session_manager.as_ref().and_then(|session_manager| {
             session_manager
                 .lock()
-                .expect("rpc session manager mutex poisoned")
                 .get_session_file()
                 .map(str::to_owned)
         }),
         "sessionId": snapshot.session_manager.as_ref().map(|session_manager| {
             session_manager
                 .lock()
-                .expect("rpc session manager mutex poisoned")
                 .get_session_id()
                 .to_owned()
         }).or_else(|| snapshot.core.agent().session_id()).unwrap_or_else(|| String::from("In-memory")),
@@ -10478,9 +10192,7 @@ async fn run_interactive_compaction(
     };
 
     let path_entries = {
-        let session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let session_manager = session_manager.lock();
         let leaf_id = session_manager.get_leaf_id().map(str::to_owned);
         session_manager.get_branch(leaf_id.as_deref())
     };
@@ -10499,9 +10211,7 @@ async fn run_interactive_compaction(
     .await?;
 
     let session_context = {
-        let mut session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let mut session_manager = session_manager.lock();
         session_manager
             .append_compaction(
                 result.summary.clone(),
@@ -10695,10 +10405,7 @@ fn install_interactive_auto_compaction(
                     }
 
                     let settings = {
-                        let runtime_settings = runtime_settings
-                            .lock()
-                            .expect("interactive runtime settings mutex poisoned")
-                            .clone();
+                        let runtime_settings = runtime_settings.lock().clone();
                         runtime_compaction_settings(&runtime_settings)
                     };
 
@@ -10921,17 +10628,12 @@ async fn select_fork_message(
 
     let outcome_for_select = Arc::clone(&outcome);
     picker.set_on_select(move |entry_id| {
-        *outcome_for_select
-            .lock()
-            .expect("fork picker outcome mutex poisoned") =
-            Some(ForkPickerOutcome::Selected(entry_id));
+        *outcome_for_select.lock() = Some(ForkPickerOutcome::Selected(entry_id));
     });
 
     let outcome_for_cancel = Arc::clone(&outcome);
     picker.set_on_cancel(move || {
-        *outcome_for_cancel
-            .lock()
-            .expect("fork picker outcome mutex poisoned") = Some(ForkPickerOutcome::Cancelled);
+        *outcome_for_cancel.lock() = Some(ForkPickerOutcome::Cancelled);
     });
 
     let picker_id = tui.add_child(Box::new(picker));
@@ -10939,11 +10641,7 @@ async fn select_fork_message(
     tui.start().map_err(|error| error.to_string())?;
 
     loop {
-        if let Some(outcome) = outcome
-            .lock()
-            .expect("fork picker outcome mutex poisoned")
-            .take()
-        {
+        if let Some(outcome) = outcome.lock().take() {
             tui.clear();
             return Ok(match outcome {
                 ForkPickerOutcome::Selected(entry_id) => Some(entry_id),
@@ -10977,9 +10675,7 @@ fn request_interactive_transition(
             status_handle.set_message("No messages to fork from");
             return true;
         };
-        let session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let session_manager = session_manager.lock();
         if collect_fork_candidates(&session_manager).is_empty() {
             status_handle.set_message("No messages to fork from");
             return true;
@@ -10991,18 +10687,14 @@ fn request_interactive_transition(
             status_handle.set_message("Session tree is not available in this interactive mode.");
             return true;
         };
-        let session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let session_manager = session_manager.lock();
         if session_manager.get_entries().is_empty() {
             status_handle.set_message("No entries in session");
             return true;
         }
     }
 
-    *transition_request
-        .lock()
-        .expect("interactive transition request mutex poisoned") = Some(transition);
+    *transition_request.lock() = Some(transition);
     exit_requested.store(true, Ordering::Relaxed);
     true
 }
@@ -11021,12 +10713,7 @@ fn append_transcript_custom_message(
 }
 
 fn current_session_name(session_manager: Option<&Arc<Mutex<SessionManager>>>) -> Option<String> {
-    session_manager.and_then(|session_manager| {
-        session_manager
-            .lock()
-            .expect("session manager mutex poisoned")
-            .get_session_name()
-    })
+    session_manager.and_then(|session_manager| session_manager.lock().get_session_name())
 }
 
 fn render_session_info_text(
@@ -11066,21 +10753,10 @@ fn render_session_info_text(
         }
     }
 
-    let session_file = session_manager.and_then(|session_manager| {
-        session_manager
-            .lock()
-            .expect("session manager mutex poisoned")
-            .get_session_file()
-            .map(str::to_owned)
-    });
+    let session_file = session_manager
+        .and_then(|session_manager| session_manager.lock().get_session_file().map(str::to_owned));
     let session_id = session_manager
-        .map(|session_manager| {
-            session_manager
-                .lock()
-                .expect("session manager mutex poisoned")
-                .get_session_id()
-                .to_owned()
-        })
+        .map(|session_manager| session_manager.lock().get_session_id().to_owned())
         .or_else(|| core.agent().session_id())
         .unwrap_or_else(|| String::from("In-memory"));
 
@@ -11131,11 +10807,7 @@ fn render_session_info_text(
 }
 
 fn current_runtime_settings(context: &InteractiveSlashCommandContext) -> LoadedRuntimeSettings {
-    context
-        .runtime_settings
-        .lock()
-        .expect("interactive runtime settings mutex poisoned")
-        .clone()
+    context.runtime_settings.lock().clone()
 }
 
 fn keybindings_json(keybindings: &KeybindingsManager) -> Value {
@@ -11184,10 +10856,7 @@ fn spawn_interactive_extension_ui_response(
     extension_host_holder: &Arc<Mutex<Option<RpcExtensionHost>>>,
     response: Value,
 ) {
-    let extension_host = extension_host_holder
-        .lock()
-        .expect("interactive extension host mutex poisoned")
-        .clone();
+    let extension_host = extension_host_holder.lock().clone();
     if let Some(extension_host) = extension_host {
         tokio::spawn(async move {
             let _ = extension_host.deliver_ui_response(response).await;
@@ -11273,10 +10942,7 @@ fn handle_interactive_extension_output_line(
                 }
                 Some("setTitle") => {
                     if let Some(title) = value.get("title").and_then(Value::as_str) {
-                        *pending_terminal_title
-                            .lock()
-                            .expect("interactive terminal title mutex poisoned") =
-                            Some(title.to_owned());
+                        *pending_terminal_title.lock() = Some(title.to_owned());
                     }
                 }
                 Some("set_editor_text") => {
@@ -11300,10 +10966,7 @@ fn handle_interactive_extension_output_line(
                                 let extension_host_holder = extension_host_holder.clone();
                                 let status_handle = status_handle.clone();
                                 tokio::spawn(async move {
-                                    let extension_host = extension_host_holder
-                                        .lock()
-                                        .expect("interactive extension host mutex poisoned")
-                                        .clone();
+                                    let extension_host = extension_host_holder.lock().clone();
                                     let Some(extension_host) = extension_host else {
                                         return;
                                     };
@@ -11661,10 +11324,7 @@ fn write_interactive_debug_log(
     slash_command_context: &InteractiveSlashCommandContext,
 ) -> Result<PathBuf, String> {
     let (width, height) = {
-        let viewport_size = slash_command_context
-            .viewport_size
-            .lock()
-            .expect("interactive viewport mutex poisoned");
+        let viewport_size = slash_command_context.viewport_size.lock();
         *viewport_size
     };
     let width = width.max(1);
@@ -11961,9 +11621,7 @@ fn switch_interactive_tree_branch(
 ) -> Result<InteractiveTreeSwitchResult, String> {
     let target_id = (!branch_ref.eq_ignore_ascii_case("root")).then_some(branch_ref);
     let is_noop = {
-        let session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let session_manager = session_manager.lock();
         match (target_id, session_manager.get_leaf_id()) {
             (None, None) => true,
             (Some(target_id), Some(leaf_id)) => target_id == leaf_id,
@@ -11978,9 +11636,7 @@ fn switch_interactive_tree_branch(
     }
 
     let (session_context, leaf_id, editor_text) = {
-        let mut session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let mut session_manager = session_manager.lock();
         let preparation = prepare_tree_navigation(&session_manager, target_id)
             .map_err(|error| error.to_string())?;
         let navigation = apply_tree_navigation(&mut session_manager, &preparation, None, None)
@@ -12020,9 +11676,7 @@ async fn switch_interactive_tree_branch_with_options(
         let Some(session_manager) = session.session_manager() else {
             return Err(String::from("Session tree navigation is unavailable"));
         };
-        let session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let session_manager = session_manager.lock();
         match (target_id, session_manager.get_leaf_id()) {
             (None, None) => true,
             (Some(target_id), Some(leaf_id)) => target_id == leaf_id,
@@ -12147,9 +11801,7 @@ fn export_interactive_session(
     cwd: &Path,
     output_path: Option<&str>,
 ) -> Result<String, String> {
-    let session_manager = session_manager
-        .lock()
-        .expect("session manager mutex poisoned");
+    let session_manager = session_manager.lock();
     let (output_path, format) = resolve_export_target(cwd, &session_manager, output_path);
     match format {
         ExportFormat::Html => export_html::export_session_to_html(&session_manager, &output_path),
@@ -12227,9 +11879,7 @@ fn share_interactive_session_with(
     ensure_github_cli_ready_with(&mut run_gh)?;
 
     let temp_file = {
-        let session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let session_manager = session_manager.lock();
         env::temp_dir().join(export_html::default_html_file_name(&session_manager))
     };
 
@@ -12724,7 +12374,6 @@ fn install_interactive_submit_handler(
 
         toggle_thinking_runtime_settings
             .lock()
-            .expect("interactive runtime settings mutex poisoned")
             .settings
             .hide_thinking_block = hide;
         shell.set_hide_thinking_blocks(hide);
@@ -13162,11 +12811,7 @@ fn handle_interactive_slash_command(
             return true;
         };
 
-        match session_manager
-            .lock()
-            .expect("session manager mutex poisoned")
-            .append_session_info(name)
-        {
+        match session_manager.lock().append_session_info(name) {
             Ok(_) => {
                 footer_state_handle.update(|footer_state| {
                     footer_state.session_name = Some(name.to_owned());
@@ -13565,9 +13210,7 @@ fn apply_interactive_model_state(
     );
 
     if let Some(session_manager) = session_manager {
-        let mut session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let mut session_manager = session_manager.lock();
         if !models_are_equal(Some(model), Some(&state.model)) {
             session_manager
                 .append_model_change(model.provider.clone(), model.id.clone())
@@ -13792,7 +13435,7 @@ mod tests {
         fs, io,
         path::{Path, PathBuf},
         sync::{
-            Arc, Mutex, OnceLock,
+            Arc, OnceLock,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         thread,
@@ -13818,7 +13461,7 @@ mod tests {
             context: pi_events::Context,
             _options: StreamOptions,
         ) -> AssistantEventStream {
-            *self.recorded.lock().unwrap() = RecordedInteractiveRequest {
+            *self.recorded.lock() = RecordedInteractiveRequest {
                 context: Some(context),
             };
 
@@ -13986,9 +13629,9 @@ mod tests {
         }
     }
 
-    fn oauth_registry_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    fn oauth_registry_lock() -> &'static TokioMutex<()> {
+        static LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| TokioMutex::new(()))
     }
 
     fn test_interactive_transition_environment(
@@ -14230,15 +13873,9 @@ mod tests {
                     thread::sleep(delay);
                     loop {
                         if script_state.active.load(Ordering::Relaxed) {
-                            let handler = script_state
-                                .input_handler
-                                .lock()
-                                .expect("scripted terminal input handler mutex poisoned")
-                                .clone();
+                            let handler = script_state.input_handler.lock().clone();
                             if let Some(handler) = handler {
-                                let mut callback = handler
-                                    .lock()
-                                    .expect("scripted terminal input callback mutex poisoned");
+                                let mut callback = handler.lock();
                                 (callback)(data.clone());
                                 break;
                             }
@@ -14252,11 +13889,7 @@ mod tests {
         }
 
         fn output(&self) -> String {
-            self.state
-                .writes
-                .lock()
-                .expect("scripted terminal writes mutex poisoned")
-                .join("")
+            self.state.writes.lock().join("")
         }
 
         fn start_count(&self) -> usize {
@@ -14268,11 +13901,7 @@ mod tests {
         }
 
         fn titles(&self) -> Vec<String> {
-            self.state
-                .titles
-                .lock()
-                .expect("scripted terminal titles mutex poisoned")
-                .clone()
+            self.state.titles.lock().clone()
         }
     }
 
@@ -14282,18 +13911,8 @@ mod tests {
             on_input: Box<dyn FnMut(String) + Send>,
             on_resize: Box<dyn FnMut() + Send>,
         ) -> Result<(), TuiError> {
-            *self
-                .state
-                .input_handler
-                .lock()
-                .expect("scripted terminal input handler mutex poisoned") =
-                Some(Arc::new(Mutex::new(on_input)));
-            *self
-                .state
-                .resize_handler
-                .lock()
-                .expect("scripted terminal resize handler mutex poisoned") =
-                Some(Arc::new(Mutex::new(on_resize)));
+            *self.state.input_handler.lock() = Some(Arc::new(Mutex::new(on_input)));
+            *self.state.resize_handler.lock() = Some(Arc::new(Mutex::new(on_resize)));
             self.state.active.store(true, Ordering::Relaxed);
             self.state.start_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
@@ -14310,11 +13929,7 @@ mod tests {
         }
 
         fn write(&mut self, data: &str) -> Result<(), TuiError> {
-            self.state
-                .writes
-                .lock()
-                .expect("scripted terminal writes mutex poisoned")
-                .push(data.to_owned());
+            self.state.writes.lock().push(data.to_owned());
             Ok(())
         }
 
@@ -14355,11 +13970,7 @@ mod tests {
         }
 
         fn set_title(&mut self, title: &str) -> Result<(), TuiError> {
-            self.state
-                .titles
-                .lock()
-                .expect("scripted terminal titles mutex poisoned")
-                .push(title.to_owned());
+            self.state.titles.lock().push(title.to_owned());
             Ok(())
         }
     }
@@ -14637,7 +14248,7 @@ mod tests {
         assert_eq!(exit_code, 0, "output: {output}");
         assert!(output.contains("hooked response"), "output: {output}");
 
-        let request = recorded.lock().unwrap().clone();
+        let request = recorded.lock().clone();
         let context = request.context.expect("expected recorded context");
         let user_messages = context
             .messages
@@ -15184,19 +14795,13 @@ export default function (pi) {
         let stdout_emitter: TextEmitter = Arc::new({
             let stdout = stdout.clone();
             move |text| {
-                stdout
-                    .lock()
-                    .expect("rpc stdout buffer mutex poisoned")
-                    .push_str(&text);
+                stdout.lock().push_str(&text);
             }
         });
         let stderr_emitter: TextEmitter = Arc::new({
             let stderr = stderr.clone();
             move |text| {
-                stderr
-                    .lock()
-                    .expect("rpc stderr buffer mutex poisoned")
-                    .push_str(&text);
+                stderr.lock().push_str(&text);
             }
         });
 
@@ -15228,14 +14833,8 @@ export default function (pi) {
         .await
         .expect("rpc command should complete");
 
-        let stdout = stdout
-            .lock()
-            .expect("rpc stdout buffer mutex poisoned")
-            .clone();
-        let stderr = stderr
-            .lock()
-            .expect("rpc stderr buffer mutex poisoned")
-            .clone();
+        let stdout = stdout.lock().clone();
+        let stderr = stderr.lock().clone();
         assert_eq!(exit_code, 0, "stderr: {stderr}");
         assert_eq!(stdout, "No session selected\n");
         assert!(
@@ -15283,19 +14882,13 @@ export default function (pi) {
         let stdout_emitter: TextEmitter = Arc::new({
             let stdout = stdout.clone();
             move |text| {
-                stdout
-                    .lock()
-                    .expect("rpc stdout buffer mutex poisoned")
-                    .push_str(&text);
+                stdout.lock().push_str(&text);
             }
         });
         let stderr_emitter: TextEmitter = Arc::new({
             let stderr = stderr.clone();
             move |text| {
-                stderr
-                    .lock()
-                    .expect("rpc stderr buffer mutex poisoned")
-                    .push_str(&text);
+                stderr.lock().push_str(&text);
             }
         });
 
@@ -15341,10 +14934,7 @@ export default function (pi) {
 
         let request_id = timeout(Duration::from_secs(2), async {
             loop {
-                let stdout = stdout
-                    .lock()
-                    .expect("rpc stdout buffer mutex poisoned")
-                    .clone();
+                let stdout = stdout.lock().clone();
                 let lines = stdout
                     .lines()
                     .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -15381,21 +14971,13 @@ export default function (pi) {
         }
         sleep(Duration::from_millis(50)).await;
 
-        let stdout = stdout
-            .lock()
-            .expect("rpc stdout buffer mutex poisoned")
-            .clone();
+        let stdout = stdout.lock().clone();
         assert!(stdout.contains("Enter a value"), "stdout: {stdout}");
         assert!(
             stdout.contains("You entered: hello from host"),
             "stdout: {stdout}"
         );
-        assert!(
-            stderr
-                .lock()
-                .expect("rpc stderr buffer mutex poisoned")
-                .is_empty()
-        );
+        assert!(stderr.lock().is_empty());
 
         shared.shutdown_extension_host().await;
         faux.unregister();
@@ -15455,11 +15037,7 @@ export default function (pi) {
             &transition_request,
         ));
         assert_eq!(
-            session_manager
-                .lock()
-                .expect("session manager mutex poisoned")
-                .get_session_name()
-                .as_deref(),
+            session_manager.lock().get_session_name().as_deref(),
             Some("demo")
         );
 
@@ -15585,10 +15163,7 @@ export default function (pi) {
         ));
         assert!(exit_requested.load(Ordering::Relaxed));
         assert_eq!(
-            transition_request
-                .lock()
-                .expect("interactive transition request mutex poisoned")
-                .clone(),
+            transition_request.lock().clone(),
             Some(InteractiveTransitionRequest::ImportSession {
                 input_path: String::from("imported.jsonl"),
             })
@@ -16045,17 +15620,12 @@ export default function (pi) {
         ));
         assert!(exit_requested.load(Ordering::Relaxed));
         assert_eq!(
-            transition_request
-                .lock()
-                .expect("interactive transition request mutex poisoned")
-                .clone(),
+            transition_request.lock().clone(),
             Some(InteractiveTransitionRequest::SettingsPicker)
         );
 
         exit_requested.store(false, Ordering::Relaxed);
-        *transition_request
-            .lock()
-            .expect("interactive transition request mutex poisoned") = None;
+        *transition_request.lock() = None;
 
         assert!(handle_interactive_slash_command(
             &mut shell,
@@ -16072,10 +15642,7 @@ export default function (pi) {
         ));
         assert!(exit_requested.load(Ordering::Relaxed));
         assert_eq!(
-            transition_request
-                .lock()
-                .expect("interactive transition request mutex poisoned")
-                .clone(),
+            transition_request.lock().clone(),
             Some(InteractiveTransitionRequest::ScopedModelsPicker {
                 initial_search: Some(String::from("beta")),
             })
@@ -16331,10 +15898,7 @@ export default function (pi) {
         ));
         assert!(exit_requested.load(Ordering::Relaxed));
         assert_eq!(
-            transition_request
-                .lock()
-                .expect("interactive transition request mutex poisoned")
-                .clone(),
+            transition_request.lock().clone(),
             Some(InteractiveTransitionRequest::OAuthPicker(
                 OAuthPickerMode::Login,
             ))
@@ -16399,10 +15963,7 @@ export default function (pi) {
         ));
         assert!(exit_requested.load(Ordering::Relaxed));
         assert_eq!(
-            transition_request
-                .lock()
-                .expect("interactive transition request mutex poisoned")
-                .clone(),
+            transition_request.lock().clone(),
             Some(InteractiveTransitionRequest::OAuthLogin {
                 provider_id: String::from("anthropic"),
             })
@@ -16481,10 +16042,7 @@ export default function (pi) {
         ));
         assert!(exit_requested.load(Ordering::Relaxed));
         assert_eq!(
-            transition_request
-                .lock()
-                .expect("interactive transition request mutex poisoned")
-                .clone(),
+            transition_request.lock().clone(),
             Some(InteractiveTransitionRequest::OAuthPicker(
                 OAuthPickerMode::Logout,
             ))
@@ -16576,9 +16134,7 @@ export default function (pi) {
 
     #[tokio::test]
     async fn oauth_login_picker_transition_persists_credentials() {
-        let _guard = oauth_registry_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = oauth_registry_lock().lock().await;
         register_oauth_provider(Arc::new(TestOAuthProvider {
             id: "00-transition-oauth",
             name: "Transition OAuth Provider",
@@ -16649,9 +16205,7 @@ export default function (pi) {
 
     #[tokio::test]
     async fn oauth_login_transition_renders_dialog_and_accepts_manual_redirect_input() {
-        let _guard = oauth_registry_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = oauth_registry_lock().lock().await;
         register_oauth_provider(Arc::new(PromptingOAuthProvider {
             id: "00-prompting-oauth",
             name: "Prompting OAuth Provider",
@@ -16774,9 +16328,7 @@ export default function (pi) {
 
     #[tokio::test]
     async fn oauth_login_transition_returns_without_status_when_cancelled() {
-        let _guard = oauth_registry_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = oauth_registry_lock().lock().await;
         register_oauth_provider(Arc::new(PromptingOAuthProvider {
             id: "00-prompting-cancel-oauth",
             name: "Prompting Cancel OAuth Provider",
@@ -16947,10 +16499,7 @@ export default function (pi) {
         ));
         assert!(exit_requested.load(Ordering::Relaxed));
         assert_eq!(
-            transition_request
-                .lock()
-                .expect("interactive transition request mutex poisoned")
-                .clone(),
+            transition_request.lock().clone(),
             Some(InteractiveTransitionRequest::Reload)
         );
 
@@ -17551,11 +17100,7 @@ export default function (pi) {
         .expect("expected compaction to run");
 
         assert!(result.summary.contains("## Goal"));
-        let entries = session_manager
-            .lock()
-            .expect("session manager mutex poisoned")
-            .get_entries()
-            .to_vec();
+        let entries = session_manager.lock().get_entries().to_vec();
         assert!(
             entries
                 .iter()
@@ -17645,10 +17190,7 @@ export default function (pi) {
 
         assert!(exit_requested.load(Ordering::Relaxed));
         assert_eq!(
-            transition_request
-                .lock()
-                .expect("interactive transition request mutex poisoned")
-                .clone(),
+            transition_request.lock().clone(),
             Some(InteractiveTransitionRequest::TreePicker)
         );
 

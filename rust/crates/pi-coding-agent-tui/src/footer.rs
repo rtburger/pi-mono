@@ -1,12 +1,9 @@
 use crate::current_theme;
+use parking_lot::Mutex;
 use pi_coding_agent_core::{BranchChangeSubscription, FooterDataProvider, FooterDataSnapshot};
 use pi_events::Model;
 use pi_tui::{Component, RenderHandle, truncate_to_width, visible_width};
-use std::{
-    collections::BTreeMap,
-    env,
-    sync::{Arc, Mutex},
-};
+use std::{collections::BTreeMap, env, sync::Arc};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FooterState {
@@ -80,14 +77,14 @@ impl FooterStateHandle {
     }
 
     pub fn set_state(&self, state: FooterState) {
-        *self.state.lock().expect("footer state mutex poisoned") = state;
+        *self.state.lock() = state;
         if let Some(render_handle) = &self.render_handle {
             render_handle.request_render();
         }
     }
 
     pub fn update(&self, updater: impl FnOnce(&mut FooterState)) {
-        updater(&mut self.state.lock().expect("footer state mutex poisoned"));
+        updater(&mut self.state.lock());
         if let Some(render_handle) = &self.render_handle {
             render_handle.request_render();
         }
@@ -122,25 +119,19 @@ impl FooterComponent {
 
     pub fn state(&self) -> FooterState {
         self.sync_pending_snapshot();
-        self.state
-            .lock()
-            .expect("footer state mutex poisoned")
-            .clone()
+        self.state.lock().clone()
     }
 
     pub fn set_state(&self, state: FooterState) {
-        *self.state.lock().expect("footer state mutex poisoned") = state;
+        *self.state.lock() = state;
     }
 
     pub fn clear_state(&self) {
-        *self.state.lock().expect("footer state mutex poisoned") = FooterState::default();
+        *self.state.lock() = FooterState::default();
     }
 
     pub fn apply_data_snapshot(&self, snapshot: &FooterDataSnapshot) {
-        self.state
-            .lock()
-            .expect("footer state mutex poisoned")
-            .apply_data_snapshot(snapshot);
+        self.state.lock().apply_data_snapshot(snapshot);
     }
 
     pub fn bind_data_provider(&self, provider: &FooterDataProvider) {
@@ -156,22 +147,12 @@ impl FooterComponent {
     }
 
     pub fn unbind_data_provider(&self) {
-        self.data_subscription
-            .lock()
-            .expect("footer subscription mutex poisoned")
-            .take();
-        self.pending_snapshot
-            .lock()
-            .expect("footer pending snapshot mutex poisoned")
-            .take();
+        self.data_subscription.lock().take();
+        self.pending_snapshot.lock().take();
     }
 
     fn sync_pending_snapshot(&self) {
-        let snapshot = self
-            .pending_snapshot
-            .lock()
-            .expect("footer pending snapshot mutex poisoned")
-            .take();
+        let snapshot = self.pending_snapshot.lock().take();
         if let Some(snapshot) = snapshot {
             self.apply_data_snapshot(&snapshot);
         }
@@ -188,17 +169,12 @@ impl FooterComponent {
         }
         let pending_snapshot = Arc::clone(&self.pending_snapshot);
         let subscription = provider.on_snapshot_change(move |snapshot| {
-            *pending_snapshot
-                .lock()
-                .expect("footer pending snapshot mutex poisoned") = Some(snapshot);
+            *pending_snapshot.lock() = Some(snapshot);
             if let Some(render_handle) = &render_handle {
                 render_handle.request_render();
             }
         });
-        *self
-            .data_subscription
-            .lock()
-            .expect("footer subscription mutex poisoned") = Some(subscription);
+        *self.data_subscription.lock() = Some(subscription);
     }
 }
 
@@ -211,11 +187,7 @@ impl Default for FooterComponent {
 impl Component for FooterComponent {
     fn render(&self, width: usize) -> Vec<String> {
         self.sync_pending_snapshot();
-        let state = self
-            .state
-            .lock()
-            .expect("footer state mutex poisoned")
-            .clone();
+        let state = self.state.lock().clone();
         let mut lines = Vec::new();
 
         if has_pwd_line(&state) {

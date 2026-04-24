@@ -1,4 +1,5 @@
 use futures::stream;
+use parking_lot::Mutex;
 use pi_ai::{
     AiProvider, AssistantEventStream, StreamOptions, register_provider, unregister_provider,
 };
@@ -12,7 +13,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     thread,
@@ -39,7 +40,7 @@ impl AiProvider for RecordingProvider {
         context: Context,
         _options: StreamOptions,
     ) -> AssistantEventStream {
-        *self.recorded.lock().unwrap() = RecordedRequest {
+        *self.recorded.lock() = RecordedRequest {
             context: Some(context),
         };
 
@@ -239,7 +240,7 @@ async fn interactive_runner_accepts_read_only_tool_selection_flags() {
     .await;
 
     assert_eq!(exit_code, 0);
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     let context = request.context.expect("expected recorded context");
     let tool_names = context
         .tools

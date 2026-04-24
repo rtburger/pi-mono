@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use pi_ai::{StreamOptions, register_faux_provider};
 use pi_coding_agent_core::{
     AgentSessionOptions, AgentSessionRuntimeError, AgentSessionRuntimeRequest,
@@ -10,7 +11,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},

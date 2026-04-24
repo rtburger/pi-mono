@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
+parking_lot.workspace = true
 pi-agent = { path = "../pi-agent" }
 pi-coding-agent-core = { path = "../pi-coding-agent-core" }
 pi-events = { path = "../pi-events" }

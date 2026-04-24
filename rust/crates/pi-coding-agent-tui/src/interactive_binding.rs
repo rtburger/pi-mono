@@ -1,12 +1,13 @@
 use crate::startup_shell::{ShellUpdateHandle, tool_result_from_user_content, user_message_text};
 use crate::{FooterState, StartupShellComponent, StatusHandle};
+use parking_lot::Mutex;
 use pi_agent::{AgentEvent, AgentUnsubscribe, ThinkingLevel};
 use pi_coding_agent_core::{BashExecutionMessage, CodingAgentCore};
 use pi_events::{AssistantMessage, Message, UserContent};
 use pi_tui::RenderHandle;
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -255,10 +256,7 @@ fn apply_agent_event(
             status_handle.set_message("Working...");
         }
         AgentEvent::AgentEnd { .. } => {
-            pending_messages
-                .lock()
-                .expect("pending messages mutex poisoned")
-                .take_all();
+            pending_messages.lock().take_all();
             update_handle.clear_pending_messages();
             status_handle.clear();
         }
@@ -390,11 +388,7 @@ fn queue_steering_message(
         timestamp: now_ms(),
     });
 
-    pending_messages
-        .lock()
-        .expect("pending messages mutex poisoned")
-        .steering
-        .push_back(text);
+    pending_messages.lock().steering.push_back(text);
     sync_pending_messages(update_handle, pending_messages);
 }
 
@@ -409,11 +403,7 @@ fn queue_follow_up_message(
         timestamp: now_ms(),
     });
 
-    pending_messages
-        .lock()
-        .expect("pending messages mutex poisoned")
-        .follow_up
-        .push_back(text);
+    pending_messages.lock().follow_up.push_back(text);
     sync_pending_messages(update_handle, pending_messages);
 }
 
@@ -421,10 +411,7 @@ fn sync_pending_messages(
     update_handle: &ShellUpdateHandle,
     pending_messages: &Arc<Mutex<PendingMessageState>>,
 ) {
-    let (steering, follow_up) = pending_messages
-        .lock()
-        .expect("pending messages mutex poisoned")
-        .snapshot();
+    let (steering, follow_up) = pending_messages.lock().snapshot();
     if steering.is_empty() && follow_up.is_empty() {
         update_handle.clear_pending_messages();
     } else {
@@ -436,10 +423,7 @@ fn consume_pending_message(
     update_handle: &ShellUpdateHandle,
     pending_messages: &Arc<Mutex<PendingMessageState>>,
 ) {
-    let removed = pending_messages
-        .lock()
-        .expect("pending messages mutex poisoned")
-        .pop_next();
+    let removed = pending_messages.lock().pop_next();
     if removed {
         sync_pending_messages(update_handle, pending_messages);
     }
@@ -452,9 +436,7 @@ fn restore_pending_messages_to_shell(
     pending_messages: &Arc<Mutex<PendingMessageState>>,
 ) -> usize {
     let (steering, follow_up) = {
-        let mut pending_messages = pending_messages
-            .lock()
-            .expect("pending messages mutex poisoned");
+        let mut pending_messages = pending_messages.lock();
         if pending_messages.is_empty() {
             return 0;
         }
@@ -483,10 +465,7 @@ fn restore_pending_messages_to_shell(
 }
 
 fn has_pending_messages(pending_messages: &Arc<Mutex<PendingMessageState>>) -> bool {
-    !pending_messages
-        .lock()
-        .expect("pending messages mutex poisoned")
-        .is_empty()
+    !pending_messages.lock().is_empty()
 }
 
 fn assistant_message(message: &Message) -> Option<AssistantMessage> {

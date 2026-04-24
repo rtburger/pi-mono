@@ -2,11 +2,8 @@ use crate::{
     Component, Input, KeybindingsManager, fuzzy_filter, matches_key, truncate_to_width,
     visible_width, wrap_text_with_ansi,
 };
-use std::{
-    borrow::Cow,
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
+use parking_lot::Mutex;
+use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
 
 pub type SettingsSubmenuDone = Box<dyn FnMut(Option<String>) + Send + 'static>;
 pub type SettingsSubmenuFactory =
@@ -271,9 +268,7 @@ impl SettingsList {
         let mut component = factory(
             item.current_value.clone(),
             Box::new(move |selected_value| {
-                *completion_done
-                    .lock()
-                    .expect("submenu completion mutex poisoned") = Some(selected_value);
+                *completion_done.lock() = Some(selected_value);
             }),
         );
         component.set_focused(self.focused);
@@ -296,11 +291,7 @@ impl SettingsList {
             return;
         };
 
-        let completion = submenu
-            .completion
-            .lock()
-            .expect("submenu completion mutex poisoned")
-            .take();
+        let completion = submenu.completion.lock().take();
         let Some(selected_value) = completion else {
             return;
         };

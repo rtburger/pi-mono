@@ -1,11 +1,9 @@
+use parking_lot::{Mutex, MutexGuard};
 use pi_tui::{
     CellDimensions, Component, Image, ImageDimensions, ImageOptions, ImageTheme,
     reset_capabilities_cache, set_cell_dimensions,
 };
-use std::{
-    ffi::OsString,
-    sync::{LazyLock, Mutex, MutexGuard},
-};
+use std::{ffi::OsString, sync::LazyLock};
 
 static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 const GUARDED_ENV_VARS: &[&str] = &[
@@ -26,7 +24,7 @@ struct TestGuard {
 
 impl TestGuard {
     fn new() -> Self {
-        let lock = TEST_LOCK.lock().expect("image test lock");
+        let lock = TEST_LOCK.lock();
         let previous_env = GUARDED_ENV_VARS
             .iter()
             .map(|name| (*name, std::env::var_os(name)))

@@ -1,4 +1,5 @@
 use async_stream::stream;
+use parking_lot::Mutex;
 use pi_ai::{
     AiProvider, AssistantEventStream, StreamOptions, register_provider, unregister_provider,
 };
@@ -15,7 +16,7 @@ use std::{
     collections::VecDeque,
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -111,7 +112,7 @@ impl ScriptedProvider {
     }
 
     fn call_count(&self) -> usize {
-        *self.call_count.lock().unwrap()
+        *self.call_count.lock()
     }
 }
 
@@ -125,10 +126,9 @@ impl AiProvider for ScriptedProvider {
         let reply = self
             .replies
             .lock()
-            .unwrap()
             .pop_front()
             .expect("expected scripted reply");
-        *self.call_count.lock().unwrap() += 1;
+        *self.call_count.lock() += 1;
         let reason = reply.stop_reason.clone();
         Box::pin(stream! {
             yield Ok(AssistantEvent::Done {
@@ -216,11 +216,7 @@ async fn session_exposes_history_stats_export_and_last_assistant_text() {
     assert_eq!(fork_messages[0].text, "hello history");
 
     assert_eq!(
-        session_manager
-            .lock()
-            .unwrap()
-            .get_session_name()
-            .as_deref(),
+        session_manager.lock().get_session_name().as_deref(),
         Some("named session")
     );
 
@@ -259,7 +255,7 @@ async fn navigate_tree_generates_branch_summary_and_restores_editor_text() {
 
     let session_manager = Arc::new(Mutex::new(SessionManager::in_memory("/tmp/navigate-tree")));
     let (user_id, assistant_id, rewind_user_id) = {
-        let mut session_manager = session_manager.lock().unwrap();
+        let mut session_manager = session_manager.lock();
         let user_id = session_manager
             .append_message(user_message("root message", 1))
             .unwrap();
@@ -328,7 +324,7 @@ async fn navigate_tree_generates_branch_summary_and_restores_editor_text() {
         .expect("expected summary entry");
     assert!(navigation.old_leaf_id.is_some());
 
-    let manager = session_manager.lock().unwrap();
+    let manager = session_manager.lock();
     assert_eq!(navigation.new_leaf_id.as_deref(), manager.get_leaf_id());
     assert_eq!(manager.get_label(&summary_id), Some("bookmark"));
     assert_ne!(manager.get_leaf_id(), Some(summary_id.as_str()));

@@ -2,11 +2,12 @@ use crate::{
     StdinBuffer, StdinBufferEvent, StdinBufferOptions, TuiError, set_kitty_protocol_active,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size as terminal_size};
+use parking_lot::Mutex;
 use std::{
     env,
     io::{self, Read as _, Write as _},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::Receiver,
     },
@@ -342,9 +343,7 @@ impl ProcessTerminal {
 
                 let size = read_backend_size(&backend);
                 let changed = {
-                    let mut last_known_size = last_known_size
-                        .lock()
-                        .expect("last known size mutex poisoned");
+                    let mut last_known_size = last_known_size.lock();
                     if last_known_size.as_ref() == Some(&size) {
                         false
                     } else {
@@ -367,20 +366,11 @@ impl Terminal for ProcessTerminal {
         on_input: Box<dyn FnMut(String) + Send>,
         on_resize: Box<dyn FnMut() + Send>,
     ) -> Result<(), TuiError> {
-        *self
-            .input_handler
-            .lock()
-            .expect("input handler mutex poisoned") = Some(on_input);
-        *self
-            .resize_handler
-            .lock()
-            .expect("resize handler mutex poisoned") = Some(on_resize);
+        *self.input_handler.lock() = Some(on_input);
+        *self.resize_handler.lock() = Some(on_resize);
         self.suppress_input.store(false, Ordering::Relaxed);
         self.stop_requested.store(false, Ordering::Relaxed);
-        *self
-            .last_known_size
-            .lock()
-            .expect("last known size mutex poisoned") = Some(read_backend_size(&self.backend));
+        *self.last_known_size.lock() = Some(read_backend_size(&self.backend));
 
         if self.uses_process_io {
             enable_raw_mode()?;
@@ -403,18 +393,9 @@ impl Terminal for ProcessTerminal {
         write_backend(&self.backend, BRACKETED_PASTE_DISABLE)?;
         self.disable_input_protocols()?;
         self.stdin_buffer.destroy();
-        *self
-            .last_known_size
-            .lock()
-            .expect("last known size mutex poisoned") = None;
-        *self
-            .input_handler
-            .lock()
-            .expect("input handler mutex poisoned") = None;
-        *self
-            .resize_handler
-            .lock()
-            .expect("resize handler mutex poisoned") = None;
+        *self.last_known_size.lock() = None;
+        *self.input_handler.lock() = None;
+        *self.resize_handler.lock() = None;
 
         if self.raw_mode_enabled {
             disable_raw_mode()?;
@@ -449,17 +430,11 @@ impl Terminal for ProcessTerminal {
     }
 
     fn columns(&self) -> u16 {
-        self.backend
-            .lock()
-            .expect("terminal backend mutex poisoned")
-            .columns()
+        self.backend.lock().columns()
     }
 
     fn rows(&self) -> u16 {
-        self.backend
-            .lock()
-            .expect("terminal backend mutex poisoned")
-            .rows()
+        self.backend.lock().rows()
     }
 
     fn kitty_protocol_active(&self) -> bool {
@@ -562,32 +537,26 @@ impl TerminalBackend for StdoutBackend {
 }
 
 fn write_backend(backend: &Arc<Mutex<Box<dyn TerminalBackend>>>, data: &str) -> io::Result<()> {
-    backend
-        .lock()
-        .expect("terminal backend mutex poisoned")
-        .write(data)
+    backend.lock().write(data)
 }
 
 fn read_backend_size(backend: &Arc<Mutex<Box<dyn TerminalBackend>>>) -> (u16, u16) {
-    let backend = backend.lock().expect("terminal backend mutex poisoned");
+    let backend = backend.lock();
     (backend.columns(), backend.rows())
 }
 
 fn backend_supports_resize_polling(backend: &Arc<Mutex<Box<dyn TerminalBackend>>>) -> bool {
-    backend
-        .lock()
-        .expect("terminal backend mutex poisoned")
-        .supports_resize_polling()
+    backend.lock().supports_resize_polling()
 }
 
 fn forward_input(handler: &SharedInputHandler, data: String) {
-    if let Some(handler) = &mut *handler.lock().expect("input handler mutex poisoned") {
+    if let Some(handler) = &mut *handler.lock() {
         handler(data);
     }
 }
 
 fn notify_resize_handler(handler: &SharedResizeHandler) {
-    if let Some(handler) = &mut *handler.lock().expect("resize handler mutex poisoned") {
+    if let Some(handler) = &mut *handler.lock() {
         handler();
     }
 }
@@ -617,7 +586,7 @@ fn is_kitty_protocol_response(sequence: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     #[derive(Clone)]
     struct MockBackend {
@@ -642,7 +611,7 @@ mod tests {
         }
 
         fn writes(&self) -> Vec<String> {
-            self.writes.lock().expect("writes mutex poisoned").clone()
+            self.writes.lock().clone()
         }
     }
 
@@ -655,16 +624,13 @@ mod tests {
         }
 
         fn set_size(&self, columns: u16, rows: u16) {
-            *self.size.lock().expect("size mutex poisoned") = (columns, rows);
+            *self.size.lock() = (columns, rows);
         }
     }
 
     impl TerminalBackend for MockBackend {
         fn write(&mut self, data: &str) -> io::Result<()> {
-            self.writes
-                .lock()
-                .expect("writes mutex poisoned")
-                .push(data.to_string());
+            self.writes.lock().push(data.to_string());
             Ok(())
         }
 
@@ -679,19 +645,16 @@ mod tests {
 
     impl TerminalBackend for ResizableMockBackend {
         fn write(&mut self, data: &str) -> io::Result<()> {
-            self.writes
-                .lock()
-                .expect("writes mutex poisoned")
-                .push(data.to_string());
+            self.writes.lock().push(data.to_string());
             Ok(())
         }
 
         fn columns(&self) -> u16 {
-            self.size.lock().expect("size mutex poisoned").0
+            self.size.lock().0
         }
 
         fn rows(&self) -> u16 {
-            self.size.lock().expect("size mutex poisoned").1
+            self.size.lock().1
         }
 
         fn supports_resize_polling(&self) -> bool {
@@ -721,13 +684,8 @@ mod tests {
         let (mut terminal, backend, input_events, resize_count) = new_test_terminal();
         terminal
             .start(
-                Box::new(move |data| {
-                    input_events
-                        .lock()
-                        .expect("input mutex poisoned")
-                        .push(data)
-                }),
-                Box::new(move || *resize_count.lock().expect("resize mutex poisoned") += 1),
+                Box::new(move |data| input_events.lock().push(data)),
+                Box::new(move || *resize_count.lock() += 1),
             )
             .expect("start should succeed");
 
@@ -742,13 +700,8 @@ mod tests {
         let (mut terminal, backend, input_events, resize_count) = new_test_terminal();
         terminal
             .start(
-                Box::new(move |data| {
-                    input_events
-                        .lock()
-                        .expect("input mutex poisoned")
-                        .push(data)
-                }),
-                Box::new(move || *resize_count.lock().expect("resize mutex poisoned") += 1),
+                Box::new(move |data| input_events.lock().push(data)),
+                Box::new(move || *resize_count.lock() += 1),
             )
             .expect("start should succeed");
 
@@ -769,13 +722,8 @@ mod tests {
         let input_events_for_handler = Arc::clone(&input_events);
         terminal
             .start(
-                Box::new(move |data| {
-                    input_events_for_handler
-                        .lock()
-                        .expect("input mutex poisoned")
-                        .push(data)
-                }),
-                Box::new(move || *resize_count.lock().expect("resize mutex poisoned") += 1),
+                Box::new(move |data| input_events_for_handler.lock().push(data)),
+                Box::new(move || *resize_count.lock() += 1),
             )
             .expect("start should succeed");
 
@@ -787,7 +735,7 @@ mod tests {
             .expect("processing paste should succeed");
 
         assert_eq!(
-            input_events.lock().expect("input mutex poisoned").clone(),
+            input_events.lock().clone(),
             vec![
                 "a".to_string(),
                 "\x1b[A".to_string(),
@@ -801,13 +749,8 @@ mod tests {
         let (mut terminal, backend, input_events, resize_count) = new_test_terminal();
         terminal
             .start(
-                Box::new(move |data| {
-                    input_events
-                        .lock()
-                        .expect("input mutex poisoned")
-                        .push(data)
-                }),
-                Box::new(move || *resize_count.lock().expect("resize mutex poisoned") += 1),
+                Box::new(move |data| input_events.lock().push(data)),
+                Box::new(move || *resize_count.lock() += 1),
             )
             .expect("start should succeed");
         terminal
@@ -839,13 +782,8 @@ mod tests {
         let (mut terminal, backend, input_events, resize_count) = new_test_terminal();
         terminal
             .start(
-                Box::new(move |data| {
-                    input_events
-                        .lock()
-                        .expect("input mutex poisoned")
-                        .push(data)
-                }),
-                Box::new(move || *resize_count.lock().expect("resize mutex poisoned") += 1),
+                Box::new(move |data| input_events.lock().push(data)),
+                Box::new(move || *resize_count.lock() += 1),
             )
             .expect("start should succeed");
         terminal
@@ -872,17 +810,8 @@ mod tests {
         let resize_count_for_handler = Arc::clone(&resize_count);
         terminal
             .start(
-                Box::new(move |data| {
-                    input_events_for_handler
-                        .lock()
-                        .expect("input mutex poisoned")
-                        .push(data)
-                }),
-                Box::new(move || {
-                    *resize_count_for_handler
-                        .lock()
-                        .expect("resize mutex poisoned") += 1
-                }),
+                Box::new(move |data| input_events_for_handler.lock().push(data)),
+                Box::new(move || *resize_count_for_handler.lock() += 1),
             )
             .expect("start should succeed");
 
@@ -919,13 +848,13 @@ mod tests {
             .map(String::from)
             .collect::<Vec<_>>()
         );
-        assert_eq!(*resize_count.lock().expect("resize mutex poisoned"), 1);
+        assert_eq!(*resize_count.lock(), 1);
     }
 
     fn wait_for_resize_count(resize_count: &Arc<Mutex<u32>>, expected: u32) {
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while std::time::Instant::now() < deadline {
-            if *resize_count.lock().expect("resize mutex poisoned") >= expected {
+            if *resize_count.lock() >= expected {
                 return;
             }
             thread::sleep(Duration::from_millis(10));
@@ -933,7 +862,7 @@ mod tests {
 
         panic!(
             "timed out waiting for resize count {expected}, got {}",
-            *resize_count.lock().expect("resize mutex poisoned")
+            *resize_count.lock()
         );
     }
 
@@ -948,9 +877,7 @@ mod tests {
             .start(
                 Box::new(|_| {}),
                 Box::new(move || {
-                    *resize_count_for_handler
-                        .lock()
-                        .expect("resize mutex poisoned") += 1;
+                    *resize_count_for_handler.lock() += 1;
                 }),
             )
             .expect("start should succeed");
@@ -962,12 +889,12 @@ mod tests {
 
         backend.set_size(100, 30);
         thread::sleep(RESIZE_POLL_INTERVAL * 2);
-        assert_eq!(*resize_count.lock().expect("resize mutex poisoned"), 1);
+        assert_eq!(*resize_count.lock(), 1);
 
         terminal.stop().expect("stop should succeed");
         backend.set_size(120, 40);
         thread::sleep(RESIZE_POLL_INTERVAL * 2);
-        assert_eq!(*resize_count.lock().expect("resize mutex poisoned"), 1);
+        assert_eq!(*resize_count.lock(), 1);
     }
 
     #[test]

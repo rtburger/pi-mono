@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use pi_coding_agent_tui::{
     ClipboardCommandRunner, ClipboardImage, ClipboardImageSource, ClipboardPlatform, CommandOutput,
     KeybindingsManager, PlainKeyHintStyler, StartupShellComponent, SystemClipboardImageSource,
@@ -7,7 +8,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tempfile::tempdir;
@@ -65,10 +66,7 @@ impl ClipboardCommandRunner for FakeRunner {
         args: &[String],
         _env: &BTreeMap<String, String>,
     ) -> CommandOutput {
-        self.calls
-            .lock()
-            .expect("calls mutex poisoned")
-            .push((command.to_owned(), args.to_vec()));
+        self.calls.lock().push((command.to_owned(), args.to_vec()));
         self.responses
             .get(&(command.to_owned(), args.join("\u{0}")))
             .cloned()

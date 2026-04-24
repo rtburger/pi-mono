@@ -1,9 +1,10 @@
+use parking_lot::Mutex;
 use pi_coding_agent_core::FooterDataProvider;
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
@@ -187,7 +188,7 @@ fn read_recording_git_call_count(log_file: &Path) -> usize {
 
 #[test]
 fn resolves_head_branch_directly_from_nested_repo_without_git_on_path() {
-    let _env_guard = env_lock().lock().expect("env lock poisoned");
+    let _env_guard = env_lock().lock();
     let _path_guard = PathGuard::clear();
     let temp_dir = TestDir::new("footer-data-provider");
     let repo_dir = create_plain_repo(temp_dir.path(), "main");
@@ -202,7 +203,7 @@ fn resolves_head_branch_directly_from_nested_repo_without_git_on_path() {
 #[cfg(unix)]
 #[test]
 fn resolves_invalid_reftable_head_via_git_for_plain_repo() {
-    let _env_guard = env_lock().lock().expect("env lock poisoned");
+    let _env_guard = env_lock().lock();
     let temp_dir = TestDir::new("footer-data-provider");
     let bin_dir = temp_dir.path().join("bin");
     fs::create_dir_all(&bin_dir).expect("failed to create bin dir");
@@ -218,7 +219,7 @@ fn resolves_invalid_reftable_head_via_git_for_plain_repo() {
 #[cfg(unix)]
 #[test]
 fn resolves_invalid_reftable_head_via_git_for_worktree() {
-    let _env_guard = env_lock().lock().expect("env lock poisoned");
+    let _env_guard = env_lock().lock();
     let temp_dir = TestDir::new("footer-data-provider");
     let bin_dir = temp_dir.path().join("bin");
     fs::create_dir_all(&bin_dir).expect("failed to create bin dir");
@@ -234,7 +235,7 @@ fn resolves_invalid_reftable_head_via_git_for_worktree() {
 #[cfg(unix)]
 #[test]
 fn treats_unresolved_invalid_reftable_head_as_detached() {
-    let _env_guard = env_lock().lock().expect("env lock poisoned");
+    let _env_guard = env_lock().lock();
     let temp_dir = TestDir::new("footer-data-provider");
     let bin_dir = temp_dir.path().join("bin");
     fs::create_dir_all(&bin_dir).expect("failed to create bin dir");
@@ -269,7 +270,7 @@ fn set_cwd_switches_the_repo_used_for_branch_detection() {
 #[cfg(unix)]
 #[test]
 fn set_cwd_notifies_branch_change_listeners() {
-    let _env_guard = env_lock().lock().expect("env lock poisoned");
+    let _env_guard = env_lock().lock();
     let _path_guard = PathGuard::clear();
     let temp_dir = TestDir::new("footer-data-provider");
     let first_root = temp_dir.path().join("first");
@@ -294,7 +295,7 @@ fn set_cwd_notifies_branch_change_listeners() {
 #[cfg(unix)]
 #[test]
 fn reftable_updates_that_keep_same_branch_do_not_notify_listeners() {
-    let _env_guard = env_lock().lock().expect("env lock poisoned");
+    let _env_guard = env_lock().lock();
     let temp_dir = TestDir::new("footer-data-provider");
     let bin_dir = temp_dir.path().join("bin");
     fs::create_dir_all(&bin_dir).expect("failed to create bin dir");
@@ -328,7 +329,7 @@ fn reftable_updates_that_keep_same_branch_do_not_notify_listeners() {
 #[cfg(unix)]
 #[test]
 fn rapid_reftable_updates_debounce_to_single_refresh() {
-    let _env_guard = env_lock().lock().expect("env lock poisoned");
+    let _env_guard = env_lock().lock();
     let temp_dir = TestDir::new("footer-data-provider");
     let bin_dir = temp_dir.path().join("bin");
     fs::create_dir_all(&bin_dir).expect("failed to create bin dir");
@@ -357,7 +358,7 @@ fn rapid_reftable_updates_debounce_to_single_refresh() {
 #[cfg(unix)]
 #[test]
 fn reftable_updates_refresh_the_cached_branch_and_notify_listeners() {
-    let _env_guard = env_lock().lock().expect("env lock poisoned");
+    let _env_guard = env_lock().lock();
     let temp_dir = TestDir::new("footer-data-provider");
     let bin_dir = temp_dir.path().join("bin");
     fs::create_dir_all(&bin_dir).expect("failed to create bin dir");

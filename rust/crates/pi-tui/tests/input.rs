@@ -1,5 +1,6 @@
+use parking_lot::Mutex;
 use pi_tui::{Component, Input, visible_width};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[test]
 fn submits_value_including_backslash_on_enter() {
@@ -8,7 +9,7 @@ fn submits_value_including_backslash_on_enter() {
 
     let mut input = Input::new();
     input.set_on_submit(move |value| {
-        *submitted_clone.lock().expect("submitted mutex poisoned") = Some(value);
+        *submitted_clone.lock() = Some(value);
     });
 
     input.handle_input("h");
@@ -19,13 +20,7 @@ fn submits_value_including_backslash_on_enter() {
     input.handle_input("\\");
     input.handle_input("\r");
 
-    assert_eq!(
-        submitted
-            .lock()
-            .expect("submitted mutex poisoned")
-            .as_deref(),
-        Some("hello\\")
-    );
+    assert_eq!(submitted.lock().as_deref(), Some("hello\\"));
 }
 
 #[test]
@@ -45,12 +40,12 @@ fn escape_triggers_cancel_callback() {
 
     let mut input = Input::new();
     input.set_on_escape(move || {
-        *escaped_clone.lock().expect("escaped mutex poisoned") = true;
+        *escaped_clone.lock() = true;
     });
 
     input.handle_input("\x1b");
 
-    assert!(*escaped.lock().expect("escaped mutex poisoned"));
+    assert!(*escaped.lock());
 }
 
 #[test]

@@ -1,11 +1,13 @@
 use httpmock::prelude::*;
+use parking_lot::Mutex;
 use pi_ai::{CacheRetention, PayloadHook, StreamOptions, complete};
 use pi_events::{Context, Message, Model, UserContent};
 use serde_json::{Value, json};
 use std::env;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 const PI_CACHE_RETENTION: &str = "PI_CACHE_RETENTION";
 
 fn base_context() -> Context {
@@ -65,18 +67,14 @@ fn capture_payload_hook(captured: Arc<Mutex<Option<Value>>>) -> PayloadHook {
     PayloadHook::new(move |payload, _model| {
         let captured = captured.clone();
         async move {
-            *captured.lock().unwrap() = Some(payload.clone());
+            *captured.lock() = Some(payload.clone());
             Ok(None)
         }
     })
 }
 
 fn captured_payload(captured: &Arc<Mutex<Option<Value>>>) -> Value {
-    captured
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("payload should be captured")
+    captured.lock().clone().expect("payload should be captured")
 }
 
 fn set_env_var(key: &str, value: &str) {
@@ -92,9 +90,7 @@ fn restore_env_var(key: &str, previous: Option<String>) {
 
 #[tokio::test]
 async fn openai_responses_uses_env_long_cache_retention_when_option_is_omitted() {
-    let _env_guard = ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let previous = env::var(PI_CACHE_RETENTION).ok();
     set_env_var(PI_CACHE_RETENTION, "long");
 
@@ -138,9 +134,7 @@ async fn openai_responses_uses_env_long_cache_retention_when_option_is_omitted()
 
 #[tokio::test]
 async fn openai_responses_explicit_short_overrides_env_long_cache_retention() {
-    let _env_guard = ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let previous = env::var(PI_CACHE_RETENTION).ok();
     set_env_var(PI_CACHE_RETENTION, "long");
 
@@ -185,9 +179,7 @@ async fn openai_responses_explicit_short_overrides_env_long_cache_retention() {
 
 #[tokio::test]
 async fn anthropic_uses_env_long_cache_retention_when_option_is_omitted() {
-    let _env_guard = ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let previous = env::var(PI_CACHE_RETENTION).ok();
     set_env_var(PI_CACHE_RETENTION, "long");
 
@@ -241,9 +233,7 @@ async fn anthropic_uses_env_long_cache_retention_when_option_is_omitted() {
 
 #[tokio::test]
 async fn anthropic_explicit_short_overrides_env_long_cache_retention() {
-    let _env_guard = ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let previous = env::var(PI_CACHE_RETENTION).ok();
     set_env_var(PI_CACHE_RETENTION, "long");
 

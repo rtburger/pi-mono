@@ -1,12 +1,10 @@
 use httpmock::prelude::*;
+use parking_lot::Mutex;
 use pi_ai::{PayloadHook, StreamOptions, complete};
 use pi_events::{
     AssistantContent, Context, Message, Model, StopReason, ToolDefinition, Usage, UserContent,
 };
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 const HELLO_SSE: &str = concat!(
     "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n",
@@ -66,7 +64,7 @@ fn capture_payload_hook(store: Arc<Mutex<Option<serde_json::Value>>>) -> Payload
     PayloadHook::new(move |payload, _model| {
         let store = store.clone();
         async move {
-            *store.lock().unwrap() = Some(payload);
+            *store.lock() = Some(payload);
             Ok(None)
         }
     })
@@ -168,11 +166,7 @@ async fn skips_aborted_reasoning_history_in_request_payload() {
         }]
     );
 
-    let payload = captured_payload
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("captured payload");
+    let payload = captured_payload.lock().clone().expect("captured payload");
     assert_eq!(
         payload["input"],
         serde_json::json!([
@@ -280,11 +274,7 @@ async fn replays_same_provider_different_model_handoff_without_reasoning_items()
         }]
     );
 
-    let payload = captured_payload
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("captured payload");
+    let payload = captured_payload.lock().clone().expect("captured payload");
     assert_eq!(payload["model"], serde_json::json!("gpt-5.2-codex"));
     assert_eq!(
         payload["input"],

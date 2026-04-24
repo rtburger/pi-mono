@@ -1,4 +1,5 @@
 use futures::stream;
+use parking_lot::Mutex;
 use pi_ai::{
     AiProvider, AssistantEventStream, StreamOptions, register_provider, unregister_provider,
 };
@@ -11,7 +12,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -37,7 +38,7 @@ impl AiProvider for RecordingProvider {
         context: Context,
         _options: StreamOptions,
     ) -> AssistantEventStream {
-        *self.recorded.lock().unwrap() = RecordedRequest {
+        *self.recorded.lock() = RecordedRequest {
             context: Some(context),
         };
 
@@ -175,7 +176,7 @@ async fn run_command_print_mode_expands_prompt_templates_and_applies_tool_select
     .await;
 
     assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     let context = request.context.expect("expected recorded context");
     let tool_names = context
         .tools
@@ -223,7 +224,7 @@ async fn run_command_print_mode_preserves_explicit_no_tools_selection() {
     .await;
 
     assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     let context = request.context.expect("expected recorded context");
     assert!(context.tools.is_empty(), "tools: {:?}", context.tools);
     let system_prompt = context.system_prompt.expect("expected system prompt");
@@ -276,7 +277,7 @@ async fn run_command_print_mode_expands_skill_commands_from_project_resources() 
     .await;
 
     assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     let context = request.context.expect("expected recorded context");
     let text = last_user_text(&context);
     assert!(text.contains("<skill name=\"review-code\""), "text: {text}");
@@ -443,7 +444,7 @@ async fn run_command_print_mode_loads_prompt_templates_from_project_package_sett
     .await;
 
     assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     let context = request.context.expect("expected recorded context");
     assert_eq!(last_user_text(&context), "Package review src/lib.rs\n");
 

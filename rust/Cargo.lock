@@ -1458,6 +1458,7 @@ dependencies = [
  "async-stream",
  "futures",
  "indexmap",
+ "parking_lot",
  "pi-ai",
  "pi-events",
  "pi-json-utils",
@@ -1477,6 +1478,7 @@ dependencies = [
  "futures",
  "httpdate",
  "httpmock",
+ "parking_lot",
  "pi-events",
  "pi-json-utils",
  "rand 0.8.5",
@@ -1498,6 +1500,7 @@ dependencies = [
  "futures",
  "globset",
  "image",
+ "parking_lot",
  "pi-agent",
  "pi-ai",
  "pi-coding-agent-core",
@@ -1520,6 +1523,7 @@ dependencies = [
  "futures",
  "globset",
  "ignore",
+ "parking_lot",
  "pi-agent",
  "pi-ai",
  "pi-coding-agent-tools",
@@ -1552,6 +1556,7 @@ name = "pi-coding-agent-tui"
 version = "0.1.0"
 dependencies = [
  "image",
+ "parking_lot",
  "pi-agent",
  "pi-ai",
  "pi-coding-agent-core",
@@ -1569,6 +1574,7 @@ dependencies = [
 name = "pi-config"
 version = "0.1.0"
 dependencies = [
+ "parking_lot",
  "pi-ai",
  "serde",
  "serde_json",
@@ -1614,6 +1620,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "crossterm",
+ "parking_lot",
  "pulldown-cmark",
  "regex",
  "thiserror 2.0.18",

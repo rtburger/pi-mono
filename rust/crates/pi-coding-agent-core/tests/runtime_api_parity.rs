@@ -1,4 +1,5 @@
 use async_stream::stream;
+use parking_lot::Mutex;
 use pi_ai::{
     AiProvider, AssistantEventStream, StreamOptions, register_provider, unregister_provider,
 };
@@ -15,7 +16,7 @@ use pi_events::{
 use std::{
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -155,7 +156,7 @@ async fn agent_session_exposes_session_name_and_tree_helpers() {
     session.set_session_name("named session").unwrap();
 
     let (expected_leaf_id, expected_tree) = {
-        let manager = manager.lock().unwrap();
+        let manager = manager.lock();
         (manager.get_leaf_id().map(str::to_owned), manager.get_tree())
     };
 
@@ -224,7 +225,7 @@ async fn agent_session_runtime_delegates_history_helpers() {
     assert_eq!(stats.total_messages, 3);
 
     let first_user_id = {
-        let manager = manager.lock().unwrap();
+        let manager = manager.lock();
         manager
             .get_entries()
             .iter()
@@ -245,7 +246,7 @@ async fn agent_session_runtime_delegates_history_helpers() {
     assert_eq!(navigation.editor_text.as_deref(), Some("runtime prompt"));
     assert_eq!(runtime.leaf_id(), navigation.new_leaf_id);
 
-    let expected_tree = manager.lock().unwrap().get_tree();
+    let expected_tree = manager.lock().get_tree();
     assert_eq!(runtime.session_tree(), expected_tree);
 
     unregister_provider(&api);

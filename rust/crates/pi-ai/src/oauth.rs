@@ -1,4 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use parking_lot::Mutex;
 use pi_events::Model;
 use rand::{RngCore as _, rngs::OsRng};
 use reqwest::Url;
@@ -9,10 +10,12 @@ use std::{
     future::Future,
     io::{Read as _, Write as _},
     pin::Pin,
-    sync::{Arc, Mutex, Once, OnceLock, mpsc},
+    sync::{Arc, Once, OnceLock, mpsc},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+#[cfg(test)]
+use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::{oneshot, watch};
 
 const OAUTH_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -305,7 +308,6 @@ pub fn get_oauth_provider(id: &str) -> Option<Arc<dyn OAuthProvider>> {
     ensure_builtin_oauth_providers_registered();
     oauth_provider_registry()
         .lock()
-        .unwrap()
         .iter()
         .find(|provider| provider.id() == id)
         .cloned()
@@ -313,12 +315,12 @@ pub fn get_oauth_provider(id: &str) -> Option<Arc<dyn OAuthProvider>> {
 
 pub fn register_oauth_provider(provider: Arc<dyn OAuthProvider>) {
     ensure_builtin_oauth_providers_registered();
-    replace_or_insert_provider(&mut oauth_provider_registry().lock().unwrap(), provider);
+    replace_or_insert_provider(&mut oauth_provider_registry().lock(), provider);
 }
 
 pub fn unregister_oauth_provider(id: &str) {
     ensure_builtin_oauth_providers_registered();
-    let mut providers = oauth_provider_registry().lock().unwrap();
+    let mut providers = oauth_provider_registry().lock();
     if let Some(built_in) = built_in_oauth_providers()
         .iter()
         .find(|provider| provider.id() == id)
@@ -330,14 +332,14 @@ pub fn unregister_oauth_provider(id: &str) {
 }
 
 pub fn reset_oauth_providers() {
-    let mut providers = oauth_provider_registry().lock().unwrap();
+    let mut providers = oauth_provider_registry().lock();
     providers.clear();
     providers.extend(built_in_oauth_providers().iter().cloned());
 }
 
 pub fn get_oauth_providers() -> Vec<Arc<dyn OAuthProvider>> {
     ensure_builtin_oauth_providers_registered();
-    oauth_provider_registry().lock().unwrap().clone()
+    oauth_provider_registry().lock().clone()
 }
 
 pub fn get_oauth_provider_info_list() -> Vec<OAuthProviderInfo> {
@@ -1312,14 +1314,11 @@ enum ManualOrCallback {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::{
-        sync::{Mutex, OnceLock},
-        thread,
-    };
+    use std::{sync::OnceLock, thread};
 
-    fn registry_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    fn registry_lock() -> &'static TokioMutex<()> {
+        static LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| TokioMutex::new(()))
     }
 
     fn request_body(request: &str) -> &str {
@@ -1387,9 +1386,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn built_in_registry_exposes_anthropic_and_openai_codex() {
-        let _guard = registry_lock().lock().unwrap();
+    #[tokio::test]
+    async fn built_in_registry_exposes_anthropic_and_openai_codex() {
+        let _guard = registry_lock().lock().await;
         reset_oauth_providers();
 
         let providers = get_oauth_provider_info_list();
@@ -1449,7 +1448,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_oauth_api_key_refreshes_expired_credentials() {
-        let _guard = registry_lock().lock().unwrap();
+        let _guard = registry_lock().lock().await;
         reset_oauth_providers();
 
         let provider_id = "test-refresh-provider";

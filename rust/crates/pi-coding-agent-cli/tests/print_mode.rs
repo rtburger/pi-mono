@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use pi_ai::{
     FauxContentBlock, FauxModelDefinition, FauxResponse, RegisterFauxProviderOptions,
     StreamOptions, register_faux_provider,
@@ -13,7 +14,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 

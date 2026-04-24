@@ -1,4 +1,5 @@
 use async_stream::stream;
+use parking_lot::Mutex;
 use pi_ai::{AiProvider, AssistantEventStream, StreamOptions, unregister_provider};
 use pi_coding_agent_core::{
     AgentSessionOptions, AgentSessionRuntimeRequest, CodingAgentCoreOptions,
@@ -12,7 +13,7 @@ use pi_events::{
 use std::{
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -46,7 +47,7 @@ impl AiProvider for RecordingProvider {
         let contexts = self.contexts.clone();
         let response_text = self.response_text.clone();
         Box::pin(stream! {
-            contexts.lock().unwrap().push(context);
+            contexts.lock().push(context);
             let mut message = AssistantMessage::empty(
                 model.api.clone(),
                 model.provider.clone(),
@@ -134,12 +135,11 @@ async fn create_agent_session_restores_messages_and_persists_new_prompts() {
     first.session.prompt_text("first turn").await.unwrap();
     let session_file = manager
         .lock()
-        .unwrap()
         .get_session_file()
         .map(str::to_owned)
         .expect("expected persisted session file");
     assert!(PathBuf::from(&session_file).exists());
-    contexts.lock().unwrap().clear();
+    contexts.lock().clear();
     drop(first);
 
     let reopened = Arc::new(Mutex::new(
@@ -167,7 +167,7 @@ async fn create_agent_session_restores_messages_and_persists_new_prompts() {
 
     restored.session.prompt_text("second turn").await.unwrap();
 
-    let recorded_contexts = contexts.lock().unwrap().clone();
+    let recorded_contexts = contexts.lock().clone();
     assert_eq!(recorded_contexts.len(), 1);
     let context = &recorded_contexts[0];
     assert_eq!(context.messages.len(), 3, "context: {context:?}");
@@ -203,7 +203,7 @@ async fn create_agent_session_restores_messages_and_persists_new_prompts() {
         other => panic!("expected second user message, got {other:?}"),
     }
 
-    let entries = reopened.lock().unwrap().get_entries().to_vec();
+    let entries = reopened.lock().get_entries().to_vec();
     assert!(entries.len() >= 6, "entries: {entries:?}");
 
     unregister_provider(&api);
@@ -289,7 +289,6 @@ async fn agent_session_runtime_new_session_recreates_runtime_with_new_session_id
             .session_manager()
             .expect("expected session manager")
             .lock()
-            .unwrap()
             .get_entries()
             .len(),
         2

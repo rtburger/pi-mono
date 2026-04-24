@@ -1,3 +1,4 @@
+use parking_lot::{Mutex, MutexGuard};
 use pi_agent::ThinkingLevel;
 use pi_coding_agent_tui::{
     ColorMode, LoadThemesOptions, current_theme, current_theme_name, get_available_themes,
@@ -8,7 +9,7 @@ use pi_coding_agent_tui::{
 use std::{
     fs,
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::OnceLock,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -23,11 +24,9 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     path
 }
 
-fn theme_test_guard() -> std::sync::MutexGuard<'static, ()> {
+fn theme_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("theme test lock poisoned")
+    LOCK.get_or_init(|| Mutex::new(())).lock()
 }
 
 #[test]

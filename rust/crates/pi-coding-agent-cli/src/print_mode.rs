@@ -1,10 +1,11 @@
 use crate::args::PrintOutputMode;
+use parking_lot::Mutex;
 use pi_agent::{AgentEvent, AgentMessage, AgentToolResult, AgentUnsubscribe};
 use pi_coding_agent_core::{AgentSession, AgentSessionEvent, CompactionReason};
 use pi_events::{AssistantContent, Message, StopReason, UserContent};
 use serde_json::{Value, json};
 use std::{
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -46,18 +47,15 @@ pub async fn run_print_mode(
 
     if options.mode == PrintOutputMode::Json {
         if let Some(session_manager) = session.session_manager() {
-            let header = session_manager.lock().unwrap().get_header().clone();
-            json_lines
-                .lock()
-                .unwrap()
-                .push(session_header_to_json_line(&header));
+            let header = session_manager.lock().get_header().clone();
+            json_lines.lock().push(session_header_to_json_line(&header));
         }
 
         let lines = json_lines.clone();
         let unsubscribe = session.subscribe(move |event| {
             let line = serde_json::to_string(&agent_session_event_to_json(&event))
                 .expect("session event serialization must succeed");
-            lines.lock().unwrap().push(line);
+            lines.lock().push(line);
         });
         subscription = Some(unsubscribe);
     }
@@ -69,7 +67,7 @@ pub async fn run_print_mode(
     }
 
     if options.mode == PrintOutputMode::Json {
-        stdout = join_lines(&json_lines.lock().unwrap());
+        stdout = join_lines(&json_lines.lock());
     }
 
     match run_result {

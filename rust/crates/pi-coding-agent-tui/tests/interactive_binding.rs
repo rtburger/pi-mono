@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use pi_ai::{
     FauxContentBlock, FauxModelDefinition, FauxResponse, RegisterFauxProviderOptions,
     StreamOptions, register_faux_provider,
@@ -15,7 +16,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -82,7 +83,7 @@ impl RecordingTerminal {
     }
 
     fn write_count(&self) -> usize {
-        self.writes.lock().expect("writes mutex poisoned").len()
+        self.writes.lock().len()
     }
 }
 
@@ -104,10 +105,7 @@ impl Terminal for RecordingTerminal {
     }
 
     fn write(&mut self, data: &str) -> Result<(), TuiError> {
-        self.writes
-            .lock()
-            .expect("writes mutex poisoned")
-            .push(data.to_owned());
+        self.writes.lock().push(data.to_owned());
         Ok(())
     }
 
@@ -783,9 +781,7 @@ async fn interactive_shell_external_editor_action_respects_registered_override()
     let action_calls = Arc::new(Mutex::new(0usize));
     let action_calls_for_handler = Arc::clone(&action_calls);
     shell.on_action("app.editor.external", move || {
-        *action_calls_for_handler
-            .lock()
-            .expect("action mutex poisoned") += 1;
+        *action_calls_for_handler.lock() += 1;
     });
 
     let terminal = RecordingTerminal::new();
@@ -798,7 +794,7 @@ async fn interactive_shell_external_editor_action_respects_registered_override()
         .expect("external-editor action should be handled");
 
     let lines = tui.render_current();
-    assert_eq!(*action_calls.lock().expect("action mutex poisoned"), 1);
+    assert_eq!(*action_calls.lock(), 1);
     assert!(lines.iter().any(|line| line.contains("draft prompt")));
     assert!(!lines.iter().any(|line| line.contains("Edit message")));
 

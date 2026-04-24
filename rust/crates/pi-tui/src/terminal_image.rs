@@ -1,7 +1,8 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use parking_lot::Mutex;
 use std::{
     sync::{
-        Mutex, OnceLock,
+        OnceLock,
         atomic::{AtomicU32, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -78,15 +79,11 @@ fn cell_dimensions_state() -> &'static Mutex<CellDimensions> {
 }
 
 pub fn get_cell_dimensions() -> CellDimensions {
-    *cell_dimensions_state()
-        .lock()
-        .expect("cell dimensions mutex poisoned")
+    *cell_dimensions_state().lock()
 }
 
 pub fn set_cell_dimensions(dimensions: CellDimensions) {
-    *cell_dimensions_state()
-        .lock()
-        .expect("cell dimensions mutex poisoned") = dimensions;
+    *cell_dimensions_state().lock() = dimensions;
 }
 
 pub fn detect_capabilities() -> TerminalCapabilities {
@@ -155,9 +152,7 @@ pub fn detect_capabilities() -> TerminalCapabilities {
 }
 
 pub fn get_capabilities() -> TerminalCapabilities {
-    let mut cache = capabilities_cache()
-        .lock()
-        .expect("capabilities cache mutex poisoned");
+    let mut cache = capabilities_cache().lock();
     if let Some(capabilities) = *cache {
         return capabilities;
     }
@@ -167,9 +162,7 @@ pub fn get_capabilities() -> TerminalCapabilities {
 }
 
 pub fn reset_capabilities_cache() {
-    *capabilities_cache()
-        .lock()
-        .expect("capabilities cache mutex poisoned") = None;
+    *capabilities_cache().lock() = None;
 }
 
 pub fn is_image_line(line: &str) -> bool {

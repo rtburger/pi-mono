@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use pi_coding_agent_core::{FooterDataProvider, FooterDataSnapshot};
 use pi_coding_agent_tui::{
     ClipboardImage, ClipboardImageSource, ExternalEditorCommandRunner, ExternalEditorHost,
@@ -12,7 +13,7 @@ use std::{
     collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -75,24 +76,15 @@ struct RecordingExternalEditorHost {
 
 impl ExternalEditorHost for RecordingExternalEditorHost {
     fn stop(&self) {
-        self.events
-            .lock()
-            .expect("external editor host events mutex poisoned")
-            .push(String::from("stop"));
+        self.events.lock().push(String::from("stop"));
     }
 
     fn start(&self) {
-        self.events
-            .lock()
-            .expect("external editor host events mutex poisoned")
-            .push(String::from("start"));
+        self.events.lock().push(String::from("start"));
     }
 
     fn request_render(&self) {
-        self.events
-            .lock()
-            .expect("external editor host events mutex poisoned")
-            .push(String::from("request_render"));
+        self.events.lock().push(String::from("request_render"));
     }
 }
 
@@ -116,10 +108,7 @@ impl RecordingExternalEditorRunner {
 impl ExternalEditorCommandRunner for RecordingExternalEditorRunner {
     fn run(&self, command: &str, file_path: &Path) -> io::Result<Option<i32>> {
         let current_text = fs::read_to_string(file_path)?;
-        self.calls
-            .lock()
-            .expect("external editor runner calls mutex poisoned")
-            .push((command.to_owned(), current_text));
+        self.calls.lock().push((command.to_owned(), current_text));
         if let Some(replacement) = &self.replacement {
             fs::write(file_path, replacement)?;
         }
@@ -135,11 +124,11 @@ impl RecordingTerminal {
     }
 
     fn write_count(&self) -> usize {
-        self.writes.lock().expect("writes mutex poisoned").len()
+        self.writes.lock().len()
     }
 
     fn writes(&self) -> Vec<String> {
-        self.writes.lock().expect("writes mutex poisoned").clone()
+        self.writes.lock().clone()
     }
 }
 
@@ -223,10 +212,7 @@ impl Terminal for RecordingTerminal {
     }
 
     fn write(&mut self, data: &str) -> Result<(), TuiError> {
-        self.writes
-            .lock()
-            .expect("writes mutex poisoned")
-            .push(data.to_owned());
+        self.writes.lock().push(data.to_owned());
         Ok(())
     }
 
@@ -362,9 +348,7 @@ fn startup_shell_routes_input_and_submit_through_tui() {
     let mut shell =
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_submit(move |value| {
-        *submitted_for_callback
-            .lock()
-            .expect("submitted mutex poisoned") = Some(value);
+        *submitted_for_callback.lock() = Some(value);
     });
 
     let mut tui = Tui::new(NoopTerminal);
@@ -379,13 +363,7 @@ fn startup_shell_routes_input_and_submit_through_tui() {
 
     tui.handle_input("\r").expect("submit should be handled");
 
-    assert_eq!(
-        submitted
-            .lock()
-            .expect("submitted mutex poisoned")
-            .as_deref(),
-        Some("hi")
-    );
+    assert_eq!(submitted.lock().as_deref(), Some("hi"));
 }
 
 #[test]
@@ -403,9 +381,7 @@ fn startup_shell_supports_multiline_prompt_editing_via_custom_editor_bindings() 
     let mut shell =
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_submit(move |value| {
-        *submitted_for_callback
-            .lock()
-            .expect("submitted mutex poisoned") = Some(value);
+        *submitted_for_callback.lock() = Some(value);
     });
 
     shell.handle_input("h");
@@ -423,13 +399,7 @@ fn startup_shell_supports_multiline_prompt_editing_via_custom_editor_bindings() 
     assert!(lines.iter().any(|line| line.contains("there")));
 
     shell.handle_input("\x13");
-    assert_eq!(
-        submitted
-            .lock()
-            .expect("submitted mutex poisoned")
-            .as_deref(),
-        Some("hi\nthere")
-    );
+    assert_eq!(submitted.lock().as_deref(), Some("hi\nthere"));
 }
 
 #[test]
@@ -447,9 +417,7 @@ fn startup_shell_uses_shared_keybindings_for_header_and_input() {
     let mut shell =
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, false);
     shell.set_on_submit(move |value| {
-        *submitted_for_callback
-            .lock()
-            .expect("submitted mutex poisoned") = Some(value);
+        *submitted_for_callback.lock() = Some(value);
     });
 
     let mut tui = Tui::new(NoopTerminal);
@@ -468,13 +436,7 @@ fn startup_shell_uses_shared_keybindings_for_header_and_input() {
     tui.handle_input("\x13")
         .expect("custom submit binding should be handled");
 
-    assert_eq!(
-        submitted
-            .lock()
-            .expect("submitted mutex poisoned")
-            .as_deref(),
-        Some("ok")
-    );
+    assert_eq!(submitted.lock().as_deref(), Some("ok"));
 }
 
 #[test]
@@ -486,16 +448,14 @@ fn startup_shell_interrupt_uses_app_keybinding_binding_and_escape_callback() {
     let mut shell =
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_escape(move || {
-        *interrupted_for_callback
-            .lock()
-            .expect("interrupt mutex poisoned") += 1;
+        *interrupted_for_callback.lock() += 1;
     });
 
     shell.handle_input("\x18");
-    assert_eq!(*interrupted.lock().expect("interrupt mutex poisoned"), 1);
+    assert_eq!(*interrupted.lock(), 1);
 
     shell.handle_input("\x1b");
-    assert_eq!(*interrupted.lock().expect("interrupt mutex poisoned"), 1);
+    assert_eq!(*interrupted.lock(), 1);
 }
 
 #[test]
@@ -552,9 +512,7 @@ fn startup_shell_interrupt_cancels_autocomplete_before_escape_callback() {
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_autocomplete_provider(Arc::new(MultiSuggestionProvider));
     shell.set_on_escape(move || {
-        *interrupted_for_callback
-            .lock()
-            .expect("interrupt mutex poisoned") += 1;
+        *interrupted_for_callback.lock() += 1;
     });
 
     shell.handle_input("s");
@@ -565,7 +523,7 @@ fn startup_shell_interrupt_cancels_autocomplete_before_escape_callback() {
 
     shell.handle_input("\x1b");
 
-    assert_eq!(*interrupted.lock().expect("interrupt mutex poisoned"), 0);
+    assert_eq!(*interrupted.lock(), 0);
     assert_eq!(shell.input_value(), "src");
     assert!(!shell.render(20).iter().any(|line| line.contains("src.txt")));
 }
@@ -624,10 +582,7 @@ fn startup_shell_submit_accepts_autocomplete_before_submitting_prompt() {
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_autocomplete_provider(Arc::new(ReadmeSuggestionProvider));
     shell.set_on_submit(move |value| {
-        submitted_for_callback
-            .lock()
-            .expect("submitted mutex poisoned")
-            .push(value);
+        submitted_for_callback.lock().push(value);
     });
 
     shell.handle_input("r");
@@ -643,22 +598,11 @@ fn startup_shell_submit_accepts_autocomplete_before_submitting_prompt() {
 
     shell.handle_input("\r");
     assert_eq!(shell.input_value(), "readme.md");
-    assert!(
-        submitted
-            .lock()
-            .expect("submitted mutex poisoned")
-            .is_empty()
-    );
+    assert!(submitted.lock().is_empty());
 
     shell.handle_input("\r");
     assert_eq!(shell.input_value(), "");
-    assert_eq!(
-        submitted
-            .lock()
-            .expect("submitted mutex poisoned")
-            .as_slice(),
-        [String::from("readme.md")]
-    );
+    assert_eq!(submitted.lock().as_slice(), [String::from("readme.md")]);
 }
 
 #[test]
@@ -670,14 +614,14 @@ fn startup_shell_clear_binding_clears_input_by_default() {
     let mut shell =
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_exit(move || {
-        *exits_for_callback.lock().expect("exit mutex poisoned") += 1;
+        *exits_for_callback.lock() += 1;
     });
     shell.set_input_value("draft prompt");
 
     shell.handle_input("\x18");
 
     assert_eq!(shell.input_value(), "");
-    assert_eq!(*exits.lock().expect("exit mutex poisoned"), 0);
+    assert_eq!(*exits.lock(), 0);
 }
 
 #[test]
@@ -689,16 +633,16 @@ fn startup_shell_second_clear_binding_within_window_uses_exit_handler() {
     let mut shell =
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_exit(move || {
-        *exits_for_callback.lock().expect("exit mutex poisoned") += 1;
+        *exits_for_callback.lock() += 1;
     });
     shell.set_input_value("draft prompt");
 
     shell.handle_input("\x18");
     assert_eq!(shell.input_value(), "");
-    assert_eq!(*exits.lock().expect("exit mutex poisoned"), 0);
+    assert_eq!(*exits.lock(), 0);
 
     shell.handle_input("\x18");
-    assert_eq!(*exits.lock().expect("exit mutex poisoned"), 1);
+    assert_eq!(*exits.lock(), 1);
 }
 
 #[test]
@@ -710,10 +654,7 @@ fn startup_shell_extension_shortcut_can_consume_or_fall_through() {
     let mut shell =
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_extension_shortcut(move |data| {
-        seen_for_callback
-            .lock()
-            .expect("shortcut mutex poisoned")
-            .push(data.clone());
+        seen_for_callback.lock().push(data.clone());
         data == "x"
     });
 
@@ -723,7 +664,7 @@ fn startup_shell_extension_shortcut_can_consume_or_fall_through() {
     shell.handle_input("y");
     assert_eq!(shell.input_value(), "y");
     assert_eq!(
-        seen.lock().expect("shortcut mutex poisoned").as_slice(),
+        seen.lock().as_slice(),
         [String::from("x"), String::from("y")]
     );
 }
@@ -741,23 +682,19 @@ fn startup_shell_extension_shortcut_runs_before_paste_image_binding() {
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_extension_shortcut(move |data| {
         if data == "\x18" {
-            *shortcut_calls_for_callback
-                .lock()
-                .expect("shortcut mutex poisoned") += 1;
+            *shortcut_calls_for_callback.lock() += 1;
             return true;
         }
         false
     });
     shell.set_on_paste_image(move || {
-        *paste_calls_for_callback
-            .lock()
-            .expect("paste mutex poisoned") += 1;
+        *paste_calls_for_callback.lock() += 1;
     });
 
     shell.handle_input("\x18");
 
-    assert_eq!(*shortcut_calls.lock().expect("shortcut mutex poisoned"), 1);
-    assert_eq!(*paste_calls.lock().expect("paste mutex poisoned"), 0);
+    assert_eq!(*shortcut_calls.lock(), 1);
+    assert_eq!(*paste_calls.lock(), 0);
     assert_eq!(shell.input_value(), "");
 }
 
@@ -772,14 +709,12 @@ fn startup_shell_paste_image_uses_app_keybinding_binding() {
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("draft prompt");
     shell.set_on_paste_image(move || {
-        *paste_calls_for_callback
-            .lock()
-            .expect("paste mutex poisoned") += 1;
+        *paste_calls_for_callback.lock() += 1;
     });
 
     shell.handle_input("\x18");
 
-    assert_eq!(*paste_calls.lock().expect("paste mutex poisoned"), 1);
+    assert_eq!(*paste_calls.lock(), 1);
     assert_eq!(shell.input_value(), "draft prompt");
 }
 
@@ -852,9 +787,7 @@ fn startup_shell_can_show_extension_editor_and_restore_hidden_prompt_after_submi
         "Extension editor",
         Some("prefill"),
         move |value| {
-            *submitted_for_callback
-                .lock()
-                .expect("submitted mutex poisoned") = Some(value);
+            *submitted_for_callback.lock() = Some(value);
         },
         || {},
     );
@@ -867,13 +800,7 @@ fn startup_shell_can_show_extension_editor_and_restore_hidden_prompt_after_submi
     shell.handle_input("x");
     shell.handle_input("\r");
 
-    assert_eq!(
-        submitted
-            .lock()
-            .expect("submitted mutex poisoned")
-            .as_deref(),
-        Some("prefillx")
-    );
+    assert_eq!(submitted.lock().as_deref(), Some("prefillx"));
     assert!(!shell.is_showing_extension_editor());
     assert_eq!(shell.input_value(), "hidden prompt");
 }
@@ -891,9 +818,7 @@ fn startup_shell_can_cancel_extension_editor_and_restore_hidden_prompt() {
         Some("prefill"),
         |_| {},
         move || {
-            *cancelled_for_callback
-                .lock()
-                .expect("cancelled mutex poisoned") += 1;
+            *cancelled_for_callback.lock() += 1;
         },
     );
 
@@ -901,7 +826,7 @@ fn startup_shell_can_cancel_extension_editor_and_restore_hidden_prompt() {
     shell.handle_input("x");
     shell.handle_input("\x1b");
 
-    assert_eq!(*cancelled.lock().expect("cancelled mutex poisoned"), 1);
+    assert_eq!(*cancelled.lock(), 1);
     assert!(!shell.is_showing_extension_editor());
     assert_eq!(shell.input_value(), "hidden prompt");
 }
@@ -931,20 +856,14 @@ fn startup_shell_app_editor_external_opens_prompt_extension_editor_and_restores_
     shell.handle_input("\x07");
 
     assert_eq!(
-        runner_calls
-            .lock()
-            .expect("external editor runner calls mutex poisoned")
-            .as_slice(),
+        runner_calls.lock().as_slice(),
         &[(
             String::from("mock-editor --wait"),
             String::from("draft prompt")
         )]
     );
     assert_eq!(
-        host_events
-            .lock()
-            .expect("external editor host events mutex poisoned")
-            .as_slice(),
+        host_events.lock().as_slice(),
         [
             String::from("stop"),
             String::from("start"),
@@ -968,19 +887,12 @@ fn startup_shell_registered_external_editor_action_overrides_default_prompt_edit
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("draft prompt");
     shell.on_action("app.editor.external", move || {
-        *external_calls_for_handler
-            .lock()
-            .expect("external editor action mutex poisoned") += 1;
+        *external_calls_for_handler.lock() += 1;
     });
 
     shell.handle_input("\x07");
 
-    assert_eq!(
-        *external_calls
-            .lock()
-            .expect("external editor action mutex poisoned"),
-        1
-    );
+    assert_eq!(*external_calls.lock(), 1);
     assert!(!shell.is_showing_extension_editor());
     assert_eq!(shell.input_value(), "draft prompt");
 }
@@ -1001,9 +913,7 @@ fn startup_shell_can_show_model_selector_and_restore_hidden_prompt_after_submit(
         ],
         Some("beta"),
         move |model| {
-            *selected_for_callback
-                .lock()
-                .expect("selected mutex poisoned") = Some(model.id);
+            *selected_for_callback.lock() = Some(model.id);
         },
         || {},
     );
@@ -1016,10 +926,7 @@ fn startup_shell_can_show_model_selector_and_restore_hidden_prompt_after_submit(
 
     shell.handle_input("\r");
 
-    assert_eq!(
-        selected.lock().expect("selected mutex poisoned").as_deref(),
-        Some("beta")
-    );
+    assert_eq!(selected.lock().as_deref(), Some("beta"));
     assert!(!shell.is_showing_model_selector());
     assert_eq!(shell.input_value(), "hidden prompt");
 }
@@ -1041,16 +948,14 @@ fn startup_shell_can_cancel_model_selector_and_restore_hidden_prompt() {
         Some("beta"),
         |_| {},
         move || {
-            *cancelled_for_callback
-                .lock()
-                .expect("cancelled mutex poisoned") += 1;
+            *cancelled_for_callback.lock() += 1;
         },
     );
 
     assert!(shell.is_showing_model_selector());
     shell.handle_input("\x1b");
 
-    assert_eq!(*cancelled.lock().expect("cancelled mutex poisoned"), 1);
+    assert_eq!(*cancelled.lock(), 1);
     assert!(!shell.is_showing_model_selector());
     assert_eq!(shell.input_value(), "hidden prompt");
 }
@@ -1076,14 +981,12 @@ fn startup_shell_paste_image_callback_overrides_default_clipboard_insert() {
         temp_dir.path(),
     );
     shell.set_on_paste_image(move || {
-        *paste_calls_for_callback
-            .lock()
-            .expect("paste mutex poisoned") += 1;
+        *paste_calls_for_callback.lock() += 1;
     });
 
     shell.handle_input("\x18");
 
-    assert_eq!(*paste_calls.lock().expect("paste mutex poisoned"), 1);
+    assert_eq!(*paste_calls.lock(), 1);
     assert_eq!(shell.input_value(), "draft prompt");
     assert!(
         fs::read_dir(temp_dir.path())
@@ -1102,15 +1005,13 @@ fn startup_shell_can_run_registered_app_action_handlers() {
     let mut shell =
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.on_action("app.clear", move || {
-        *clear_calls_for_handler
-            .lock()
-            .expect("clear mutex poisoned") += 1;
+        *clear_calls_for_handler.lock() += 1;
     });
     shell.set_input_value("draft prompt");
 
     shell.handle_input("\x18");
 
-    assert_eq!(*clear_calls.lock().expect("clear mutex poisoned"), 1);
+    assert_eq!(*clear_calls.lock(), 1);
     assert_eq!(shell.input_value(), "draft prompt");
 }
 
@@ -1153,20 +1054,12 @@ fn startup_shell_follow_up_binding_submits_current_input_by_default() {
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("queued message");
     shell.set_on_submit(move |value| {
-        *submitted_for_callback
-            .lock()
-            .expect("submitted mutex poisoned") = Some(value);
+        *submitted_for_callback.lock() = Some(value);
     });
 
     shell.handle_input("\x18");
 
-    assert_eq!(
-        submitted
-            .lock()
-            .expect("submitted mutex poisoned")
-            .as_deref(),
-        Some("queued message")
-    );
+    assert_eq!(submitted.lock().as_deref(), Some("queued message"));
 }
 
 #[test]
@@ -1180,14 +1073,12 @@ fn startup_shell_follow_up_binding_ignores_whitespace_only_input() {
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("   ");
     shell.set_on_submit(move |_| {
-        *submitted_for_callback
-            .lock()
-            .expect("submitted mutex poisoned") += 1;
+        *submitted_for_callback.lock() += 1;
     });
 
     shell.handle_input("\x18");
 
-    assert_eq!(*submitted.lock().expect("submitted mutex poisoned"), 0);
+    assert_eq!(*submitted.lock(), 0);
 }
 
 #[test]
@@ -1203,23 +1094,16 @@ fn startup_shell_registered_follow_up_action_overrides_default_submit() {
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_input_value("queued message");
     shell.set_on_submit(move |_| {
-        *submitted_for_callback
-            .lock()
-            .expect("submitted mutex poisoned") += 1;
+        *submitted_for_callback.lock() += 1;
     });
     shell.on_action("app.message.followUp", move || {
-        *follow_up_calls_for_handler
-            .lock()
-            .expect("follow-up mutex poisoned") += 1;
+        *follow_up_calls_for_handler.lock() += 1;
     });
 
     shell.handle_input("\x18");
 
-    assert_eq!(
-        *follow_up_calls.lock().expect("follow-up mutex poisoned"),
-        1
-    );
-    assert_eq!(*submitted.lock().expect("submitted mutex poisoned"), 0);
+    assert_eq!(*follow_up_calls.lock(), 1);
+    assert_eq!(*submitted.lock(), 0);
 }
 
 #[test]
@@ -1231,18 +1115,18 @@ fn startup_shell_exit_handler_only_runs_when_input_is_empty() {
     let mut shell =
         StartupShellComponent::new("Pi", "1.2.3", &keybindings, &PlainKeyHintStyler, true);
     shell.set_on_exit(move || {
-        *exits_for_callback.lock().expect("exit mutex poisoned") += 1;
+        *exits_for_callback.lock() += 1;
     });
 
     shell.set_input_value("abc");
     shell.handle_input("\x01");
     shell.handle_input("\x04");
     assert_eq!(shell.input_value(), "bc");
-    assert_eq!(*exits.lock().expect("exit mutex poisoned"), 0);
+    assert_eq!(*exits.lock(), 0);
 
     shell.clear_input();
     shell.handle_input("\x04");
-    assert_eq!(*exits.lock().expect("exit mutex poisoned"), 1);
+    assert_eq!(*exits.lock(), 1);
 }
 
 #[test]

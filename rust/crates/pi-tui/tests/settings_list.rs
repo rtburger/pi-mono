@@ -1,8 +1,9 @@
+use parking_lot::Mutex;
 use pi_tui::{
     Component, SettingItem, SettingsList, SettingsListOptions, SettingsListTheme,
     SettingsSubmenuDone,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 const KEY_ENTER: &str = "\n";
 const KEY_ESCAPE: &str = "\x1b";
@@ -84,9 +85,7 @@ fn settings_list_cycles_values_and_emits_change() {
     );
     {
         let changes = Arc::clone(&changes);
-        list.set_on_change(move |id, value| {
-            changes.lock().expect("changes mutex").push((id, value))
-        });
+        list.set_on_change(move |id, value| changes.lock().push((id, value)));
     }
 
     list.handle_input(" ");
@@ -97,7 +96,7 @@ fn settings_list_cycles_values_and_emits_change() {
         "lines: {lines:?}"
     );
     assert_eq!(
-        changes.lock().expect("changes mutex").as_slice(),
+        changes.lock().as_slice(),
         &[(String::from("theme"), String::from("light"))]
     );
 }
@@ -167,9 +166,7 @@ fn settings_list_submenu_updates_value_and_returns_to_main_list() {
     );
     {
         let changes = Arc::clone(&changes);
-        list.set_on_change(move |id, value| {
-            changes.lock().expect("changes mutex").push((id, value))
-        });
+        list.set_on_change(move |id, value| changes.lock().push((id, value)));
     }
 
     list.handle_input(KEY_ENTER);
@@ -187,7 +184,7 @@ fn settings_list_submenu_updates_value_and_returns_to_main_list() {
         "lines: {lines:?}"
     );
     assert_eq!(
-        changes.lock().expect("changes mutex").as_slice(),
+        changes.lock().as_slice(),
         &[(String::from("editor"), String::from("manual"))]
     );
 }

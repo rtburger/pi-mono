@@ -1,4 +1,5 @@
 use futures::{StreamExt, stream};
+use parking_lot::Mutex;
 use pi_agent::{
     AfterToolCallResult, AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentState,
     AgentTool, AgentToolError, AgentToolResult, AssistantStreamer, BeforeToolCallResult,
@@ -18,10 +19,11 @@ use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
+use tokio::sync::Mutex as TokioMutex;
 use tokio::{sync::Notify, time::sleep};
 
 #[derive(Clone)]
@@ -47,7 +49,6 @@ impl AssistantStreamer for ScriptedStreamer {
         let events = self
             .streams
             .lock()
-            .unwrap()
             .pop_front()
             .ok_or_else(|| AiError::Message("no scripted stream remaining".into()))?;
         Ok(Box::pin(stream::iter(events)))
@@ -66,7 +67,7 @@ impl AiProvider for RecordingAiProvider {
         _context: Context,
         options: StreamOptions,
     ) -> AssistantEventStream {
-        self.seen_options.lock().unwrap().push(options);
+        self.seen_options.lock().push(options);
         let message = AssistantMessage {
             role: "assistant".into(),
             content: vec![AssistantContent::Text {
@@ -114,9 +115,9 @@ fn usage() -> Usage {
     Usage::default()
 }
 
-fn provider_registry_guard() -> std::sync::MutexGuard<'static, ()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
+async fn provider_registry_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static GUARD: OnceLock<TokioMutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| TokioMutex::new(())).lock().await
 }
 
 fn user_message(text: &str, timestamp: u64) -> Message {
@@ -637,7 +638,7 @@ async fn executes_parallel_tool_calls_and_keeps_tool_results_in_source_order() {
               _options: StreamOptions|
               -> Result<AssistantEventStream, AiError> {
             let current_call = {
-                let mut call_index = call_index.lock().unwrap();
+                let mut call_index = call_index.lock();
                 let current_call = *call_index;
                 *call_index += 1;
                 current_call
@@ -841,7 +842,7 @@ async fn prepares_arguments_and_allows_before_hook_mutation_without_revalidation
             move |_tool_call_id, args, _signal| {
                 let executed_args = executed_args.clone();
                 async move {
-                    executed_args.lock().unwrap().push(args.clone());
+                    executed_args.lock().push(args.clone());
                     Ok(AgentToolResult {
                         content: vec![UserContent::Text {
                             text: format!("executed: {args}"),
@@ -888,16 +889,13 @@ async fn prepares_arguments_and_allows_before_hook_mutation_without_revalidation
         AgentLoopConfig::new(model())
             .with_streamer(streamer)
             .with_before_tool_call(|before, _signal| async move {
-                *before.args.lock().unwrap() = json!({ "value": 123 });
+                *before.args.lock() = json!({ "value": 123 });
                 None
             }),
     );
 
     let events = collect_events(stream).await.unwrap();
-    assert_eq!(
-        executed_args.lock().unwrap().clone(),
-        vec![json!({ "value": 123 })]
-    );
+    assert_eq!(executed_args.lock().clone(), vec![json!({ "value": 123 })]);
 
     let tool_end = events
         .iter()
@@ -988,7 +986,7 @@ async fn validation_coerces_string_numbers_before_tool_execution() {
             move |_tool_call_id, args, _signal| {
                 let executed_args = executed_args.clone();
                 async move {
-                    executed_args.lock().unwrap().push(args.clone());
+                    executed_args.lock().push(args.clone());
                     Ok(AgentToolResult {
                         content: vec![UserContent::Text {
                             text: format!("counted: {}", args["count"]),
@@ -1026,10 +1024,7 @@ async fn validation_coerces_string_numbers_before_tool_execution() {
     );
 
     let events = collect_events(stream).await.unwrap();
-    assert_eq!(
-        executed_args.lock().unwrap().clone(),
-        vec![json!({ "count": 42 })]
-    );
+    assert_eq!(executed_args.lock().clone(), vec![json!({ "count": 42 })]);
 
     let tool_end = events
         .iter()
@@ -1276,10 +1271,10 @@ async fn steering_messages_are_injected_after_all_tool_results() {
               _options: StreamOptions|
               -> Result<AssistantEventStream, AiError> {
             let current_call = {
-                let mut call_index = call_index.lock().unwrap();
+                let mut call_index = call_index.lock();
                 let current_call = *call_index;
                 if current_call == 1 {
-                    *saw_interrupt_in_context.lock().unwrap() = context
+                    *saw_interrupt_in_context.lock() = context
                         .messages
                         .iter()
                         .any(|message| llm_message_has_user_text(message, "interrupt"));
@@ -1350,7 +1345,7 @@ async fn steering_messages_are_injected_after_all_tool_results() {
                     let steering_polls = steering_polls.clone();
                     let queued_message = queued_message.clone();
                     async move {
-                        let mut steering_polls = steering_polls.lock().unwrap();
+                        let mut steering_polls = steering_polls.lock();
                         let current_poll = *steering_polls;
                         *steering_polls += 1;
                         if current_poll == 1 {
@@ -1381,7 +1376,7 @@ async fn steering_messages_are_injected_after_all_tool_results() {
         event_sequence,
         vec!["tool:tool-1", "tool:tool-2", "interrupt"]
     );
-    assert!(*saw_interrupt_in_context.lock().unwrap());
+    assert!(*saw_interrupt_in_context.lock());
 
     let messages = final_messages(&events);
     assert_eq!(messages.len(), 6);
@@ -1403,10 +1398,10 @@ async fn follow_up_messages_resume_after_agent_would_otherwise_stop() {
               _options: StreamOptions|
               -> Result<AssistantEventStream, AiError> {
             let current_call = {
-                let mut call_index = call_index.lock().unwrap();
+                let mut call_index = call_index.lock();
                 let current_call = *call_index;
                 if current_call == 1 {
-                    *saw_follow_up_in_context.lock().unwrap() = context
+                    *saw_follow_up_in_context.lock() = context
                         .messages
                         .iter()
                         .any(|message| llm_message_has_user_text(message, "follow up"));
@@ -1443,7 +1438,7 @@ async fn follow_up_messages_resume_after_agent_would_otherwise_stop() {
                     let follow_up_polls = follow_up_polls.clone();
                     let queued_message = queued_message.clone();
                     async move {
-                        let mut follow_up_polls = follow_up_polls.lock().unwrap();
+                        let mut follow_up_polls = follow_up_polls.lock();
                         let current_poll = *follow_up_polls;
                         *follow_up_polls += 1;
                         if current_poll == 0 {
@@ -1457,7 +1452,7 @@ async fn follow_up_messages_resume_after_agent_would_otherwise_stop() {
     );
 
     let events = collect_events(stream).await.unwrap();
-    assert!(*saw_follow_up_in_context.lock().unwrap());
+    assert!(*saw_follow_up_in_context.lock());
 
     let messages = final_messages(&events);
     assert_eq!(messages.len(), 4);
@@ -1476,7 +1471,7 @@ async fn convert_to_llm_can_map_custom_messages_into_llm_requests() {
               context: Context,
               _options: StreamOptions|
               -> Result<AssistantEventStream, AiError> {
-            *seen_llm_messages.lock().unwrap() = context.messages.clone();
+            *seen_llm_messages.lock() = context.messages.clone();
             Ok(Box::pin(stream::iter(vec![Ok(AssistantEvent::Done {
                 reason: StopReason::Stop,
                 message: assistant_message("done", StopReason::Stop, 20),
@@ -1501,7 +1496,7 @@ async fn convert_to_llm_can_map_custom_messages_into_llm_requests() {
     );
 
     let events = collect_events(stream).await.unwrap();
-    let llm_messages = seen_llm_messages.lock().unwrap().clone();
+    let llm_messages = seen_llm_messages.lock().clone();
     assert_eq!(llm_messages.len(), 1);
     assert!(llm_message_has_user_text(&llm_messages[0], "from custom"));
 
@@ -1576,7 +1571,7 @@ async fn transform_context_runs_before_convert_to_llm() {
                 move |messages| {
                     let seen_converted_messages = seen_converted_messages.clone();
                     async move {
-                        *seen_converted_messages.lock().unwrap() = messages.clone();
+                        *seen_converted_messages.lock() = messages.clone();
                         convert_custom_text_messages_to_llm(messages)
                     }
                 }
@@ -1584,7 +1579,7 @@ async fn transform_context_runs_before_convert_to_llm() {
     );
 
     let _events = collect_events(stream).await.unwrap();
-    let seen_converted_messages = seen_converted_messages.lock().unwrap().clone();
+    let seen_converted_messages = seen_converted_messages.lock().clone();
     assert_eq!(seen_converted_messages.len(), 2);
     assert!(is_standard_assistant_message(&seen_converted_messages[0]));
     assert!(is_standard_user_message(&seen_converted_messages[1]));
@@ -1632,7 +1627,7 @@ async fn continue_allows_custom_tail_when_convert_to_llm_maps_it_to_user() {
 
 #[tokio::test]
 async fn default_streamer_maps_reasoning_effort_through_simple_options() {
-    let _guard = provider_registry_guard();
+    let _guard = provider_registry_guard().await;
     let faux = register_faux_provider(RegisterFauxProviderOptions::default());
     let faux_model = faux.get_model(None).expect("faux model");
     let _ = stream_response(faux_model, Context::default(), StreamOptions::default())
@@ -1676,7 +1671,7 @@ async fn default_streamer_maps_reasoning_effort_through_simple_options() {
     );
 
     let _events = collect_events(stream).await.unwrap();
-    let seen = seen_options.lock().unwrap().clone();
+    let seen = seen_options.lock().clone();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].reasoning_effort.as_deref(), Some("high"));
     assert_eq!(seen[0].max_tokens, Some(40_000));
@@ -1687,7 +1682,7 @@ async fn default_streamer_maps_reasoning_effort_through_simple_options() {
 
 #[tokio::test]
 async fn default_streamer_forwards_custom_thinking_budgets() {
-    let _guard = provider_registry_guard();
+    let _guard = provider_registry_guard().await;
     let faux = register_faux_provider(RegisterFauxProviderOptions::default());
     let faux_model = faux.get_model(None).expect("faux model");
     let _ = stream_response(faux_model, Context::default(), StreamOptions::default())
@@ -1736,7 +1731,7 @@ async fn default_streamer_forwards_custom_thinking_budgets() {
     );
 
     let _events = collect_events(stream).await.unwrap();
-    let seen = seen_options.lock().unwrap().clone();
+    let seen = seen_options.lock().clone();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].reasoning_effort.as_deref(), Some("high"));
     assert_eq!(seen[0].max_tokens, Some(34_048));
@@ -1747,7 +1742,7 @@ async fn default_streamer_forwards_custom_thinking_budgets() {
 
 #[tokio::test]
 async fn default_streamer_runs_against_pi_ai_faux_provider() {
-    let _guard = provider_registry_guard();
+    let _guard = provider_registry_guard().await;
     let registration = register_faux_provider(RegisterFauxProviderOptions::default());
     registration.set_responses(vec![FauxResponse::text("4")]);
     let model = registration.get_model(None).unwrap();

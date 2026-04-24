@@ -1,15 +1,16 @@
+use parking_lot::{Mutex, MutexGuard};
 use pi_coding_agent_tui::{BorderedLoader, BorderedLoaderOptions, KeybindingsManager, init_theme};
 use pi_tui::{Component, visible_width};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
 };
 
 const KEY_ESCAPE: &str = "\x1b";
 
-fn bordered_loader_test_guard() -> std::sync::MutexGuard<'static, ()> {
+fn bordered_loader_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    LOCK.get_or_init(|| Mutex::new(())).lock()
 }
 
 fn keybindings() -> KeybindingsManager {
@@ -26,7 +27,7 @@ fn bordered_loader_renders_borders_and_cancels_on_escape() {
 
     let mut loader = BorderedLoader::new(&keybindings, None, "Working...");
     loader.set_on_abort(move || {
-        *aborted_for_callback.lock().expect("aborted mutex poisoned") = true;
+        *aborted_for_callback.lock() = true;
     });
 
     let lines = loader.render(32);
@@ -43,7 +44,7 @@ fn bordered_loader_renders_borders_and_cancels_on_escape() {
 
     assert!(*loader.signal().borrow());
     assert!(loader.aborted());
-    assert!(*aborted.lock().expect("aborted mutex poisoned"));
+    assert!(*aborted.lock());
     loader.dispose();
 }
 

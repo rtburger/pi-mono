@@ -1,5 +1,6 @@
 use async_stream::try_stream;
 use futures::stream;
+use parking_lot::Mutex;
 use pi_agent::{
     Agent, AgentError, AgentEvent, AgentMessage, AgentState, AgentTool, AgentToolError,
     AgentToolResult, CustomAgentMessage, QueueMode, ThinkingBudgets, ToolExecutionMode,
@@ -13,11 +14,12 @@ use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
+use tokio::sync::Mutex as TokioMutex;
 use tokio::{sync::Notify, time::sleep};
 
 fn model() -> Model {
@@ -45,9 +47,9 @@ fn usage() -> Usage {
     Usage::default()
 }
 
-fn provider_registry_guard() -> std::sync::MutexGuard<'static, ()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
+async fn provider_registry_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static GUARD: OnceLock<TokioMutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| TokioMutex::new(())).lock().await
 }
 
 fn user_message(text: &str, timestamp: u64) -> Message {
@@ -191,7 +193,7 @@ impl AiProvider for RecordingAiProvider {
         _context: Context,
         options: StreamOptions,
     ) -> AssistantEventStream {
-        self.seen_options.lock().unwrap().push(options);
+        self.seen_options.lock().push(options);
         let message = AssistantMessage {
             role: "assistant".into(),
             content: vec![AssistantContent::Text {
@@ -345,7 +347,7 @@ async fn abort_marks_signal_and_records_aborted_message() {
         let abort_seen_listener = abort_seen_listener.clone();
         async move {
             if matches!(event, AgentEvent::AgentStart) {
-                *abort_seen_listener.lock().unwrap() = *signal.borrow();
+                *abort_seen_listener.lock() = *signal.borrow();
             }
         }
     });
@@ -371,7 +373,7 @@ async fn abort_marks_signal_and_records_aborted_message() {
         }
         other => panic!("expected assistant message, got {other:?}"),
     }
-    assert!(!*abort_seen.lock().unwrap());
+    assert!(!*abort_seen.lock());
 }
 
 #[tokio::test]
@@ -414,10 +416,7 @@ async fn continue_uses_existing_tool_result_state_and_updates_transcript() {
               context: Context,
               _options: StreamOptions|
               -> Result<AssistantEventStream, AiError> {
-            seen_context_messages
-                .lock()
-                .unwrap()
-                .push(context.messages.clone());
+            seen_context_messages.lock().push(context.messages.clone());
 
             let message = assistant_message("The answer is 8.", StopReason::Stop, 30);
             Ok(Box::pin(try_stream! {
@@ -470,7 +469,7 @@ async fn continue_uses_existing_tool_result_state_and_updates_transcript() {
 
     agent.r#continue().await.unwrap();
 
-    let contexts = seen_context_messages.lock().unwrap().clone();
+    let contexts = seen_context_messages.lock().clone();
     assert_eq!(contexts.len(), 1);
     assert_eq!(contexts[0].len(), 3);
     assert!(matches!(
@@ -498,10 +497,7 @@ async fn prompt_text_with_images_preserves_text_then_images() {
               context: Context,
               _options: StreamOptions|
               -> Result<AssistantEventStream, AiError> {
-            seen_context_messages
-                .lock()
-                .unwrap()
-                .push(context.messages.clone());
+            seen_context_messages.lock().push(context.messages.clone());
 
             let message = assistant_message("ok", StopReason::Stop, 20);
             Ok(Box::pin(try_stream! {
@@ -532,7 +528,7 @@ async fn prompt_text_with_images_preserves_text_then_images() {
         .await
         .unwrap();
 
-    let messages = seen_context_messages.lock().unwrap().clone();
+    let messages = seen_context_messages.lock().clone();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].len(), 1);
     assert!(matches!(
@@ -561,10 +557,7 @@ async fn prompt_accepts_text_like_typescript_prompt_string_overload() {
               context: Context,
               _options: StreamOptions|
               -> Result<AssistantEventStream, AiError> {
-            seen_context_messages
-                .lock()
-                .unwrap()
-                .push(context.messages.clone());
+            seen_context_messages.lock().push(context.messages.clone());
 
             let message = assistant_message("ok", StopReason::Stop, 20);
             Ok(Box::pin(try_stream! {
@@ -580,7 +573,7 @@ async fn prompt_accepts_text_like_typescript_prompt_string_overload() {
 
     agent.prompt("hello").await.unwrap();
 
-    let messages = seen_context_messages.lock().unwrap().clone();
+    let messages = seen_context_messages.lock().clone();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].len(), 1);
     assert!(matches!(
@@ -606,10 +599,7 @@ async fn prompt_accepts_text_and_images_tuple_like_typescript_prompt_overload() 
               context: Context,
               _options: StreamOptions|
               -> Result<AssistantEventStream, AiError> {
-            seen_context_messages
-                .lock()
-                .unwrap()
-                .push(context.messages.clone());
+            seen_context_messages.lock().push(context.messages.clone());
 
             let message = assistant_message("ok", StopReason::Stop, 20);
             Ok(Box::pin(try_stream! {
@@ -640,7 +630,7 @@ async fn prompt_accepts_text_and_images_tuple_like_typescript_prompt_overload() 
         .await
         .unwrap();
 
-    let messages = seen_context_messages.lock().unwrap().clone();
+    let messages = seen_context_messages.lock().clone();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].len(), 1);
     assert!(matches!(
@@ -669,10 +659,7 @@ async fn prompt_messages_preserves_batch_order_like_typescript_prompt_array() {
               context: Context,
               _options: StreamOptions|
               -> Result<AssistantEventStream, AiError> {
-            seen_context_messages
-                .lock()
-                .unwrap()
-                .push(context.messages.clone());
+            seen_context_messages.lock().push(context.messages.clone());
 
             let message = assistant_message("ok", StopReason::Stop, 20);
             Ok(Box::pin(try_stream! {
@@ -693,7 +680,7 @@ async fn prompt_messages_preserves_batch_order_like_typescript_prompt_array() {
 
     agent.prompt_messages(prompts).await.unwrap();
 
-    let contexts = seen_context_messages.lock().unwrap().clone();
+    let contexts = seen_context_messages.lock().clone();
     assert_eq!(contexts.len(), 1);
     assert_eq!(contexts[0].len(), 2);
     assert!(matches!(
@@ -753,7 +740,7 @@ async fn continue_drains_all_steering_messages_when_mode_is_all() {
             let response_count = response_count.clone();
             Ok(Box::pin(try_stream! {
                 let next_count = {
-                    let mut response_count = response_count.lock().unwrap();
+                    let mut response_count = response_count.lock();
                     *response_count += 1;
                     *response_count
                 };
@@ -800,7 +787,7 @@ async fn continue_drains_all_steering_messages_when_mode_is_all() {
     agent.r#continue().await.unwrap();
 
     let state = agent.state();
-    assert_eq!(*response_count.lock().unwrap(), 1);
+    assert_eq!(*response_count.lock(), 1);
     assert_eq!(state.messages.len(), 5);
     assert!(message_has_user_text(&state.messages[2], "steering 1"));
     assert!(message_has_user_text(&state.messages[3], "steering 2"));
@@ -872,7 +859,7 @@ async fn continue_keeps_steering_queue_one_at_a_time_from_assistant_tail() {
             let response_count = response_count.clone();
             Ok(Box::pin(try_stream! {
                 let next_count = {
-                    let mut response_count = response_count.lock().unwrap();
+                    let mut response_count = response_count.lock();
                     *response_count += 1;
                     *response_count
                 };
@@ -918,7 +905,7 @@ async fn continue_keeps_steering_queue_one_at_a_time_from_assistant_tail() {
     agent.r#continue().await.unwrap();
 
     let state = agent.state();
-    assert_eq!(*response_count.lock().unwrap(), 2);
+    assert_eq!(*response_count.lock(), 2);
     assert_eq!(state.messages.len(), 6);
     assert!(message_has_user_text(&state.messages[2], "steering 1"));
     assert!(is_standard_assistant_message(&state.messages[3]));
@@ -938,7 +925,7 @@ async fn continue_prefers_queued_steering_messages_over_follow_up_messages_from_
             let response_count = response_count.clone();
             Ok(Box::pin(try_stream! {
                 let next_count = {
-                    let mut response_count = response_count.lock().unwrap();
+                    let mut response_count = response_count.lock();
                     *response_count += 1;
                     *response_count
                 };
@@ -983,7 +970,7 @@ async fn continue_prefers_queued_steering_messages_over_follow_up_messages_from_
 
     agent.r#continue().await.unwrap();
 
-    assert_eq!(*response_count.lock().unwrap(), 2);
+    assert_eq!(*response_count.lock(), 2);
     assert!(!agent.has_queued_messages());
 
     let state = agent.state();
@@ -1009,12 +996,12 @@ async fn prompt_drains_all_follow_up_messages_when_mode_is_all() {
             let saw_follow_ups_in_context = saw_follow_ups_in_context.clone();
             Ok(Box::pin(try_stream! {
                 let next_count = {
-                    let mut response_count = response_count.lock().unwrap();
+                    let mut response_count = response_count.lock();
                     *response_count += 1;
                     *response_count
                 };
                 if next_count == 2 {
-                    *saw_follow_ups_in_context.lock().unwrap() = context
+                    *saw_follow_ups_in_context.lock() = context
                         .messages
                         .iter()
                         .any(|message| matches!(message, Message::User { content, .. } if content.iter().any(|block| matches!(block, UserContent::Text { text } if text == "follow up 1"))))
@@ -1044,8 +1031,8 @@ async fn prompt_drains_all_follow_up_messages_when_mode_is_all() {
     agent.prompt_text("start").await.unwrap();
 
     let state = agent.state();
-    assert_eq!(*response_count.lock().unwrap(), 2);
-    assert!(*saw_follow_ups_in_context.lock().unwrap());
+    assert_eq!(*response_count.lock(), 2);
+    assert!(*saw_follow_ups_in_context.lock());
     assert_eq!(state.messages.len(), 5);
     assert!(is_standard_user_message(&state.messages[0]));
     assert!(is_standard_assistant_message(&state.messages[1]));
@@ -1063,7 +1050,7 @@ async fn wrapper_forwards_transform_context_and_convert_to_llm_for_custom_messag
               context: Context,
               _options: StreamOptions|
               -> Result<AssistantEventStream, AiError> {
-            *seen_llm_messages.lock().unwrap() = context.messages.clone();
+            *seen_llm_messages.lock() = context.messages.clone();
             Ok(Box::pin(try_stream! {
                 yield AssistantEvent::Done {
                     reason: StopReason::Stop,
@@ -1111,7 +1098,7 @@ async fn wrapper_forwards_transform_context_and_convert_to_llm_for_custom_messag
         .await
         .unwrap();
 
-    let llm_messages = seen_llm_messages.lock().unwrap().clone();
+    let llm_messages = seen_llm_messages.lock().clone();
     assert_eq!(llm_messages.len(), 1);
     assert!(matches!(
         &llm_messages[0],
@@ -1252,7 +1239,6 @@ async fn wrapper_runs_tool_flow_and_tracks_pending_tool_calls() {
               -> Result<AssistantEventStream, AiError> {
             let message = calls
                 .lock()
-                .unwrap()
                 .pop_front()
                 .expect("expected scripted assistant message");
             let reason = message.stop_reason.clone();
@@ -1277,7 +1263,7 @@ async fn wrapper_runs_tool_flow_and_tracks_pending_tool_calls() {
                 event,
                 AgentEvent::ToolExecutionStart { .. } | AgentEvent::ToolExecutionEnd { .. }
             ) {
-                pending_snapshots_listener.lock().unwrap().push(
+                pending_snapshots_listener.lock().push(
                     pending_agent
                         .state()
                         .pending_tool_calls
@@ -1293,7 +1279,7 @@ async fn wrapper_runs_tool_flow_and_tracks_pending_tool_calls() {
 
     let state = agent.state();
     assert_eq!(
-        pending_snapshots.lock().unwrap().clone(),
+        pending_snapshots.lock().clone(),
         vec![vec![String::from("tool-1")], Vec::<String>::new()]
     );
     assert!(state.pending_tool_calls.is_empty());
@@ -1353,7 +1339,6 @@ async fn wrapper_preserves_pending_tool_call_iteration_order_like_typescript_set
               -> Result<AssistantEventStream, AiError> {
             let message = calls
                 .lock()
-                .unwrap()
                 .pop_front()
                 .expect("expected scripted assistant message");
             let reason = message.stop_reason.clone();
@@ -1375,7 +1360,7 @@ async fn wrapper_preserves_pending_tool_call_iteration_order_like_typescript_set
         let pending_snapshots_listener = pending_snapshots_listener.clone();
         async move {
             if matches!(event, AgentEvent::ToolExecutionStart { .. }) {
-                pending_snapshots_listener.lock().unwrap().push(
+                pending_snapshots_listener.lock().push(
                     pending_agent
                         .state()
                         .pending_tool_calls
@@ -1390,7 +1375,7 @@ async fn wrapper_preserves_pending_tool_call_iteration_order_like_typescript_set
     agent.prompt_text("run tool").await.unwrap();
 
     assert_eq!(
-        pending_snapshots.lock().unwrap().clone(),
+        pending_snapshots.lock().clone(),
         vec![
             vec![String::from("tool-b")],
             vec![String::from("tool-b"), String::from("tool-a")],
@@ -1418,7 +1403,6 @@ async fn wrapper_forwards_tool_execution_updates_to_listeners() {
               -> Result<AssistantEventStream, AiError> {
             let message = calls
                 .lock()
-                .unwrap()
                 .pop_front()
                 .expect("expected scripted assistant message");
             let reason = message.stop_reason.clone();
@@ -1475,7 +1459,6 @@ async fn wrapper_forwards_tool_execution_updates_to_listeners() {
                     .collect::<Vec<_>>();
                 update_snapshots_listener
                     .lock()
-                    .unwrap()
                     .push((pending_ids, partial_result));
             }
         }
@@ -1483,7 +1466,7 @@ async fn wrapper_forwards_tool_execution_updates_to_listeners() {
 
     agent.prompt_text("run tool").await.unwrap();
 
-    let update_snapshots = update_snapshots.lock().unwrap().clone();
+    let update_snapshots = update_snapshots.lock().clone();
     assert_eq!(update_snapshots.len(), 1);
     assert_eq!(update_snapshots[0].0, vec![String::from("tool-1")]);
     assert_eq!(
@@ -1503,10 +1486,7 @@ async fn wrapper_forwards_state_thinking_level_as_reasoning_effort() {
               _context: Context,
               options: StreamOptions|
               -> Result<AssistantEventStream, AiError> {
-            seen_reasoning
-                .lock()
-                .unwrap()
-                .push(options.reasoning_effort.clone());
+            seen_reasoning.lock().push(options.reasoning_effort.clone());
             let message = assistant_message("done", StopReason::Stop, 20);
             Ok(Box::pin(try_stream! {
                 yield AssistantEvent::Done {
@@ -1526,14 +1506,14 @@ async fn wrapper_forwards_state_thinking_level_as_reasoning_effort() {
     agent.prompt_text("hello again").await.unwrap();
 
     assert_eq!(
-        seen_reasoning.lock().unwrap().clone(),
+        seen_reasoning.lock().clone(),
         vec![Some(String::from("high")), None]
     );
 }
 
 #[tokio::test]
 async fn wrapper_forwards_custom_thinking_budgets_through_default_streamer() {
-    let _guard = provider_registry_guard();
+    let _guard = provider_registry_guard().await;
     let faux = pi_ai::register_faux_provider(pi_ai::RegisterFauxProviderOptions::default());
     let faux_model = faux.get_model(None).expect("faux model");
     let _ = pi_ai::stream_response(faux_model, Context::default(), StreamOptions::default())
@@ -1576,7 +1556,7 @@ async fn wrapper_forwards_custom_thinking_budgets_through_default_streamer() {
 
     agent.prompt_text("hello").await.unwrap();
 
-    let seen = seen_options.lock().unwrap().clone();
+    let seen = seen_options.lock().clone();
     assert_eq!(seen.len(), 1);
     assert_eq!(agent.thinking_budgets().high, Some(2_048));
     assert_eq!(seen[0].reasoning_effort.as_deref(), Some("high"));
@@ -1595,10 +1575,7 @@ async fn wrapper_falls_back_to_stream_options_api_key_when_hook_returns_empty_st
               _context: Context,
               options: StreamOptions|
               -> Result<AssistantEventStream, AiError> {
-            received_api_keys
-                .lock()
-                .unwrap()
-                .push(options.api_key.clone());
+            received_api_keys.lock().push(options.api_key.clone());
 
             let message = assistant_message("ok", StopReason::Stop, 20);
             Ok(Box::pin(try_stream! {
@@ -1619,7 +1596,7 @@ async fn wrapper_falls_back_to_stream_options_api_key_when_hook_returns_empty_st
     agent.prompt_text("hello").await.unwrap();
 
     assert_eq!(
-        received_api_keys.lock().unwrap().clone(),
+        received_api_keys.lock().clone(),
         vec![Some(String::from("fallback-key"))]
     );
 }
@@ -1676,7 +1653,6 @@ async fn wrapper_can_switch_to_sequential_tool_execution() {
               -> Result<AssistantEventStream, AiError> {
             let message = calls
                 .lock()
-                .unwrap()
                 .pop_front()
                 .expect("expected scripted assistant message");
             let reason = message.stop_reason.clone();
@@ -1750,10 +1726,7 @@ async fn wrapper_can_switch_to_sequential_tool_execution() {
                 message: AgentMessage::Standard(Message::ToolResult { tool_call_id, .. }),
             } = event
             {
-                tool_result_ids_listener
-                    .lock()
-                    .unwrap()
-                    .push(tool_call_id.clone());
+                tool_result_ids_listener.lock().push(tool_call_id.clone());
             }
         }
     });
@@ -1762,7 +1735,7 @@ async fn wrapper_can_switch_to_sequential_tool_execution() {
 
     assert!(!parallel_observed.load(Ordering::SeqCst));
     assert_eq!(
-        tool_result_ids.lock().unwrap().clone(),
+        tool_result_ids.lock().clone(),
         vec![String::from("tool-1"), String::from("tool-2")]
     );
 }
@@ -1787,7 +1760,6 @@ async fn wrapper_forwards_before_and_after_tool_hooks() {
               -> Result<AssistantEventStream, AiError> {
             let message = calls
                 .lock()
-                .unwrap()
                 .pop_front()
                 .expect("expected scripted assistant message");
             let reason = message.stop_reason.clone();
@@ -1829,7 +1801,7 @@ async fn wrapper_forwards_before_and_after_tool_hooks() {
     let agent = Agent::with_parts(initial_state, streamer, StreamOptions::default());
 
     agent.set_before_tool_call(|before, _signal| async move {
-        *before.args.lock().unwrap() = json!({ "value": "mutated" });
+        *before.args.lock() = json!({ "value": "mutated" });
         None
     });
     agent.set_after_tool_call(|_after, _signal| async move {

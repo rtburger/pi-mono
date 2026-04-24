@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use pi_ai::Transport;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -5,7 +6,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
     thread::sleep,
     time::Duration,
 };
@@ -508,10 +509,7 @@ impl InMemorySettingsStorage {
     }
 
     pub fn raw(&self, scope: SettingsScope) -> Option<String> {
-        let inner = self
-            .inner
-            .lock()
-            .expect("in-memory settings mutex poisoned");
+        let inner = self.inner.lock();
         match scope {
             SettingsScope::Global => inner.global.clone(),
             SettingsScope::Project => inner.project.clone(),
@@ -519,10 +517,7 @@ impl InMemorySettingsStorage {
     }
 
     pub fn set_raw(&self, scope: SettingsScope, content: Option<String>) {
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("in-memory settings mutex poisoned");
+        let mut inner = self.inner.lock();
         match scope {
             SettingsScope::Global => inner.global = content,
             SettingsScope::Project => inner.project = content,

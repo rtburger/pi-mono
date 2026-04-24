@@ -1,4 +1,5 @@
 use crate::config_value::resolve_config_value_uncached;
+use parking_lot::Mutex;
 use pi_ai::oauth::{
     OAuthCredentials, OAuthRefreshOverrides, get_oauth_provider, refresh_oauth_token_with_overrides,
 };
@@ -11,7 +12,7 @@ use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::sleep;
@@ -46,7 +47,7 @@ impl MemoryAuthStorage {
     ) -> Self {
         let storage = Self::default();
         {
-            let mut guard = storage.api_keys.lock().unwrap();
+            let mut guard = storage.api_keys.lock();
             for (provider, api_key) in api_keys {
                 guard.insert(provider.into(), api_key.into());
             }
@@ -55,24 +56,21 @@ impl MemoryAuthStorage {
     }
 
     pub fn set_api_key(&self, provider: impl Into<String>, api_key: impl Into<String>) {
-        self.api_keys
-            .lock()
-            .unwrap()
-            .insert(provider.into(), api_key.into());
+        self.api_keys.lock().insert(provider.into(), api_key.into());
     }
 
     pub fn remove_api_key(&self, provider: &str) {
-        self.api_keys.lock().unwrap().remove(provider);
+        self.api_keys.lock().remove(provider);
     }
 }
 
 impl AuthSource for MemoryAuthStorage {
     fn has_auth(&self, provider: &str) -> bool {
-        self.api_keys.lock().unwrap().contains_key(provider)
+        self.api_keys.lock().contains_key(provider)
     }
 
     fn get_api_key(&self, provider: &str) -> Option<String> {
-        self.api_keys.lock().unwrap().get(provider).cloned()
+        self.api_keys.lock().get(provider).cloned()
     }
 }
 

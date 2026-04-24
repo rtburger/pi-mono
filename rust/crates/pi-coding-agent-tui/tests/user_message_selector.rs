@@ -1,19 +1,20 @@
+use parking_lot::{Mutex, MutexGuard};
 use pi_coding_agent_tui::{
     KeybindingsManager, UserMessageSelectorComponent, UserMessageSelectorItem, init_theme,
 };
 use pi_tui::Component;
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
 };
 
 const KEY_ENTER: &str = "\n";
 const KEY_ESCAPE: &str = "\x1b";
 const KEY_UP: &str = "\x1b[A";
 
-fn selector_test_guard() -> std::sync::MutexGuard<'static, ()> {
+fn selector_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    LOCK.get_or_init(|| Mutex::new(())).lock()
 }
 
 fn keybindings() -> KeybindingsManager {
@@ -43,7 +44,7 @@ fn user_message_selector_defaults_to_most_recent_message() {
     );
     {
         let selected = Arc::clone(&selected);
-        selector.set_on_select(move |value| *selected.lock().unwrap() = Some(value));
+        selector.set_on_select(move |value| *selected.lock() = Some(value));
     }
 
     let rendered = selector.render(80).join("\n");
@@ -52,7 +53,7 @@ fn user_message_selector_defaults_to_most_recent_message() {
 
     selector.handle_input(KEY_ENTER);
 
-    assert_eq!(*selected.lock().unwrap(), Some(String::from("second")));
+    assert_eq!(*selected.lock(), Some(String::from("second")));
 }
 
 #[test]
@@ -79,19 +80,19 @@ fn user_message_selector_navigates_and_cancels() {
     );
     {
         let selected = Arc::clone(&selected);
-        selector.set_on_select(move |value| *selected.lock().unwrap() = Some(value));
+        selector.set_on_select(move |value| *selected.lock() = Some(value));
     }
     {
         let cancelled = Arc::clone(&cancelled);
-        selector.set_on_cancel(move || *cancelled.lock().unwrap() = true);
+        selector.set_on_cancel(move || *cancelled.lock() = true);
     }
 
     selector.handle_input(KEY_UP);
     selector.handle_input(KEY_ENTER);
     selector.handle_input(KEY_ESCAPE);
 
-    assert_eq!(*selected.lock().unwrap(), Some(String::from("root")));
-    assert!(*cancelled.lock().unwrap());
+    assert_eq!(*selected.lock(), Some(String::from("root")));
+    assert!(*cancelled.lock());
 
     let rendered = selector.render(80).join("\n");
     assert!(rendered.contains("root"), "output: {rendered}");

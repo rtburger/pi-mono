@@ -1,3 +1,4 @@
+use parking_lot::{Mutex, MutexGuard};
 use pi_agent::{AgentMessage, ThinkingLevel, Transport};
 use pi_coding_agent_core::{SessionEntry, SessionInfo, SessionTreeNode};
 use pi_coding_agent_tui::{
@@ -13,7 +14,7 @@ use pi_events::{Message, Model, ModelCost, UserContent};
 use pi_tui::Component;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -25,11 +26,9 @@ const CTRL_D: &str = "\x04";
 const CTRL_S: &str = "\x13";
 const CTRL_T: &str = "\x14";
 
-fn selector_test_guard() -> std::sync::MutexGuard<'static, ()> {
+fn selector_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    LOCK.get_or_init(|| Mutex::new(())).lock()
 }
 
 fn keybindings() -> KeybindingsManager {
@@ -134,13 +133,13 @@ fn thinking_selector_selects_configured_level() {
     );
     {
         let selected = Arc::clone(&selected);
-        selector.set_on_select(move |level| *selected.lock().unwrap() = Some(level));
+        selector.set_on_select(move |level| *selected.lock() = Some(level));
     }
 
     selector.handle_input(KEY_DOWN);
     selector.handle_input(KEY_ENTER);
 
-    assert_eq!(*selected.lock().unwrap(), Some(ThinkingLevel::High));
+    assert_eq!(*selected.lock(), Some(ThinkingLevel::High));
     assert!(
         selector
             .render(80)
@@ -172,21 +171,18 @@ fn theme_selector_previews_and_selects_theme() {
     );
     {
         let previewed = Arc::clone(&previewed);
-        selector.set_on_preview(move |theme| previewed.lock().unwrap().push(theme));
+        selector.set_on_preview(move |theme| previewed.lock().push(theme));
     }
     {
         let selected = Arc::clone(&selected);
-        selector.set_on_select(move |theme| *selected.lock().unwrap() = Some(theme));
+        selector.set_on_select(move |theme| *selected.lock() = Some(theme));
     }
 
     selector.handle_input(KEY_DOWN);
     selector.handle_input(KEY_ENTER);
 
-    assert_eq!(
-        previewed.lock().unwrap().as_slice(),
-        &[String::from("light")]
-    );
-    assert_eq!(*selected.lock().unwrap(), Some(String::from("light")));
+    assert_eq!(previewed.lock().as_slice(), &[String::from("light")]);
+    assert_eq!(*selected.lock(), Some(String::from("light")));
 }
 
 #[test]
@@ -198,13 +194,13 @@ fn show_images_selector_returns_boolean_choice() {
     let mut selector = ShowImagesSelectorComponent::new(&keybindings, true);
     {
         let selected = Arc::clone(&selected);
-        selector.set_on_select(move |value| *selected.lock().unwrap() = Some(value));
+        selector.set_on_select(move |value| *selected.lock() = Some(value));
     }
 
     selector.handle_input(KEY_DOWN);
     selector.handle_input(KEY_ENTER);
 
-    assert_eq!(*selected.lock().unwrap(), Some(false));
+    assert_eq!(*selected.lock(), Some(false));
 }
 
 #[test]
@@ -231,13 +227,13 @@ fn oauth_selector_selects_provider_id() {
     );
     {
         let selected = Arc::clone(&selected);
-        selector.set_on_select(move |provider_id| *selected.lock().unwrap() = Some(provider_id));
+        selector.set_on_select(move |provider_id| *selected.lock() = Some(provider_id));
     }
 
     selector.handle_input(KEY_DOWN);
     selector.handle_input(KEY_ENTER);
 
-    assert_eq!(*selected.lock().unwrap(), Some(String::from("openai")));
+    assert_eq!(*selected.lock(), Some(String::from("openai")));
 }
 
 #[test]
@@ -260,11 +256,11 @@ fn scoped_models_selector_toggles_and_persists_models() {
     );
     {
         let toggles = Arc::clone(&toggles);
-        selector.set_on_model_toggle(move |event| toggles.lock().unwrap().push(event));
+        selector.set_on_model_toggle(move |event| toggles.lock().push(event));
     }
     {
         let persisted = Arc::clone(&persisted);
-        selector.set_on_persist(move |value| *persisted.lock().unwrap() = Some(value));
+        selector.set_on_persist(move |value| *persisted.lock() = Some(value));
     }
 
     selector.handle_input(KEY_DOWN);
@@ -272,11 +268,11 @@ fn scoped_models_selector_toggles_and_persists_models() {
     selector.handle_input(CTRL_S);
 
     assert_eq!(
-        toggles.lock().unwrap().as_slice(),
+        toggles.lock().as_slice(),
         &[(String::from("openai/gpt-5"), true)]
     );
     assert_eq!(
-        *persisted.lock().unwrap(),
+        *persisted.lock(),
         Some(vec![
             String::from("anthropic/claude"),
             String::from("openai/gpt-5"),
@@ -331,16 +327,13 @@ fn session_selector_confirms_delete_for_selected_session() {
     );
     {
         let deleted = Arc::clone(&deleted);
-        selector.set_on_delete(move |path| *deleted.lock().unwrap() = Some(path));
+        selector.set_on_delete(move |path| *deleted.lock() = Some(path));
     }
 
     selector.handle_input(CTRL_D);
     selector.handle_input(KEY_ENTER);
 
-    assert_eq!(
-        *deleted.lock().unwrap(),
-        Some(String::from("/tmp/current.jsonl"))
-    );
+    assert_eq!(*deleted.lock(), Some(String::from("/tmp/current.jsonl")));
 }
 
 #[test]
@@ -368,7 +361,7 @@ fn tree_selector_filters_and_selects_entry() {
     );
     {
         let selected = Arc::clone(&selected);
-        selector.set_on_select(move |entry_id| *selected.lock().unwrap() = Some(entry_id));
+        selector.set_on_select(move |entry_id| *selected.lock() = Some(entry_id));
     }
 
     selector.handle_input("r");
@@ -377,7 +370,7 @@ fn tree_selector_filters_and_selects_entry() {
     selector.handle_input("d");
     selector.handle_input(KEY_ENTER);
 
-    assert_eq!(*selected.lock().unwrap(), Some(String::from("tool-1")));
+    assert_eq!(*selected.lock(), Some(String::from("tool-1")));
 }
 
 #[test]
@@ -433,16 +426,13 @@ fn tree_selector_prioritizes_active_branch_and_supports_filter_shortcuts() {
     );
     {
         let selected = Arc::clone(&selected);
-        selector.set_on_select(move |entry_id| *selected.lock().unwrap() = Some(entry_id));
+        selector.set_on_select(move |entry_id| *selected.lock() = Some(entry_id));
     }
 
     selector.handle_input(KEY_UP);
     selector.handle_input(KEY_ENTER);
 
-    assert_eq!(
-        *selected.lock().unwrap(),
-        Some(String::from("root-assistant"))
-    );
+    assert_eq!(*selected.lock(), Some(String::from("root-assistant")));
 
     let mut selector = TreeSelectorComponent::new(
         &keybindings,
@@ -487,7 +477,7 @@ fn tree_selector_edits_labels_with_configurable_keybinding() {
     );
     {
         let changes = Arc::clone(&changes);
-        selector.set_on_label_change(move |change| changes.lock().unwrap().push(change));
+        selector.set_on_label_change(move |change| changes.lock().push(change));
     }
 
     selector.handle_input("\x12");
@@ -503,7 +493,7 @@ fn tree_selector_edits_labels_with_configurable_keybinding() {
     selector.handle_input(KEY_ENTER);
 
     assert_eq!(
-        changes.lock().unwrap().as_slice(),
+        changes.lock().as_slice(),
         &[(String::from("user-1"), Some(String::from("important")))]
     );
     assert!(selector.render(80).join("\n").contains("[important]"));
@@ -544,11 +534,11 @@ fn settings_selector_toggles_boolean_and_restores_theme_preview_on_cancel() {
     );
     {
         let changes = Arc::clone(&changes);
-        selector.set_on_change(move |change| changes.lock().unwrap().push(change));
+        selector.set_on_change(move |change| changes.lock().push(change));
     }
     {
         let previews = Arc::clone(&previews);
-        selector.set_on_theme_preview(move |theme| previews.lock().unwrap().push(theme));
+        selector.set_on_theme_preview(move |theme| previews.lock().push(theme));
     }
 
     selector.handle_input(KEY_ENTER);
@@ -560,11 +550,11 @@ fn settings_selector_toggles_boolean_and_restores_theme_preview_on_cancel() {
     selector.handle_input(KEY_ESCAPE);
 
     assert_eq!(
-        changes.lock().unwrap().as_slice(),
+        changes.lock().as_slice(),
         &[SettingsChange::AutoCompact(true)]
     );
     assert_eq!(
-        previews.lock().unwrap().as_slice(),
+        previews.lock().as_slice(),
         &[String::from("light"), String::from("dark")]
     );
 }
@@ -593,13 +583,13 @@ fn config_selector_toggles_selected_resource() {
     );
     {
         let toggled = Arc::clone(&toggled);
-        selector.set_on_toggle(move |event| toggled.lock().unwrap().push(event));
+        selector.set_on_toggle(move |event| toggled.lock().push(event));
     }
 
     selector.handle_input(KEY_ENTER);
 
     assert_eq!(
-        toggled.lock().unwrap().as_slice(),
+        toggled.lock().as_slice(),
         &[(String::from("theme:dark"), true)]
     );
 }
@@ -613,7 +603,7 @@ fn login_dialog_submits_prompt_value() {
     let mut dialog = LoginDialogComponent::new(&keybindings, "Anthropic");
     {
         let submitted = Arc::clone(&submitted);
-        dialog.set_on_submit(move |value| *submitted.lock().unwrap() = Some(value));
+        dialog.set_on_submit(move |value| *submitted.lock() = Some(value));
     }
     dialog.show_prompt("Paste verification code", Some("abc123"));
 
@@ -622,7 +612,7 @@ fn login_dialog_submits_prompt_value() {
     dialog.handle_input("c");
     dialog.handle_input(KEY_ENTER);
 
-    assert_eq!(*submitted.lock().unwrap(), Some(String::from("abc")));
+    assert_eq!(*submitted.lock(), Some(String::from("abc")));
     assert!(dialog.render(80).join("\n").contains("Login to Anthropic"));
 }
 

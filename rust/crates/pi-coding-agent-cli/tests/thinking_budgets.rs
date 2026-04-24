@@ -1,4 +1,5 @@
 use futures::stream;
+use parking_lot::Mutex;
 use pi_ai::{
     AiProvider, AssistantEventStream, FauxModelDefinition, RegisterFauxProviderOptions,
     StreamOptions, register_faux_provider, register_provider, stream_response, unregister_provider,
@@ -9,9 +10,10 @@ use pi_events::{AssistantContent, AssistantEvent, AssistantMessage, Context, Mod
 use std::{
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::Mutex as TokioMutex;
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let unique = SystemTime::now()
@@ -23,9 +25,9 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     path
 }
 
-fn provider_registry_guard() -> std::sync::MutexGuard<'static, ()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
+async fn provider_registry_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static GUARD: OnceLock<TokioMutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| TokioMutex::new(())).lock().await
 }
 
 #[derive(Clone)]
@@ -40,7 +42,7 @@ impl AiProvider for RecordingOptionsProvider {
         _context: Context,
         options: StreamOptions,
     ) -> AssistantEventStream {
-        self.seen_options.lock().unwrap().push(options);
+        self.seen_options.lock().push(options);
 
         let partial =
             AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone());
@@ -64,7 +66,7 @@ impl AiProvider for RecordingOptionsProvider {
 
 #[tokio::test]
 async fn runner_loads_thinking_budgets_from_settings_for_runtime_requests() {
-    let _guard = provider_registry_guard();
+    let _guard = provider_registry_guard().await;
     let faux = register_faux_provider(RegisterFauxProviderOptions {
         models: vec![FauxModelDefinition {
             id: "thinking-budgets-faux".into(),
@@ -144,7 +146,7 @@ async fn runner_loads_thinking_budgets_from_settings_for_runtime_requests() {
     assert_eq!(result.stdout, "recorded options\n");
     assert!(result.stderr.is_empty());
 
-    let seen_options = seen_options.lock().unwrap().clone();
+    let seen_options = seen_options.lock().clone();
     assert_eq!(seen_options.len(), 1);
     assert_eq!(seen_options[0].reasoning_effort.as_deref(), Some("high"));
     assert_eq!(seen_options[0].max_tokens, Some(34_048));

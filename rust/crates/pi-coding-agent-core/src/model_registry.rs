@@ -5,13 +5,14 @@ use crate::{
     },
     model_resolver::ModelCatalog,
 };
+use parking_lot::RwLock;
 use pi_events::{Model, ModelCompat, ModelCost, ModelRouting, OpenAiCompletionsCompatConfig};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,11 +91,7 @@ impl ModelRegistry {
     }
 
     pub fn refresh(&self) {
-        let registered_providers = self
-            .registered_providers
-            .read()
-            .expect("model registry registered providers rwlock poisoned")
-            .clone();
+        let registered_providers = self.registered_providers.read().clone();
 
         let mut build_state = ModelRegistryBuildState::default();
         let custom = match self.models_json_path.clone() {
@@ -112,10 +109,7 @@ impl ModelRegistry {
             load_error = combine_load_errors(load_error, Some(error));
         }
 
-        let mut state = self
-            .state
-            .write()
-            .expect("model registry state rwlock poisoned");
+        let mut state = self.state.write();
         state.models = self.apply_auth_model_mutations(models);
         state.provider_request_configs = build_state.provider_request_configs;
         state.model_request_headers = build_state.model_request_headers;
@@ -130,7 +124,6 @@ impl ModelRegistry {
         self.validate_provider_config(provider_name, &config)?;
         self.registered_providers
             .write()
-            .expect("model registry registered providers rwlock poisoned")
             .insert(provider_name.to_owned(), config);
         self.refresh();
         Ok(())
@@ -140,7 +133,6 @@ impl ModelRegistry {
         let removed = self
             .registered_providers
             .write()
-            .expect("model registry registered providers rwlock poisoned")
             .remove(provider_name)
             .is_some();
         if removed {
@@ -149,19 +141,11 @@ impl ModelRegistry {
     }
 
     pub fn get_error(&self) -> Option<String> {
-        self.state
-            .read()
-            .expect("model registry state rwlock poisoned")
-            .load_error
-            .clone()
+        self.state.read().load_error.clone()
     }
 
     pub fn get_all(&self) -> Vec<Model> {
-        self.state
-            .read()
-            .expect("model registry state rwlock poisoned")
-            .models
-            .clone()
+        self.state.read().models.clone()
     }
 
     pub fn get_available(&self) -> Vec<Model> {
@@ -178,7 +162,6 @@ impl ModelRegistry {
     pub fn find(&self, provider: &str, model_id: &str) -> Option<Model> {
         self.state
             .read()
-            .expect("model registry state rwlock poisoned")
             .models
             .iter()
             .find(|model| model.provider == provider && model.id == model_id)
@@ -192,7 +175,6 @@ impl ModelRegistry {
 
         self.state
             .read()
-            .expect("model registry state rwlock poisoned")
             .provider_request_configs
             .get(&model.provider)
             .and_then(|config| config.api_key.as_ref())
@@ -203,7 +185,6 @@ impl ModelRegistry {
         self.auth_source.get_api_key(provider).or_else(|| {
             self.state
                 .read()
-                .expect("model registry state rwlock poisoned")
                 .provider_request_configs
                 .get(provider)
                 .and_then(|config| config.api_key.as_deref())
@@ -274,10 +255,7 @@ impl ModelRegistry {
         Option<ProviderRequestConfig>,
         Option<BTreeMap<String, String>>,
     ) {
-        let state = self
-            .state
-            .read()
-            .expect("model registry state rwlock poisoned");
+        let state = self.state.read();
         (
             state.provider_request_configs.get(&model.provider).cloned(),
             state

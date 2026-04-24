@@ -1,7 +1,8 @@
 use crate::{KeybindingsManager, current_theme, key_text};
+use parking_lot::Mutex;
 use pi_coding_agent_core::BashExecutionMessage;
 use pi_tui::{Component, Container, RenderHandle, Spacer, Text};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 const PREVIEW_LINES: usize = 20;
 
@@ -66,20 +67,13 @@ impl BashExecutionHandle {
     }
 
     pub fn set_output(&self, output: impl AsRef<str>) {
-        self.state
-            .lock()
-            .expect("bash execution mutex poisoned")
-            .output = normalize_output(output.as_ref());
+        self.state.lock().output = normalize_output(output.as_ref());
         self.request_render();
     }
 
     pub fn append_output(&self, chunk: impl AsRef<str>) {
         let chunk = normalize_output(chunk.as_ref());
-        self.state
-            .lock()
-            .expect("bash execution mutex poisoned")
-            .output
-            .push_str(&chunk);
+        self.state.lock().output.push_str(&chunk);
         self.request_render();
     }
 
@@ -90,10 +84,7 @@ impl BashExecutionHandle {
         truncated: bool,
         full_output_path: Option<String>,
     ) {
-        self.state
-            .lock()
-            .expect("bash execution mutex poisoned")
-            .status = BashExecutionStatus::Complete {
+        self.state.lock().status = BashExecutionStatus::Complete {
             exit_code,
             cancelled,
             truncated,
@@ -113,26 +104,17 @@ impl BashExecutionHandle {
     }
 
     pub fn set_error(&self, error: impl Into<String>) {
-        self.state
-            .lock()
-            .expect("bash execution mutex poisoned")
-            .status = BashExecutionStatus::Error(error.into());
+        self.state.lock().status = BashExecutionStatus::Error(error.into());
         self.request_render();
     }
 
     pub fn set_expanded(&self, expanded: bool) {
-        self.state
-            .lock()
-            .expect("bash execution mutex poisoned")
-            .expanded = expanded;
+        self.state.lock().expanded = expanded;
         self.request_render();
     }
 
     pub fn expanded(&self) -> bool {
-        self.state
-            .lock()
-            .expect("bash execution mutex poisoned")
-            .expanded
+        self.state.lock().expanded
     }
 
     fn request_render(&self) {
@@ -178,7 +160,7 @@ impl BashExecutionComponent {
 
 impl Component for BashExecutionComponent {
     fn render(&self, width: usize) -> Vec<String> {
-        let state = self.state.lock().expect("bash execution mutex poisoned");
+        let state = self.state.lock();
         let theme = current_theme();
         let header_key = if state.exclude_from_context {
             "dim"

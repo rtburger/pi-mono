@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use pi_ai::{
     OAuthCredentials, OAuthLoginCallbacks, get_env_api_key, get_oauth_provider,
     get_oauth_provider_info_list,
@@ -10,9 +11,11 @@ use std::{
     fs,
     io::{self, ErrorKind, Write as _},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Duration,
 };
+#[cfg(test)]
+use tokio::sync::Mutex as TokioMutex;
 use tokio::task::spawn_blocking;
 
 const AUTH_FILE_LOCK_RETRIES: usize = 10;
@@ -35,20 +38,18 @@ impl OverlayAuthSource {
     pub fn set_runtime_api_key(&self, provider: impl Into<String>, api_key: impl Into<String>) {
         self.runtime_api_keys
             .lock()
-            .unwrap()
             .insert(provider.into(), api_key.into());
     }
 }
 
 impl AuthSource for OverlayAuthSource {
     fn has_auth(&self, provider: &str) -> bool {
-        self.runtime_api_keys.lock().unwrap().contains_key(provider) || self.base.has_auth(provider)
+        self.runtime_api_keys.lock().contains_key(provider) || self.base.has_auth(provider)
     }
 
     fn get_api_key(&self, provider: &str) -> Option<String> {
         self.runtime_api_keys
             .lock()
-            .unwrap()
             .get(provider)
             .cloned()
             .or_else(|| self.base.get_api_key(provider))
@@ -59,7 +60,7 @@ impl AuthSource for OverlayAuthSource {
         provider: &'a str,
     ) -> pi_coding_agent_core::AuthApiKeyFuture<'a> {
         Box::pin(async move {
-            let runtime_key = self.runtime_api_keys.lock().unwrap().get(provider).cloned();
+            let runtime_key = self.runtime_api_keys.lock().get(provider).cloned();
             match runtime_key {
                 Some(runtime_key) => Some(runtime_key),
                 None => self.base.get_api_key_for_request(provider).await,
@@ -400,15 +401,15 @@ mod tests {
     use serde_json::json;
     use std::{
         sync::{
-            Arc, Mutex, OnceLock,
+            Arc, OnceLock,
             atomic::{AtomicUsize, Ordering},
         },
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    fn registry_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    fn registry_lock() -> &'static TokioMutex<()> {
+        static LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| TokioMutex::new(()))
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
@@ -514,7 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_oauth_login_persists_credentials_and_restores_ui_host() {
-        let _guard = registry_lock().lock().unwrap();
+        let _guard = registry_lock().lock().await;
         let provider_id = "test-cli-oauth";
         register_oauth_provider(Arc::new(TestOAuthProvider {
             id: provider_id,

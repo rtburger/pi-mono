@@ -1,4 +1,5 @@
 use async_stream::stream;
+use parking_lot::Mutex;
 use pi_ai::{
     AiProvider, AssistantEventStream, StreamOptions, register_provider, unregister_provider,
 };
@@ -13,7 +14,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -127,7 +128,7 @@ async fn execute_bash_returns_exit_code_and_records_result() {
     assert!(!recorded.cancelled);
     assert!(!recorded.exclude_from_context);
 
-    let restored = session_manager.lock().unwrap().build_session_context();
+    let restored = session_manager.lock().build_session_context();
     let persisted = restored
         .messages
         .iter()

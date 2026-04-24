@@ -1,9 +1,7 @@
+use parking_lot::Mutex;
 use pi_coding_agent_tui::{CustomEditor, KeyId, KeybindingsManager};
 use pi_tui::Component;
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 fn config(entries: &[(&str, &[&str])]) -> BTreeMap<String, Vec<KeyId>> {
     entries
@@ -25,10 +23,7 @@ fn extension_shortcut_can_consume_or_fall_through() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let mut editor = CustomEditor::new(&keybindings);
     editor.set_on_extension_shortcut(move |data| {
-        seen_for_callback
-            .lock()
-            .expect("shortcut mutex poisoned")
-            .push(data.clone());
+        seen_for_callback.lock().push(data.clone());
         data == "x"
     });
 
@@ -38,7 +33,7 @@ fn extension_shortcut_can_consume_or_fall_through() {
     editor.handle_input("y");
     assert_eq!(editor.get_text(), "y");
     assert_eq!(
-        seen.lock().expect("shortcut mutex poisoned").as_slice(),
+        seen.lock().as_slice(),
         [String::from("x"), String::from("y")]
     );
 }
@@ -53,14 +48,12 @@ fn paste_image_binding_uses_app_keybinding_and_does_not_insert_text() {
     let mut editor = CustomEditor::new(&keybindings);
     editor.set_text("draft prompt");
     editor.set_on_paste_image(move || {
-        *paste_calls_for_callback
-            .lock()
-            .expect("paste mutex poisoned") += 1;
+        *paste_calls_for_callback.lock() += 1;
     });
 
     editor.handle_input("\x18");
 
-    assert_eq!(*paste_calls.lock().expect("paste mutex poisoned"), 1);
+    assert_eq!(*paste_calls.lock(), 1);
     assert_eq!(editor.get_text(), "draft prompt");
 }
 
@@ -73,17 +66,12 @@ fn interrupt_binding_prefers_on_escape_and_skips_editor_input() {
     let mut editor = CustomEditor::new(&keybindings);
     editor.set_text("draft prompt");
     editor.set_on_escape(move || {
-        *interrupt_calls_for_callback
-            .lock()
-            .expect("interrupt mutex poisoned") += 1;
+        *interrupt_calls_for_callback.lock() += 1;
     });
 
     editor.handle_input("\x18");
 
-    assert_eq!(
-        *interrupt_calls.lock().expect("interrupt mutex poisoned"),
-        1
-    );
+    assert_eq!(*interrupt_calls.lock(), 1);
     assert_eq!(editor.get_text(), "draft prompt");
 }
 
@@ -95,18 +83,18 @@ fn empty_exit_binding_invokes_callback_but_non_empty_falls_through_to_delete_for
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let mut editor = CustomEditor::new(&keybindings);
     editor.set_on_ctrl_d(move || {
-        *exit_calls_for_callback.lock().expect("exit mutex poisoned") += 1;
+        *exit_calls_for_callback.lock() += 1;
     });
 
     editor.set_text("abc");
     editor.handle_input("\x01");
     editor.handle_input("\x04");
-    assert_eq!(*exit_calls.lock().expect("exit mutex poisoned"), 0);
+    assert_eq!(*exit_calls.lock(), 0);
     assert_eq!(editor.get_text(), "bc");
 
     editor.set_text("");
     editor.handle_input("\x04");
-    assert_eq!(*exit_calls.lock().expect("exit mutex poisoned"), 1);
+    assert_eq!(*exit_calls.lock(), 1);
     assert_eq!(editor.get_text(), "");
 }
 
@@ -120,16 +108,11 @@ fn registered_app_actions_run_before_editor_handling() {
     let mut editor = CustomEditor::new(&keybindings);
     editor.set_text("queued message");
     editor.on_action("app.message.followUp", move || {
-        *follow_up_calls_for_handler
-            .lock()
-            .expect("follow-up mutex poisoned") += 1;
+        *follow_up_calls_for_handler.lock() += 1;
     });
 
     editor.handle_input("\x18");
 
-    assert_eq!(
-        *follow_up_calls.lock().expect("follow-up mutex poisoned"),
-        1
-    );
+    assert_eq!(*follow_up_calls.lock(), 1);
     assert_eq!(editor.get_text(), "queued message");
 }

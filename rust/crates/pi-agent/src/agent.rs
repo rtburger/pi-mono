@@ -6,6 +6,7 @@ use crate::{
     TransformContextHook, agent_loop, agent_loop_continue,
 };
 use futures::StreamExt;
+use parking_lot::Mutex;
 use pi_ai::{AiError, PayloadHook, StreamOptions, ThinkingBudgets, Transport};
 use pi_events::{AssistantContent, Message, Model, StopReason, Usage, UserContent};
 use std::{
@@ -13,7 +14,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -259,11 +260,11 @@ impl Agent {
     }
 
     pub fn state(&self) -> AgentState {
-        self.inner.lock().unwrap().state.clone()
+        self.inner.lock().state.clone()
     }
 
     pub fn update_state<R>(&self, updater: impl FnOnce(&mut AgentState) -> R) -> R {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         updater(&mut inner.state)
     }
 
@@ -284,12 +285,12 @@ impl Agent {
     {
         let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
         let listener: Listener = Arc::new(move |event, signal| Box::pin(listener(event, signal)));
-        self.inner.lock().unwrap().listeners.insert(id, listener);
+        self.inner.lock().listeners.insert(id, listener);
         id
     }
 
     pub fn unsubscribe(&self, id: usize) -> bool {
-        self.inner.lock().unwrap().listeners.remove(&id).is_some()
+        self.inner.lock().listeners.remove(&id).is_some()
     }
 
     pub fn set_convert_to_llm<F, Fut>(&self, hook: F)
@@ -298,11 +299,11 @@ impl Agent {
         Fut: Future<Output = Vec<Message>> + Send + 'static,
     {
         let hook: ConvertToLlmHook = Arc::new(move |messages| Box::pin(hook(messages)));
-        self.inner.lock().unwrap().convert_to_llm = Some(hook);
+        self.inner.lock().convert_to_llm = Some(hook);
     }
 
     pub fn clear_convert_to_llm(&self) {
-        self.inner.lock().unwrap().convert_to_llm = None;
+        self.inner.lock().convert_to_llm = None;
     }
 
     pub fn set_get_api_key<F, Fut>(&self, hook: F)
@@ -311,21 +312,21 @@ impl Agent {
         Fut: Future<Output = Option<String>> + Send + 'static,
     {
         let hook: GetApiKeyHook = Arc::new(move |provider| Box::pin(hook(provider)));
-        self.inner.lock().unwrap().get_api_key = Some(hook);
+        self.inner.lock().get_api_key = Some(hook);
     }
 
     pub fn clear_get_api_key(&self) {
-        self.inner.lock().unwrap().get_api_key = None;
+        self.inner.lock().get_api_key = None;
     }
 
     pub fn set_streamer(&self, streamer: Arc<dyn AssistantStreamer>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.streamer = streamer;
         inner.uses_default_streamer = false;
     }
 
     pub fn clear_streamer(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.streamer = Arc::new(DefaultAssistantStreamer::new(
             inner.thinking_budgets.clone(),
         ));
@@ -339,11 +340,11 @@ impl Agent {
     {
         let hook: TransformContextHook =
             Arc::new(move |messages, signal| Box::pin(hook(messages, signal)));
-        self.inner.lock().unwrap().transform_context = Some(hook);
+        self.inner.lock().transform_context = Some(hook);
     }
 
     pub fn clear_transform_context(&self) {
-        self.inner.lock().unwrap().transform_context = None;
+        self.inner.lock().transform_context = None;
     }
 
     pub fn set_before_tool_call<F, Fut>(&self, hook: F)
@@ -353,11 +354,11 @@ impl Agent {
     {
         let hook: BeforeToolCallHook =
             Arc::new(move |context, signal| Box::pin(hook(context, signal)));
-        self.inner.lock().unwrap().before_tool_call = Some(hook);
+        self.inner.lock().before_tool_call = Some(hook);
     }
 
     pub fn clear_before_tool_call(&self) {
-        self.inner.lock().unwrap().before_tool_call = None;
+        self.inner.lock().before_tool_call = None;
     }
 
     pub fn set_after_tool_call<F, Fut>(&self, hook: F)
@@ -367,120 +368,112 @@ impl Agent {
     {
         let hook: AfterToolCallHook =
             Arc::new(move |context, signal| Box::pin(hook(context, signal)));
-        self.inner.lock().unwrap().after_tool_call = Some(hook);
+        self.inner.lock().after_tool_call = Some(hook);
     }
 
     pub fn clear_after_tool_call(&self) {
-        self.inner.lock().unwrap().after_tool_call = None;
+        self.inner.lock().after_tool_call = None;
     }
 
     pub fn set_thinking_budgets(&self, thinking_budgets: ThinkingBudgets) {
-        self.inner.lock().unwrap().thinking_budgets = thinking_budgets;
+        self.inner.lock().thinking_budgets = thinking_budgets;
     }
 
     pub fn thinking_budgets(&self) -> ThinkingBudgets {
-        self.inner.lock().unwrap().thinking_budgets.clone()
+        self.inner.lock().thinking_budgets.clone()
     }
 
     pub fn set_tool_execution_mode(&self, tool_execution: ToolExecutionMode) {
-        self.inner.lock().unwrap().tool_execution = tool_execution;
+        self.inner.lock().tool_execution = tool_execution;
     }
 
     pub fn tool_execution_mode(&self) -> ToolExecutionMode {
-        self.inner.lock().unwrap().tool_execution
+        self.inner.lock().tool_execution
     }
 
     pub fn set_steering_mode(&self, mode: QueueMode) {
-        self.inner.lock().unwrap().steering_queue.set_mode(mode);
+        self.inner.lock().steering_queue.set_mode(mode);
     }
 
     pub fn steering_mode(&self) -> QueueMode {
-        self.inner.lock().unwrap().steering_queue.mode()
+        self.inner.lock().steering_queue.mode()
     }
 
     pub fn set_follow_up_mode(&self, mode: QueueMode) {
-        self.inner.lock().unwrap().follow_up_queue.set_mode(mode);
+        self.inner.lock().follow_up_queue.set_mode(mode);
     }
 
     pub fn follow_up_mode(&self) -> QueueMode {
-        self.inner.lock().unwrap().follow_up_queue.mode()
+        self.inner.lock().follow_up_queue.mode()
     }
 
     pub fn steer<M>(&self, message: M)
     where
         M: Into<AgentMessage>,
     {
-        self.inner
-            .lock()
-            .unwrap()
-            .steering_queue
-            .enqueue(message.into());
+        self.inner.lock().steering_queue.enqueue(message.into());
     }
 
     pub fn follow_up<M>(&self, message: M)
     where
         M: Into<AgentMessage>,
     {
-        self.inner
-            .lock()
-            .unwrap()
-            .follow_up_queue
-            .enqueue(message.into());
+        self.inner.lock().follow_up_queue.enqueue(message.into());
     }
 
     pub fn clear_steering_queue(&self) {
-        self.inner.lock().unwrap().steering_queue.clear();
+        self.inner.lock().steering_queue.clear();
     }
 
     pub fn clear_follow_up_queue(&self) {
-        self.inner.lock().unwrap().follow_up_queue.clear();
+        self.inner.lock().follow_up_queue.clear();
     }
 
     pub fn clear_all_queues(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.steering_queue.clear();
         inner.follow_up_queue.clear();
     }
 
     pub fn has_queued_messages(&self) -> bool {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         inner.steering_queue.has_items() || inner.follow_up_queue.has_items()
     }
 
     pub fn session_id(&self) -> Option<String> {
-        self.inner.lock().unwrap().stream_options.session_id.clone()
+        self.inner.lock().stream_options.session_id.clone()
     }
 
     pub fn set_session_id(&self, session_id: Option<String>) {
-        self.inner.lock().unwrap().stream_options.session_id = session_id;
+        self.inner.lock().stream_options.session_id = session_id;
     }
 
     pub fn transport(&self) -> Option<Transport> {
-        self.inner.lock().unwrap().stream_options.transport
+        self.inner.lock().stream_options.transport
     }
 
     pub fn set_transport(&self, transport: Option<Transport>) {
-        self.inner.lock().unwrap().stream_options.transport = transport;
+        self.inner.lock().stream_options.transport = transport;
     }
 
     pub fn on_payload(&self) -> Option<PayloadHook> {
-        self.inner.lock().unwrap().stream_options.on_payload.clone()
+        self.inner.lock().stream_options.on_payload.clone()
     }
 
     pub fn set_on_payload(&self, on_payload: Option<PayloadHook>) {
-        self.inner.lock().unwrap().stream_options.on_payload = on_payload;
+        self.inner.lock().stream_options.on_payload = on_payload;
     }
 
     pub fn max_retry_delay_ms(&self) -> Option<u64> {
-        self.inner.lock().unwrap().stream_options.max_retry_delay_ms
+        self.inner.lock().stream_options.max_retry_delay_ms
     }
 
     pub fn set_max_retry_delay_ms(&self, max_retry_delay_ms: Option<u64>) {
-        self.inner.lock().unwrap().stream_options.max_retry_delay_ms = max_retry_delay_ms;
+        self.inner.lock().stream_options.max_retry_delay_ms = max_retry_delay_ms;
     }
 
     pub fn signal(&self) -> Option<watch::Receiver<bool>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         inner
             .active_run
             .as_ref()
@@ -488,7 +481,7 @@ impl Agent {
     }
 
     pub fn reset(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.state.messages.clear();
         inner.state.finish_run();
         inner.state.error_message = None;
@@ -498,7 +491,7 @@ impl Agent {
 
     pub fn abort(&self) {
         let abort_tx = {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock();
             inner.active_run.as_ref().map(|run| run.abort_tx.clone())
         };
         if let Some(abort_tx) = abort_tx {
@@ -508,7 +501,7 @@ impl Agent {
 
     pub async fn wait_for_idle(&self) {
         let done_signal = {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock();
             inner.active_run.as_ref().map(|run| run.done_tx.subscribe())
         };
 
@@ -572,7 +565,7 @@ impl Agent {
 
     async fn run_request(&self, request: RunRequest) -> Result<(), AgentError> {
         let prepared = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock();
             if inner.active_run.is_some() {
                 return Err(match request {
                     RunRequest::Prompt(_) => AgentError::AlreadyProcessingPrompt,
@@ -719,8 +712,7 @@ impl Agent {
                     let skip_initial_steering_poll = skip_initial_steering_poll.clone();
                     async move {
                         let should_skip = {
-                            let mut skip_initial_steering_poll =
-                                skip_initial_steering_poll.lock().unwrap();
+                            let mut skip_initial_steering_poll = skip_initial_steering_poll.lock();
                             let should_skip = *skip_initial_steering_poll;
                             *skip_initial_steering_poll = false;
                             should_skip
@@ -729,7 +721,7 @@ impl Agent {
                         if should_skip {
                             Vec::new()
                         } else {
-                            let mut inner = steering_inner.lock().unwrap();
+                            let mut inner = steering_inner.lock();
                             inner.steering_queue.drain()
                         }
                     }
@@ -738,7 +730,7 @@ impl Agent {
             .with_get_follow_up_messages(move || {
                 let follow_up_inner = follow_up_inner.clone();
                 async move {
-                    let mut inner = follow_up_inner.lock().unwrap();
+                    let mut inner = follow_up_inner.lock();
                     inner.follow_up_queue.drain()
                 }
             })
@@ -753,7 +745,7 @@ impl Agent {
 
     async fn process_event(&self, event: AgentEvent) {
         let (listeners, abort_signal) = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock();
             inner.state.apply_event(&event);
             (
                 inner.listeners.values().cloned().collect::<Vec<_>>(),
@@ -776,7 +768,7 @@ impl Agent {
         let assistant_error_message = extract_error_message(&assistant_message);
 
         let (listeners, abort_signal) = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock();
             inner.state.streaming_message = None;
             inner.state.messages.push(assistant_message.clone().into());
             inner.state.error_message = assistant_error_message;
@@ -796,7 +788,7 @@ impl Agent {
 
     fn finish_run(&self) {
         let done_tx = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock();
             inner.state.finish_run();
             inner.active_run.take().map(|run| run.done_tx)
         };
@@ -807,7 +799,7 @@ impl Agent {
     }
 
     fn is_aborted(&self) -> bool {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         inner
             .active_run
             .as_ref()
@@ -1049,7 +1041,7 @@ mod tests {
                   _context: pi_events::Context,
                   options: StreamOptions|
                   -> Result<AssistantEventStream, AiError> {
-                received_transports.lock().unwrap().push(options.transport);
+                received_transports.lock().push(options.transport);
 
                 let mut message = pi_events::AssistantMessage::empty("faux:test", "faux", "mock");
                 message.content = vec![AssistantContent::Text {
@@ -1086,7 +1078,7 @@ mod tests {
             .await
             .unwrap();
 
-        let received = received_transports.lock().unwrap().clone();
+        let received = received_transports.lock().clone();
         assert_eq!(
             received,
             vec![Some(Transport::Sse), Some(Transport::WebSocket), None,]
@@ -1110,7 +1102,7 @@ mod tests {
                         .call(json!({ "source": "streamer" }), model.clone())
                         .await
                         .map_err(AiError::Message)?;
-                    observed_payloads.lock().unwrap().push(payload);
+                    observed_payloads.lock().push(payload);
 
                     let mut message = pi_events::AssistantMessage::empty("faux:test", "faux", "mock");
                     message.content = vec![AssistantContent::Text {
@@ -1155,7 +1147,7 @@ mod tests {
         agent.set_on_payload(None);
         assert!(agent.on_payload().is_none());
 
-        let observed = observed_payloads.lock().unwrap().clone();
+        let observed = observed_payloads.lock().clone();
         assert_eq!(
             observed,
             vec![
@@ -1182,10 +1174,7 @@ mod tests {
                   _context: pi_events::Context,
                   options: StreamOptions|
                   -> Result<AssistantEventStream, AiError> {
-                received_api_keys
-                    .lock()
-                    .unwrap()
-                    .push(options.api_key.clone());
+                received_api_keys.lock().push(options.api_key.clone());
 
                 let mut message = pi_events::AssistantMessage::empty("faux:test", "faux", "mock");
                 message.content = vec![AssistantContent::Text {
@@ -1213,7 +1202,7 @@ mod tests {
             let requested_providers = requested_providers.clone();
             let next_api_key = next_api_key.clone();
             move |provider| {
-                requested_providers.lock().unwrap().push(provider);
+                requested_providers.lock().push(provider);
                 let suffix = next_api_key.fetch_add(1, Ordering::Relaxed);
                 async move { Some(format!("resolved-{suffix}")) }
             }
@@ -1232,11 +1221,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            requested_providers.lock().unwrap().clone(),
+            requested_providers.lock().clone(),
             vec!["faux".to_string(), "faux".to_string()]
         );
         assert_eq!(
-            received_api_keys.lock().unwrap().clone(),
+            received_api_keys.lock().clone(),
             vec![
                 Some("resolved-1".to_string()),
                 Some("resolved-2".to_string()),
@@ -1257,7 +1246,6 @@ mod tests {
                   -> Result<AssistantEventStream, AiError> {
                 received_max_retry_delays
                     .lock()
-                    .unwrap()
                     .push(options.max_retry_delay_ms);
 
                 let mut message = pi_events::AssistantMessage::empty("faux:test", "faux", "mock");
@@ -1306,7 +1294,7 @@ mod tests {
             .await
             .unwrap();
 
-        let received = received_max_retry_delays.lock().unwrap().clone();
+        let received = received_max_retry_delays.lock().clone();
         assert_eq!(received, vec![None, Some(1_200), Some(2_400), None]);
     }
 
@@ -1319,10 +1307,7 @@ mod tests {
                   _context: pi_events::Context,
                   options: StreamOptions|
                   -> Result<AssistantEventStream, AiError> {
-                received_session_ids
-                    .lock()
-                    .unwrap()
-                    .push(options.session_id.clone());
+                received_session_ids.lock().push(options.session_id.clone());
 
                 let mut message = pi_events::AssistantMessage::empty("faux:test", "faux", "mock");
                 message.content = vec![AssistantContent::Text {
@@ -1359,7 +1344,7 @@ mod tests {
 
         agent.prompt_text("hello without session").await.unwrap();
 
-        let received = received_session_ids.lock().unwrap().clone();
+        let received = received_session_ids.lock().clone();
         assert_eq!(
             received,
             vec![

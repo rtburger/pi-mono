@@ -4,6 +4,7 @@ use crate::{
 };
 use async_stream::{stream, try_stream};
 use futures::{Stream, StreamExt};
+use parking_lot::Mutex;
 use pi_ai::{
     AiError, AssistantEventStream, SimpleStreamOptions, StreamOptions, ThinkingBudgets,
     ThinkingLevel as AiThinkingLevel, stream_simple,
@@ -16,7 +17,7 @@ use serde_json::{Map as JsonMap, Value};
 use std::{
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{mpsc, watch};
@@ -953,7 +954,7 @@ async fn prepare_tool_call(
         tool_call_id,
         tool_name,
         raw_args,
-        args: shared_args.lock().unwrap().clone(),
+        args: shared_args.lock().clone(),
         tool,
     })
 }

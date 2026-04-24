@@ -1,4 +1,5 @@
 use futures::stream;
+use parking_lot::Mutex;
 use pi_ai::{
     AiProvider, AssistantEventStream, SimpleStreamOptions, StreamOptions, complete_simple,
     register_provider, unregister_provider,
@@ -8,7 +9,7 @@ use pi_events::{
     UserContent,
 };
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicU64, Ordering},
 };
 
@@ -66,7 +67,6 @@ impl AiProvider for CaptureProvider {
     ) -> AssistantEventStream {
         self.observed_max_retry_delays
             .lock()
-            .unwrap()
             .push(options.max_retry_delay_ms);
 
         let mut message = AssistantMessage::empty(model.api, model.provider, model.id);
@@ -129,7 +129,7 @@ async fn complete_simple_forwards_max_retry_delay_ms_to_registered_provider() {
     unregister_provider(&api);
 
     assert_eq!(
-        observed_max_retry_delays.lock().unwrap().clone(),
+        observed_max_retry_delays.lock().clone(),
         vec![None, Some(4_321), Some(0)]
     );
 }

@@ -7,6 +7,7 @@ use crate::{
     ThemedKeyHintStyler, ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult,
     TranscriptComponent, UserMessageComponent, current_theme, paste_clipboard_image_into_shell,
 };
+use parking_lot::Mutex;
 use pi_coding_agent_core::{BashExecutionMessage, FooterDataProvider, FooterDataSnapshot};
 use pi_events::{AssistantMessage, Model, UserContent};
 use pi_tui::{
@@ -19,7 +20,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -301,10 +302,7 @@ impl ShellUpdateHandle {
     }
 
     fn push(&self, update: ShellUpdate) {
-        self.pending_updates
-            .lock()
-            .expect("pending shell updates mutex poisoned")
-            .push_back(update);
+        self.pending_updates.lock().push_back(update);
         if let Some(render_handle) = &self.render_handle {
             render_handle.request_render();
         }
@@ -479,18 +477,12 @@ impl ShellUpdateHandle {
 
     pub fn set_input_value(&self, value: impl Into<String>, cursor: Option<usize>) {
         let value = value.into();
-        *self
-            .input_text
-            .lock()
-            .expect("shell input text mutex poisoned") = value.clone();
+        *self.input_text.lock() = value.clone();
         self.push(ShellUpdate::SetInputValue { value, cursor });
     }
 
     pub fn current_input_value(&self) -> String {
-        self.input_text
-            .lock()
-            .expect("shell input text mutex poisoned")
-            .clone()
+        self.input_text.lock().clone()
     }
 
     pub fn request_render(&self) {
@@ -567,20 +559,14 @@ impl StatusHandle {
     }
 
     pub fn set_message(&self, message: impl Into<String>) {
-        *self
-            .status_message
-            .lock()
-            .expect("status message mutex poisoned") = Some(message.into());
+        *self.status_message.lock() = Some(message.into());
         if let Some(render_handle) = &self.render_handle {
             render_handle.request_render();
         }
     }
 
     pub fn clear(&self) {
-        *self
-            .status_message
-            .lock()
-            .expect("status message mutex poisoned") = None;
+        *self.status_message.lock() = None;
         if let Some(render_handle) = &self.render_handle {
             render_handle.request_render();
         }
@@ -600,7 +586,7 @@ impl StartupShellComponent {
         {
             let input_text = Arc::clone(&input_text);
             input.set_on_change(move |text| {
-                *input_text.lock().expect("shell input text mutex poisoned") = text;
+                *input_text.lock() = text;
             });
         }
 
@@ -718,7 +704,6 @@ impl StartupShellComponent {
     fn render_status(&self, width: usize) -> Vec<String> {
         self.status_message
             .lock()
-            .expect("status message mutex poisoned")
             .as_ref()
             .map(|message| {
                 let styled = current_theme().fg("dim", message);
@@ -831,11 +816,7 @@ impl StartupShellComponent {
 
     fn drain_extension_input_events(&mut self) {
         loop {
-            let event = self
-                .extension_input_events
-                .lock()
-                .expect("extension input events mutex poisoned")
-                .pop_front();
+            let event = self.extension_input_events.lock().pop_front();
             let Some(event) = event else {
                 break;
             };
@@ -861,11 +842,7 @@ impl StartupShellComponent {
 
     fn drain_extension_selector_events(&mut self) {
         loop {
-            let event = self
-                .extension_selector_events
-                .lock()
-                .expect("extension selector events mutex poisoned")
-                .pop_front();
+            let event = self.extension_selector_events.lock().pop_front();
             let Some(event) = event else {
                 break;
             };
@@ -891,11 +868,7 @@ impl StartupShellComponent {
 
     fn drain_extension_editor_events(&mut self) {
         loop {
-            let event = self
-                .extension_editor_events
-                .lock()
-                .expect("extension editor events mutex poisoned")
-                .pop_front();
+            let event = self.extension_editor_events.lock().pop_front();
             let Some(event) = event else {
                 break;
             };
@@ -927,11 +900,7 @@ impl StartupShellComponent {
 
     fn drain_model_selector_events(&mut self) {
         loop {
-            let event = self
-                .model_selector_events
-                .lock()
-                .expect("model selector events mutex poisoned")
-                .pop_front();
+            let event = self.model_selector_events.lock().pop_front();
             let Some(event) = event else {
                 break;
             };
@@ -957,11 +926,7 @@ impl StartupShellComponent {
 
     fn drain_pending_updates(&self) {
         loop {
-            let update = self
-                .pending_updates
-                .lock()
-                .expect("pending shell updates mutex poisoned")
-                .pop_front();
+            let update = self.pending_updates.lock().pop_front();
             let Some(update) = update else {
                 break;
             };
@@ -1296,10 +1261,7 @@ impl StartupShellComponent {
     }
 
     fn sync_input_text(&self) {
-        *self
-            .input_text
-            .lock()
-            .expect("shell input text mutex poisoned") = self.input.borrow().get_text();
+        *self.input_text.lock() = self.input.borrow().get_text();
     }
 
     pub fn set_input_value(&self, value: impl Into<String>) {
@@ -1406,16 +1368,10 @@ impl StartupShellComponent {
             title,
             placeholder,
             move |value| {
-                events
-                    .lock()
-                    .expect("extension input events mutex poisoned")
-                    .push_back(ExtensionInputEvent::Submit(value));
+                events.lock().push_back(ExtensionInputEvent::Submit(value));
             },
             move || {
-                cancel_events
-                    .lock()
-                    .expect("extension input events mutex poisoned")
-                    .push_back(ExtensionInputEvent::Cancel);
+                cancel_events.lock().push_back(ExtensionInputEvent::Cancel);
             },
             timeout_ms,
             self.render_handle.clone(),
@@ -1471,13 +1427,11 @@ impl StartupShellComponent {
             move |value| {
                 events
                     .lock()
-                    .expect("extension selector events mutex poisoned")
                     .push_back(ExtensionSelectorEvent::Select(value));
             },
             move || {
                 cancel_events
                     .lock()
-                    .expect("extension selector events mutex poisoned")
                     .push_back(ExtensionSelectorEvent::Cancel);
             },
             timeout_ms,
@@ -1536,18 +1490,12 @@ impl StartupShellComponent {
         }
         let events = Arc::clone(&self.extension_editor_events);
         editor.set_on_submit(move |value| {
-            events
-                .lock()
-                .expect("extension editor events mutex poisoned")
-                .push_back(ExtensionEditorEvent::Submit(value));
+            events.lock().push_back(ExtensionEditorEvent::Submit(value));
         });
 
         let events = Arc::clone(&self.extension_editor_events);
         editor.set_on_cancel(move || {
-            events
-                .lock()
-                .expect("extension editor events mutex poisoned")
-                .push_back(ExtensionEditorEvent::Cancel);
+            events.lock().push_back(ExtensionEditorEvent::Cancel);
         });
 
         if let Some((width, height)) = self.viewport_size.get() {
@@ -1597,18 +1545,12 @@ impl StartupShellComponent {
             ModelSelectorComponent::new(&self.keybindings, current_model, models, initial_search);
         let events = Arc::clone(&self.model_selector_events);
         selector.set_on_select(move |model| {
-            events
-                .lock()
-                .expect("model selector events mutex poisoned")
-                .push_back(ModelSelectorEvent::Select(model));
+            events.lock().push_back(ModelSelectorEvent::Select(model));
         });
 
         let events = Arc::clone(&self.model_selector_events);
         selector.set_on_cancel(move || {
-            events
-                .lock()
-                .expect("model selector events mutex poisoned")
-                .push_back(ModelSelectorEvent::Cancel);
+            events.lock().push_back(ModelSelectorEvent::Cancel);
         });
 
         if let Some((width, height)) = self.viewport_size.get() {
@@ -1644,10 +1586,7 @@ impl StartupShellComponent {
     }
 
     pub fn clear_transcript(&mut self) {
-        self.pending_updates
-            .lock()
-            .expect("pending shell updates mutex poisoned")
-            .clear();
+        self.pending_updates.lock().clear();
         self.current_assistant.borrow_mut().take();
         self.assistant_components.borrow_mut().clear();
         self.tool_components.borrow_mut().clear();
@@ -1755,17 +1694,11 @@ impl StartupShellComponent {
     }
 
     pub fn set_status_message(&mut self, message: impl Into<String>) {
-        *self
-            .status_message
-            .lock()
-            .expect("status message mutex poisoned") = Some(message.into());
+        *self.status_message.lock() = Some(message.into());
     }
 
     pub fn clear_status_message(&mut self) {
-        *self
-            .status_message
-            .lock()
-            .expect("status message mutex poisoned") = None;
+        *self.status_message.lock() = None;
     }
 
     pub fn status_handle(&self) -> StatusHandle {

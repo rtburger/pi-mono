@@ -17,6 +17,7 @@ use crate::{
 };
 use async_stream::stream;
 use futures::{StreamExt, future::BoxFuture};
+use parking_lot::Mutex;
 use pi_agent::{
     Agent, AgentEvent, AgentMessage, AgentState, AgentTool, AgentUnsubscribe, AssistantStreamer,
     ThinkingLevel,
@@ -36,7 +37,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -241,12 +242,12 @@ impl CodingAgentCore {
     }
 
     pub fn thinking_budgets(&self) -> pi_ai::ThinkingBudgets {
-        self.thinking_budgets.lock().unwrap().clone()
+        self.thinking_budgets.lock().clone()
     }
 
     pub fn set_thinking_budgets(&self, thinking_budgets: pi_ai::ThinkingBudgets) {
         self.agent.set_thinking_budgets(thinking_budgets.clone());
-        *self.thinking_budgets.lock().unwrap() = thinking_budgets;
+        *self.thinking_budgets.lock() = thinking_budgets;
     }
 
     pub async fn prompt_text(
@@ -290,7 +291,7 @@ impl SessionPersistenceSubscription {
 
 impl Drop for SessionPersistenceSubscription {
     fn drop(&mut self) {
-        if let Some(unsubscribe) = self.unsubscribe.lock().unwrap().take() {
+        if let Some(unsubscribe) = self.unsubscribe.lock().take() {
             let _ = unsubscribe();
         }
     }
@@ -358,9 +359,7 @@ impl AgentSession {
     ) -> Result<Self, crate::CodingAgentCoreError> {
         if let Some(session_manager) = session_manager.as_ref() {
             let restore = {
-                let session_manager = session_manager
-                    .lock()
-                    .expect("session manager mutex poisoned");
+                let session_manager = session_manager.lock();
                 build_session_restore_state(&session_manager)
             };
 
@@ -375,9 +374,7 @@ impl AgentSession {
             }
 
             let state = core.state();
-            let mut session_manager = session_manager
-                .lock()
-                .expect("session manager mutex poisoned");
+            let mut session_manager = session_manager.lock();
             if restore.has_existing_messages {
                 if !restore.has_thinking_entry {
                     session_manager
@@ -469,41 +466,23 @@ impl AgentSession {
 
     pub fn session_file(&self) -> Option<String> {
         self.session_manager().and_then(|session_manager| {
-            session_manager
-                .lock()
-                .expect("session manager mutex poisoned")
-                .get_session_file()
-                .map(str::to_owned)
+            session_manager.lock().get_session_file().map(str::to_owned)
         })
     }
 
     pub fn session_name(&self) -> Option<String> {
-        self.session_manager().and_then(|session_manager| {
-            session_manager
-                .lock()
-                .expect("session manager mutex poisoned")
-                .get_session_name()
-        })
+        self.session_manager()
+            .and_then(|session_manager| session_manager.lock().get_session_name())
     }
 
     pub fn leaf_id(&self) -> Option<String> {
-        self.session_manager().and_then(|session_manager| {
-            session_manager
-                .lock()
-                .expect("session manager mutex poisoned")
-                .get_leaf_id()
-                .map(ToOwned::to_owned)
-        })
+        self.session_manager()
+            .and_then(|session_manager| session_manager.lock().get_leaf_id().map(ToOwned::to_owned))
     }
 
     pub fn session_tree(&self) -> Vec<crate::SessionTreeNode> {
         self.session_manager()
-            .map(|session_manager| {
-                session_manager
-                    .lock()
-                    .expect("session manager mutex poisoned")
-                    .get_tree()
-            })
+            .map(|session_manager| session_manager.lock().get_tree())
             .unwrap_or_default()
     }
 
@@ -518,10 +497,9 @@ impl AgentSession {
         self.inner
             .session_event_listeners
             .lock()
-            .unwrap()
             .insert(id, Arc::new(listener));
         let listeners = self.inner.session_event_listeners.clone();
-        Box::new(move || listeners.lock().unwrap().remove(&id).is_some())
+        Box::new(move || listeners.lock().remove(&id).is_some())
     }
 
     pub fn steer(&self, message: Message) {
@@ -545,20 +523,20 @@ impl AgentSession {
     }
 
     pub fn pending_message_count(&self) -> usize {
-        let queue_state = self.inner.queue_state.lock().unwrap();
+        let queue_state = self.inner.queue_state.lock();
         queue_state.steering.len() + queue_state.follow_up.len()
     }
 
     pub fn pending_steering_messages(&self) -> Vec<String> {
-        self.inner.queue_state.lock().unwrap().steering.clone()
+        self.inner.queue_state.lock().steering.clone()
     }
 
     pub fn pending_follow_up_messages(&self) -> Vec<String> {
-        self.inner.queue_state.lock().unwrap().follow_up.clone()
+        self.inner.queue_state.lock().follow_up.clone()
     }
 
     pub fn retry_settings(&self) -> RetrySettings {
-        let mut settings = self.inner.automation.lock().unwrap().retry_settings.clone();
+        let mut settings = self.inner.automation.lock().retry_settings.clone();
         settings.max_retry_delay_ms = self.agent().max_retry_delay_ms();
         settings
     }
@@ -566,27 +544,21 @@ impl AgentSession {
     pub fn set_retry_settings(&self, settings: RetrySettings) {
         self.agent()
             .set_max_retry_delay_ms(settings.max_retry_delay_ms);
-        self.inner.automation.lock().unwrap().retry_settings = settings;
+        self.inner.automation.lock().retry_settings = settings;
     }
 
     pub fn compaction_settings(&self) -> CompactionSettings {
-        self.inner
-            .automation
-            .lock()
-            .unwrap()
-            .compaction_settings
-            .clone()
+        self.inner.automation.lock().compaction_settings.clone()
     }
 
     pub fn set_compaction_settings(&self, settings: CompactionSettings) {
-        self.inner.automation.lock().unwrap().compaction_settings = settings;
+        self.inner.automation.lock().compaction_settings = settings;
     }
 
     pub fn is_retrying(&self) -> bool {
         self.inner
             .automation
             .lock()
-            .unwrap()
             .retry_done_tx
             .as_ref()
             .is_some_and(|done_tx| {
@@ -692,14 +664,7 @@ impl AgentSession {
     }
 
     pub fn abort_retry(&self) {
-        if let Some(cancel_tx) = self
-            .inner
-            .automation
-            .lock()
-            .unwrap()
-            .retry_cancel_tx
-            .clone()
-        {
+        if let Some(cancel_tx) = self.inner.automation.lock().retry_cancel_tx.clone() {
             let _ = cancel_tx.send(true);
         }
     }
@@ -731,7 +696,7 @@ impl AgentSession {
         exclude_from_context: bool,
     ) -> Result<BashResult, crate::CodingAgentCoreError> {
         let abort_rx = {
-            let mut bash_state = self.inner.bash_state.lock().unwrap();
+            let mut bash_state = self.inner.bash_state.lock();
             if bash_state.abort_tx.is_some() {
                 return Err(crate::CodingAgentCoreError::Message(String::from(
                     "A bash command is already running",
@@ -743,7 +708,7 @@ impl AgentSession {
         };
 
         let execution = run_session_bash_command(cwd, &command, abort_rx).await;
-        self.inner.bash_state.lock().unwrap().abort_tx = None;
+        self.inner.bash_state.lock().abort_tx = None;
         let result = execution?;
         self.record_bash_result(command, result.clone(), exclude_from_context)?;
         Ok(result)
@@ -767,12 +732,7 @@ impl AgentSession {
         );
 
         if self.state().is_streaming {
-            self.inner
-                .bash_state
-                .lock()
-                .unwrap()
-                .pending_messages
-                .push(message);
+            self.inner.bash_state.lock().pending_messages.push(message);
             return Ok(());
         }
 
@@ -780,23 +740,17 @@ impl AgentSession {
     }
 
     pub fn abort_bash(&self) {
-        if let Some(abort_tx) = self.inner.bash_state.lock().unwrap().abort_tx.clone() {
+        if let Some(abort_tx) = self.inner.bash_state.lock().abort_tx.clone() {
             let _ = abort_tx.send(true);
         }
     }
 
     pub fn is_bash_running(&self) -> bool {
-        self.inner.bash_state.lock().unwrap().abort_tx.is_some()
+        self.inner.bash_state.lock().abort_tx.is_some()
     }
 
     pub fn has_pending_bash_messages(&self) -> bool {
-        !self
-            .inner
-            .bash_state
-            .lock()
-            .unwrap()
-            .pending_messages
-            .is_empty()
+        !self.inner.bash_state.lock().pending_messages.is_empty()
     }
 
     pub fn set_label(
@@ -812,7 +766,6 @@ impl AgentSession {
 
         session_manager
             .lock()
-            .expect("session manager mutex poisoned")
             .append_label_change(entry_id, label)
             .map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))?;
         Ok(())
@@ -830,7 +783,6 @@ impl AgentSession {
 
         session_manager
             .lock()
-            .expect("session manager mutex poisoned")
             .append_session_info(name)
             .map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))?;
         Ok(())
@@ -848,9 +800,7 @@ impl AgentSession {
         };
 
         let preparation = {
-            let session_manager = session_manager
-                .lock()
-                .expect("session manager mutex poisoned");
+            let session_manager = session_manager.lock();
             prepare_tree_navigation(&session_manager, target_id)
                 .map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))?
         };
@@ -899,9 +849,7 @@ impl AgentSession {
         };
 
         let (session_context, navigation) = {
-            let mut session_manager = session_manager
-                .lock()
-                .expect("session manager mutex poisoned");
+            let mut session_manager = session_manager.lock();
             let navigation = apply_tree_navigation(
                 &mut session_manager,
                 &preparation,
@@ -926,7 +874,6 @@ impl AgentSession {
 
         session_manager
             .lock()
-            .expect("session manager mutex poisoned")
             .get_entries()
             .iter()
             .filter_map(|entry| match entry {
@@ -1009,9 +956,7 @@ impl AgentSession {
 
         if let Some(session_manager) = self.session_manager() {
             let branch_entries = {
-                let session_manager = session_manager
-                    .lock()
-                    .expect("session manager mutex poisoned");
+                let session_manager = session_manager.lock();
                 let leaf_id = session_manager.get_leaf_id().map(str::to_owned);
                 session_manager.get_branch(leaf_id.as_deref())
             };
@@ -1047,7 +992,6 @@ impl AgentSession {
 
         session_manager
             .lock()
-            .expect("session manager mutex poisoned")
             .export_branch_jsonl(output_path)
             .map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))
     }
@@ -1089,7 +1033,7 @@ impl AgentSession {
     }
 
     async fn wait_for_retry(&self) {
-        let retry_done = self.inner.automation.lock().unwrap().retry_done_tx.clone();
+        let retry_done = self.inner.automation.lock().retry_done_tx.clone();
         let Some(retry_done) = retry_done else {
             return;
         };
@@ -1134,9 +1078,7 @@ impl AgentSession {
         };
 
         let path_entries = {
-            let session_manager = session_manager
-                .lock()
-                .expect("session manager mutex poisoned");
+            let session_manager = session_manager.lock();
             let leaf_id = session_manager.get_leaf_id().map(str::to_owned);
             session_manager.get_branch(leaf_id.as_deref())
         };
@@ -1179,7 +1121,7 @@ async fn handle_agent_session_event(
     if let AgentEvent::MessageStart { message } = &event
         && matches!(message.as_standard_message(), Some(Message::User { .. }))
     {
-        automation.lock().unwrap().overflow_recovery_attempted = false;
+        automation.lock().overflow_recovery_attempted = false;
         dequeue_session_queue_message(&queue_state, &listeners, message);
     }
 
@@ -1191,7 +1133,7 @@ async fn handle_agent_session_event(
         if let Some(assistant) = agent_message_to_assistant(message) {
             let mut completed_retry_attempt = None;
             {
-                let mut automation = automation.lock().unwrap();
+                let mut automation = automation.lock();
                 automation.last_assistant_message = Some(assistant.clone());
                 if assistant.stop_reason != StopReason::Error {
                     automation.overflow_recovery_attempted = false;
@@ -1223,7 +1165,7 @@ async fn handle_agent_session_event(
     flush_pending_bash_messages(&core, session_manager.as_ref(), &bash_state);
 
     let assistant = {
-        let mut automation = automation.lock().unwrap();
+        let mut automation = automation.lock();
         automation.last_assistant_message.take()
     };
     let Some(assistant) = assistant else {
@@ -1255,12 +1197,7 @@ fn emit_session_event(
     listeners: &Arc<Mutex<BTreeMap<usize, SessionEventListener>>>,
     event: AgentSessionEvent,
 ) {
-    let callbacks = listeners
-        .lock()
-        .unwrap()
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
+    let callbacks = listeners.lock().values().cloned().collect::<Vec<_>>();
     for callback in callbacks {
         callback(event.clone());
     }
@@ -1284,7 +1221,7 @@ fn enqueue_session_queue_message(
     };
 
     let event = {
-        let mut queue_state = queue_state.lock().unwrap();
+        let mut queue_state = queue_state.lock();
         if kind == "follow_up" {
             queue_state.follow_up.push(text);
         } else {
@@ -1305,7 +1242,7 @@ fn dequeue_session_queue_message(
     };
 
     let event = {
-        let mut queue_state = queue_state.lock().unwrap();
+        let mut queue_state = queue_state.lock();
         let removed = if let Some(index) =
             queue_state.steering.iter().position(|item| item == &text)
         {
@@ -1336,10 +1273,7 @@ fn persist_session_message(
 
     match message.role() {
         "user" | "assistant" | "toolResult" => {
-            let _ = session_manager
-                .lock()
-                .expect("session manager mutex poisoned")
-                .append_message(message.clone());
+            let _ = session_manager.lock().append_message(message.clone());
         }
         _ => {}
     }
@@ -1358,7 +1292,6 @@ fn append_bash_message(
     if let Some(session_manager) = session_manager {
         session_manager
             .lock()
-            .expect("session manager mutex poisoned")
             .append_message(message)
             .map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))?;
     }
@@ -1372,7 +1305,7 @@ fn flush_pending_bash_messages(
     bash_state: &Arc<Mutex<SessionBashState>>,
 ) {
     let pending_messages = {
-        let mut bash_state = bash_state.lock().unwrap();
+        let mut bash_state = bash_state.lock();
         std::mem::take(&mut bash_state.pending_messages)
     };
 
@@ -1386,9 +1319,7 @@ fn flush_pending_bash_messages(
     });
 
     if let Some(session_manager) = session_manager {
-        let mut session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let mut session_manager = session_manager.lock();
         for message in pending_messages {
             let _ = session_manager.append_message(message);
         }
@@ -1399,12 +1330,7 @@ fn resolve_session_cwd(
     session_manager: Option<&Arc<Mutex<SessionManager>>>,
 ) -> Result<PathBuf, crate::CodingAgentCoreError> {
     if let Some(session_manager) = session_manager {
-        return Ok(PathBuf::from(
-            session_manager
-                .lock()
-                .expect("session manager mutex poisoned")
-                .get_cwd(),
-        ));
+        return Ok(PathBuf::from(session_manager.lock().get_cwd()));
     }
 
     env::current_dir().map_err(|error| crate::CodingAgentCoreError::Message(error.to_string()))
@@ -1601,7 +1527,7 @@ fn agent_message_to_assistant(message: &AgentMessage) -> Option<AssistantMessage
 }
 
 fn resolve_retry_cycle_if_pending(automation: &Arc<Mutex<SessionAutomationState>>) {
-    let mut automation = automation.lock().unwrap();
+    let mut automation = automation.lock();
     resolve_retry_cycle_locked(&mut automation);
 }
 
@@ -1619,7 +1545,7 @@ fn finish_retry_with_failure(
     final_error: String,
 ) {
     {
-        let mut automation = automation.lock().unwrap();
+        let mut automation = automation.lock();
         automation.retry_attempt = 0;
         resolve_retry_cycle_locked(&mut automation);
     }
@@ -1640,7 +1566,7 @@ async fn handle_retryable_error(
     automation: Arc<Mutex<SessionAutomationState>>,
     message: AssistantMessage,
 ) -> bool {
-    let settings = automation.lock().unwrap().retry_settings.clone();
+    let settings = automation.lock().retry_settings.clone();
     if !settings.enabled {
         resolve_retry_cycle_if_pending(&automation);
         return false;
@@ -1648,7 +1574,7 @@ async fn handle_retryable_error(
 
     let mut max_retry_failure = None;
     let (attempt, delay_ms, cancel_tx) = {
-        let mut automation = automation.lock().unwrap();
+        let mut automation = automation.lock();
         if automation.retry_done_tx.is_none() {
             let (done_tx, _) = watch::channel(false);
             automation.retry_done_tx = Some(done_tx);
@@ -1705,7 +1631,7 @@ async fn handle_retryable_error(
         let mut cancel_rx = cancel_tx.expect("retry cancel tx should exist").subscribe();
         tokio::select! {
             _ = sleep(Duration::from_millis(delay_ms)) => {
-                automation_clone.lock().unwrap().retry_cancel_tx = None;
+                automation_clone.lock().retry_cancel_tx = None;
                 core.wait_for_idle().await;
                 if let Err(error) = core.continue_turn().await {
                     finish_retry_with_failure(&listeners_clone, &automation_clone, attempt, error.to_string());
@@ -1729,7 +1655,7 @@ async fn maybe_run_session_auto_compaction(
     automation: Arc<Mutex<SessionAutomationState>>,
     assistant: AssistantMessage,
 ) {
-    let settings = automation.lock().unwrap().compaction_settings.clone();
+    let settings = automation.lock().compaction_settings.clone();
     if !settings.enabled || assistant.stop_reason == StopReason::Aborted {
         return;
     }
@@ -1738,9 +1664,7 @@ async fn maybe_run_session_auto_compaction(
     let same_model =
         assistant.provider == state.model.provider && assistant.model == state.model.id;
     let latest_compaction = {
-        let session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let session_manager = session_manager.lock();
         let leaf_id = session_manager.get_leaf_id().map(str::to_owned);
         latest_compaction_timestamp(&session_manager.get_branch(leaf_id.as_deref()))
     };
@@ -1751,7 +1675,7 @@ async fn maybe_run_session_auto_compaction(
 
     if same_model && is_context_overflow(&assistant, Some(state.model.context_window)) {
         let overflow_recovery_attempted = {
-            let mut automation = automation.lock().unwrap();
+            let mut automation = automation.lock();
             if automation.overflow_recovery_attempted {
                 true
             } else {
@@ -1874,9 +1798,7 @@ async fn run_auto_compaction(
     };
 
     let path_entries = {
-        let session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let session_manager = session_manager.lock();
         let leaf_id = session_manager.get_leaf_id().map(str::to_owned);
         session_manager.get_branch(leaf_id.as_deref())
     };
@@ -1969,9 +1891,7 @@ fn rebuild_compacted_session(
     result: &CompactionResult,
 ) -> Result<(), crate::SessionManagerError> {
     let session_context = {
-        let mut session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let mut session_manager = session_manager.lock();
         session_manager.append_compaction(
             result.summary.clone(),
             result.first_kept_entry_id.clone(),
@@ -2074,9 +1994,7 @@ pub fn create_agent_session(
         && core.bootstrap.existing_session == ExistingSessionSelection::default()
     {
         let existing_session = {
-            let session_manager = session_manager
-                .lock()
-                .expect("session manager mutex poisoned");
+            let session_manager = session_manager.lock();
             build_existing_session_selection(&session_manager)
         };
         core.bootstrap.existing_session = existing_session;
@@ -2234,9 +2152,7 @@ impl AgentSessionRuntime {
     ) -> Result<(), AgentSessionRuntimeError> {
         let session_manager = self.ensure_runtime_session_manager();
         let cwd = {
-            let mut session_manager = session_manager
-                .lock()
-                .expect("session manager mutex poisoned");
+            let mut session_manager = session_manager.lock();
             session_manager.new_session(options);
             PathBuf::from(session_manager.get_cwd())
         };
@@ -2249,9 +2165,7 @@ impl AgentSessionRuntime {
     ) -> Result<Option<String>, AgentSessionRuntimeError> {
         let session_manager = self.ensure_runtime_session_manager();
         let (selected_text, cwd) = {
-            let mut session_manager = session_manager
-                .lock()
-                .expect("session manager mutex poisoned");
+            let mut session_manager = session_manager.lock();
             let selected_entry = session_manager
                 .get_entry(entry_id)
                 .cloned()
@@ -2302,9 +2216,7 @@ impl AgentSessionRuntime {
 
         let session_manager = if let Some(current_manager) = self.session.session_manager() {
             let session_dir = {
-                let current_manager = current_manager
-                    .lock()
-                    .expect("session manager mutex poisoned");
+                let current_manager = current_manager.lock();
                 (!current_manager.get_session_dir().is_empty())
                     .then(|| current_manager.get_session_dir().to_owned())
             };
@@ -2338,16 +2250,12 @@ impl AgentSessionRuntime {
         };
 
         {
-            let session_manager = session_manager
-                .lock()
-                .expect("session manager mutex poisoned");
+            let session_manager = session_manager.lock();
             assert_session_cwd_exists(&session_manager, self.cwd())?;
         }
 
         let cwd = {
-            let session_manager = session_manager
-                .lock()
-                .expect("session manager mutex poisoned");
+            let session_manager = session_manager.lock();
             PathBuf::from(session_manager.get_cwd())
         };
         self.replace_runtime(cwd, Some(session_manager)).await
@@ -2356,9 +2264,7 @@ impl AgentSessionRuntime {
     pub async fn reload(&mut self) -> Result<(), AgentSessionRuntimeError> {
         let session_manager = self.ensure_runtime_session_manager();
         let cwd = {
-            let session_manager = session_manager
-                .lock()
-                .expect("session manager mutex poisoned");
+            let session_manager = session_manager.lock();
             PathBuf::from(session_manager.get_cwd())
         };
         self.replace_runtime(cwd, Some(session_manager)).await
@@ -2382,9 +2288,7 @@ impl AgentSessionRuntime {
         session_manager: Option<Arc<Mutex<SessionManager>>>,
     ) -> Result<(), AgentSessionRuntimeError> {
         if let Some(session_manager) = session_manager.as_ref() {
-            let session_manager = session_manager
-                .lock()
-                .expect("session manager mutex poisoned");
+            let session_manager = session_manager.lock();
             assert_session_cwd_exists(&session_manager, &cwd)?;
         }
 
@@ -2408,9 +2312,7 @@ pub async fn create_agent_session_runtime(
 ) -> Result<AgentSessionRuntime, AgentSessionRuntimeError> {
     let fallback_cwd = request.cwd.clone();
     if let Some(session_manager) = request.session_manager.as_ref() {
-        let session_manager = session_manager
-            .lock()
-            .expect("session manager mutex poisoned");
+        let session_manager = session_manager.lock();
         assert_session_cwd_exists(&session_manager, &fallback_cwd)?;
     }
     let result = create_runtime(request).await?;
@@ -2531,7 +2433,7 @@ impl AssistantStreamer for RegistryBackedStreamer {
                 stream_options.headers = merged_headers;
             }
 
-            let thinking_budgets = thinking_budgets.lock().unwrap().clone();
+            let thinking_budgets = thinking_budgets.lock().clone();
             match stream_simple(model, context, map_stream_options_to_simple_options(stream_options, thinking_budgets)) {
                 Ok(mut inner) => {
                     while let Some(event) = inner.next().await {
@@ -2632,14 +2534,7 @@ fn build_session_restore_state(session_manager: &SessionManager) -> SessionResto
 fn current_runtime_cwd(session: &AgentSession, fallback_cwd: &Path) -> PathBuf {
     session
         .session_manager()
-        .map(|session_manager| {
-            PathBuf::from(
-                session_manager
-                    .lock()
-                    .expect("session manager mutex poisoned")
-                    .get_cwd(),
-            )
-        })
+        .map(|session_manager| PathBuf::from(session_manager.lock().get_cwd()))
         .unwrap_or_else(|| fallback_cwd.to_path_buf())
 }
 

@@ -1,7 +1,8 @@
+use parking_lot::Mutex;
 use pi_tui::RenderHandle;
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
@@ -99,11 +100,7 @@ impl DialogCountdown {
 
     pub(crate) fn stop(&self) {
         self.shared.running.store(false, Ordering::SeqCst);
-        let handle = self
-            .thread_handle
-            .lock()
-            .expect("dialog countdown thread mutex poisoned")
-            .take();
+        let handle = self.thread_handle.lock().take();
         if let Some(handle) = handle {
             let _ = handle.join();
         }

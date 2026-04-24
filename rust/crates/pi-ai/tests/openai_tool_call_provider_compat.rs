@@ -1,13 +1,11 @@
+use parking_lot::Mutex;
 use pi_ai::openai_codex_responses::build_openai_codex_responses_request_params;
 use pi_ai::{PayloadHook, StreamOptions, complete};
 use pi_events::{
     AssistantContent, Context, Message, Model, ModelCost, StopReason, Usage, UserContent,
 };
 use serde_json::{Value, json};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 fn responses_model(api: &str) -> Model {
     Model {
@@ -74,7 +72,7 @@ async fn openai_responses_provider_treats_opencode_tool_ids_as_openai_compatible
     let hook = PayloadHook::new(move |payload, _model| {
         let hook_capture = hook_capture.clone();
         async move {
-            *hook_capture.lock().unwrap() = Some(payload.clone());
+            *hook_capture.lock() = Some(payload.clone());
             Ok(None)
         }
     });
@@ -90,11 +88,7 @@ async fn openai_responses_provider_treats_opencode_tool_ids_as_openai_compatible
     )
     .await;
 
-    let payload = captured
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("expected captured payload");
+    let payload = captured.lock().clone().expect("expected captured payload");
     let input = payload
         .get("input")
         .and_then(Value::as_array)

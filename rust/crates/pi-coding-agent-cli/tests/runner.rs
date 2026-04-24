@@ -1,6 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::stream;
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
+use parking_lot::Mutex;
 use pi_ai::{
     AiProvider, AssistantEventStream, StreamOptions, built_in_models, get_model,
     register_builtin_providers, register_provider, stream_response, unregister_provider,
@@ -19,7 +20,7 @@ use std::{
     io::Cursor,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     thread,
@@ -49,7 +50,7 @@ impl AiProvider for RecordingProvider {
         context: Context,
         options: StreamOptions,
     ) -> AssistantEventStream {
-        *self.recorded.lock().unwrap() = RecordedRequest {
+        *self.recorded.lock() = RecordedRequest {
             context: Some(context),
             model: Some(model.clone()),
             api_key: options.api_key,
@@ -161,7 +162,7 @@ impl ScriptedTerminal {
     }
 
     fn output(&self) -> String {
-        self.writes.lock().unwrap().join("")
+        self.writes.lock().join("")
     }
 }
 
@@ -192,7 +193,7 @@ impl Terminal for ScriptedTerminal {
     }
 
     fn write(&mut self, data: &str) -> Result<(), TuiError> {
-        self.writes.lock().unwrap().push(data.to_owned());
+        self.writes.lock().push(data.to_owned());
         Ok(())
     }
 
@@ -335,10 +336,7 @@ async fn run_command_applies_cli_api_key_override_to_stream_options() {
     assert_eq!(result.exit_code, 0);
     assert_eq!(result.stdout, "done\n");
     assert!(result.stderr.is_empty());
-    assert_eq!(
-        recorded.lock().unwrap().api_key.as_deref(),
-        Some("cli-token")
-    );
+    assert_eq!(recorded.lock().api_key.as_deref(), Some("cli-token"));
 
     unregister_provider(&api);
 }
@@ -411,7 +409,7 @@ async fn run_command_continue_restores_previous_session_context() {
     assert_eq!(second.exit_code, 0);
     assert_eq!(second.stdout, "continued\n");
 
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     let context = request.context.expect("expected recorded context");
     assert_eq!(context.messages.len(), 3);
     match &context.messages[0] {
@@ -554,7 +552,7 @@ async fn run_command_uses_pi_ai_built_in_model_catalog() {
     assert_eq!(result.stdout, "catalog\n");
     assert!(result.stderr.is_empty());
 
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     let context = request.context.expect("expected recorded context");
     assert_eq!(request.api_key.as_deref(), Some("cli-token"));
     assert_eq!(
@@ -608,7 +606,7 @@ async fn run_command_merges_stdin_text_file_args_and_image_attachments() {
     assert_eq!(result.exit_code, 0);
     assert_eq!(result.stdout, "ok\n");
 
-    let recorded = recorded.lock().unwrap().clone();
+    let recorded = recorded.lock().clone();
     let context = recorded.context.expect("expected recorded context");
     assert_eq!(context.messages.len(), 1);
     match &context.messages[0] {
@@ -693,7 +691,7 @@ async fn run_command_loads_block_images_setting_from_global_settings() {
     assert_eq!(result.stdout, "blocked\n");
     assert!(result.stderr.is_empty());
 
-    let recorded = recorded.lock().unwrap().clone();
+    let recorded = recorded.lock().clone();
     let context = recorded.context.expect("expected recorded context");
     match &context.messages[0] {
         pi_events::Message::User { content, .. } => {
@@ -771,7 +769,7 @@ async fn run_command_loads_auto_resize_setting_from_global_settings() {
     assert_eq!(result.stdout, "resized\n");
     assert!(result.stderr.is_empty());
 
-    let recorded = recorded.lock().unwrap().clone();
+    let recorded = recorded.lock().clone();
     let context = recorded.context.expect("expected recorded context");
     match &context.messages[0] {
         pi_events::Message::User { content, .. } => {
@@ -1032,7 +1030,7 @@ async fn run_interactive_command_supports_resume_session_picker() {
     assert!(output.contains("interactive-resume"), "output: {output}");
     assert!(output.contains("next"), "output: {output}");
 
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     let context = request.context.expect("expected recorded context");
     assert_eq!(context.messages.len(), 3, "context: {context:?}");
     match &context.messages[0] {
@@ -1279,7 +1277,7 @@ async fn run_interactive_command_executes_user_bash_and_includes_result_in_next_
         "output: {output}"
     );
 
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     let context = request.context.expect("expected recorded context");
     assert_eq!(context.messages.len(), 2, "context: {context:?}");
     match &context.messages[0] {
@@ -1465,7 +1463,7 @@ async fn run_interactive_command_executes_no_context_user_bash_without_including
         "output: {output}"
     );
 
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     let context = request.context.expect("expected recorded context");
     assert_eq!(context.messages.len(), 1, "context: {context:?}");
     match &context.messages[0] {
@@ -2003,7 +2001,7 @@ async fn run_interactive_command_scopes_model_autocomplete_and_switching_to_scop
     assert!(output.contains(&scoped_target_model_id), "output: {output}");
     assert!(output.contains("interactive-scoped"), "output: {output}");
 
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     assert_eq!(
         request.model.as_ref().map(|model| model.id.as_str()),
         Some(scoped_target_model_id.as_str())
@@ -2089,7 +2087,7 @@ async fn run_interactive_command_executes_quit_slash_command_without_prompting_m
     .await;
 
     assert_eq!(exit_code, 0);
-    assert!(recorded.lock().unwrap().context.is_none());
+    assert!(recorded.lock().context.is_none());
     let output = strip_terminal_control_sequences(&inspector.output());
     assert!(output.contains("/quit"), "output: {output}");
 
@@ -2184,7 +2182,7 @@ async fn run_interactive_command_uses_model_selector_fallback_for_non_exact_mode
     assert!(output.contains(&selected_model_id), "output: {output}");
     assert!(output.contains("interactive-selector"), "output: {output}");
 
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     assert_eq!(
         request.model.as_ref().map(|model| model.id.as_str()),
         Some(selected_model_id.as_str())
@@ -2286,7 +2284,7 @@ async fn run_interactive_command_opens_model_selector_from_app_model_select_keyb
         "output: {output}"
     );
 
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     assert_eq!(
         request.model.as_ref().map(|model| model.id.as_str()),
         Some(selected_model_id.as_str())
@@ -2376,7 +2374,7 @@ async fn run_interactive_command_cycles_scoped_models_from_app_model_cycle_forwa
         "output: {output}"
     );
 
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     assert_eq!(
         request.model.as_ref().map(|model| model.id.as_str()),
         Some(cycled_model_id.as_str())
@@ -2477,7 +2475,7 @@ async fn run_interactive_command_switches_models_via_model_slash_command() {
     assert!(output.contains(&switched_model_id), "output: {output}");
     assert!(output.contains("interactive-switched"), "output: {output}");
 
-    let request = recorded.lock().unwrap().clone();
+    let request = recorded.lock().clone();
     assert_eq!(
         request.model.as_ref().map(|model| model.id.as_str()),
         Some(switched_model_id.as_str())
@@ -2560,7 +2558,6 @@ async fn run_command_uses_first_scoped_model_when_models_flag_is_provided() {
     assert_eq!(
         recorded
             .lock()
-            .unwrap()
             .model
             .as_ref()
             .map(|model| (model.provider.as_str(), model.id.as_str())),
@@ -2603,10 +2600,7 @@ async fn run_command_applies_cli_api_key_override_when_models_flag_selects_initi
     assert_eq!(result.exit_code, 0);
     assert_eq!(result.stdout, "scoped\n");
     assert!(result.stderr.is_empty());
-    assert_eq!(
-        recorded.lock().unwrap().api_key.as_deref(),
-        Some("cli-token")
-    );
+    assert_eq!(recorded.lock().api_key.as_deref(), Some("cli-token"));
 
     unregister_provider(&api);
 }
@@ -2650,10 +2644,7 @@ async fn run_command_uses_auth_json_api_keys_for_initial_model_selection() {
     assert_eq!(result.exit_code, 0);
     assert_eq!(result.stdout, "auth-file\n");
     assert!(result.stderr.is_empty());
-    assert_eq!(
-        recorded.lock().unwrap().api_key.as_deref(),
-        Some("stored-token")
-    );
+    assert_eq!(recorded.lock().api_key.as_deref(), Some("stored-token"));
 
     unregister_provider(&api);
 }

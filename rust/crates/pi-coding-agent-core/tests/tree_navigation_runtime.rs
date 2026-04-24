@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use pi_agent::ThinkingLevel;
 use pi_ai::{
     FauxModelDefinition, RegisterFauxProviderOptions, StreamOptions, register_faux_provider,
@@ -7,10 +8,7 @@ use pi_coding_agent_core::{
     SessionManager, create_agent_session,
 };
 use pi_events::{AssistantContent, Message, UserContent};
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{path::PathBuf, sync::Arc};
 
 #[tokio::test]
 async fn navigate_tree_restores_model_and_thinking_level_from_target_branch() {

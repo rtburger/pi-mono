@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use pi_agent::ThinkingLevel as AgentThinkingLevel;
 use pi_coding_agent_core::{ForkMessageCandidate, SessionStats, SourceInfo};
 use pi_events::{
@@ -11,7 +12,7 @@ use std::{
     io,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -706,7 +707,7 @@ impl RpcClient {
 
     pub fn subscribe_events(&self) -> mpsc::UnboundedReceiver<RpcOutputEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.listeners.lock().unwrap().push(tx);
+        self.listeners.lock().push(tx);
         rx
     }
 
@@ -724,7 +725,7 @@ impl RpcClient {
     }
 
     pub fn stderr(&self) -> String {
-        self.stderr.lock().unwrap().clone()
+        self.stderr.lock().clone()
     }
 
     pub async fn prompt(
@@ -1118,17 +1119,17 @@ impl RpcClient {
         let line = serialize_json_line(&value)?;
         let (tx, rx) = oneshot::channel();
 
-        self.pending_requests.lock().unwrap().insert(id.clone(), tx);
+        self.pending_requests.lock().insert(id.clone(), tx);
 
         if let Err(error) = self.write_line(command, &line).await {
-            self.pending_requests.lock().unwrap().remove(&id);
+            self.pending_requests.lock().remove(&id);
             return Err(error);
         }
 
         let response = timeout(DEFAULT_RPC_RESPONSE_TIMEOUT, rx)
             .await
             .map_err(|_| {
-                self.pending_requests.lock().unwrap().remove(&id);
+                self.pending_requests.lock().remove(&id);
                 RpcClientError::ResponseTimeout {
                     command: command.to_owned(),
                     stderr: self.stderr(),
@@ -1319,7 +1320,7 @@ fn handle_stdout_line(
             let response = serde_json::from_value::<RpcResponseEnvelope>(value.clone())
                 .map_err(|error| format!("Malformed RPC response: {error}"));
             if let Some(id) = id
-                && let Some(sender) = pending_requests.lock().unwrap().remove(&id)
+                && let Some(sender) = pending_requests.lock().remove(&id)
             {
                 let _ = sender.send(response);
             }
@@ -1342,7 +1343,7 @@ fn emit_event(
     listeners: &Arc<Mutex<Vec<mpsc::UnboundedSender<RpcOutputEvent>>>>,
     event: RpcOutputEvent,
 ) {
-    let mut listeners = listeners.lock().unwrap();
+    let mut listeners = listeners.lock();
     listeners.retain(|listener| listener.send(event.clone()).is_ok());
 }
 
@@ -1351,7 +1352,7 @@ fn fail_pending_requests(
     message: String,
 ) {
     let pending = {
-        let mut pending = pending_requests.lock().unwrap();
+        let mut pending = pending_requests.lock();
         pending
             .drain()
             .map(|(_, sender)| sender)
@@ -1364,7 +1365,7 @@ fn fail_pending_requests(
 }
 
 fn clear_listeners(listeners: &Arc<Mutex<Vec<mpsc::UnboundedSender<RpcOutputEvent>>>>) {
-    listeners.lock().unwrap().clear();
+    listeners.lock().clear();
 }
 
 async fn read_stderr(mut stderr: ChildStderr, stderr_buffer: Arc<Mutex<String>>) -> io::Result<()> {
@@ -1376,7 +1377,7 @@ async fn read_stderr(mut stderr: ChildStderr, stderr_buffer: Arc<Mutex<String>>)
         }
 
         let text = String::from_utf8_lossy(&chunk[..read]).into_owned();
-        stderr_buffer.lock().unwrap().push_str(&text);
+        stderr_buffer.lock().push_str(&text);
         eprint!("{text}");
     }
 }

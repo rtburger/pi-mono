@@ -1,4 +1,5 @@
 use async_stream::stream;
+use parking_lot::Mutex;
 use pi_agent::ThinkingLevel;
 use pi_ai::{
     AiProvider, AssistantEventStream, FauxModelDefinition, FauxResponse,
@@ -18,9 +19,10 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::Mutex as TokioMutex;
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let unique = SystemTime::now()
@@ -54,9 +56,9 @@ fn unique_name(prefix: &str) -> String {
     format!("{prefix}-{unique}")
 }
 
-fn provider_registry_guard() -> std::sync::MutexGuard<'static, ()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
+async fn provider_registry_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static GUARD: OnceLock<TokioMutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| TokioMutex::new(())).lock().await
 }
 
 #[derive(Clone)]
@@ -94,7 +96,7 @@ impl AiProvider for RecordingProvider {
     ) -> AssistantEventStream {
         let recorded_api_key = self.recorded_api_key.clone();
         Box::pin(stream! {
-            *recorded_api_key.lock().unwrap() = options.api_key.clone();
+            *recorded_api_key.lock() = options.api_key.clone();
 
             let partial = AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone());
             let mut message = partial.clone();
@@ -128,7 +130,7 @@ impl AiProvider for RecordingContextProvider {
     ) -> AssistantEventStream {
         let contexts = self.contexts.clone();
         Box::pin(stream! {
-            contexts.lock().unwrap().push(context);
+            contexts.lock().push(context);
 
             let partial = AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone());
             let mut message = partial.clone();
@@ -162,7 +164,7 @@ impl AiProvider for RecordingOptionsProvider {
     ) -> AssistantEventStream {
         let seen_options = self.seen_options.clone();
         Box::pin(stream! {
-            seen_options.lock().unwrap().push(options);
+            seen_options.lock().push(options);
 
             let partial = AssistantMessage::empty(model.api.clone(), model.provider.clone(), model.id.clone());
             let mut message = partial.clone();
@@ -603,7 +605,7 @@ async fn runtime_can_toggle_block_images_between_requests() {
         .await
         .unwrap();
 
-    let contexts = recorded_contexts.lock().unwrap();
+    let contexts = recorded_contexts.lock();
     assert_eq!(contexts.len(), 2);
     assert_eq!(
         contexts[0].messages.last(),
@@ -643,7 +645,7 @@ async fn runtime_can_toggle_block_images_between_requests() {
 
 #[tokio::test]
 async fn runtime_registry_backed_streamer_uses_simple_stream_reasoning_mapping() {
-    let _guard = provider_registry_guard();
+    let _guard = provider_registry_guard().await;
     let faux = register_faux_provider(RegisterFauxProviderOptions::default());
     let faux_model = faux.get_model(None).expect("faux model");
     let _ = stream_response(faux_model, Context::default(), StreamOptions::default())
@@ -696,7 +698,7 @@ async fn runtime_registry_backed_streamer_uses_simple_stream_reasoning_mapping()
     assert_eq!(created.core.state().thinking_level, ThinkingLevel::High);
     created.core.prompt_text("Hi").await.unwrap();
 
-    let seen_options = seen_options.lock().unwrap().clone();
+    let seen_options = seen_options.lock().clone();
     assert_eq!(seen_options.len(), 1);
     assert_eq!(seen_options[0].api_key.as_deref(), Some("test-token"));
     assert_eq!(seen_options[0].reasoning_effort.as_deref(), Some("high"));
@@ -708,7 +710,7 @@ async fn runtime_registry_backed_streamer_uses_simple_stream_reasoning_mapping()
 
 #[tokio::test]
 async fn runtime_registry_backed_streamer_forwards_custom_thinking_budgets() {
-    let _guard = provider_registry_guard();
+    let _guard = provider_registry_guard().await;
     let faux = register_faux_provider(RegisterFauxProviderOptions::default());
     let faux_model = faux.get_model(None).expect("faux model");
     let _ = stream_response(faux_model, Context::default(), StreamOptions::default())
@@ -764,7 +766,7 @@ async fn runtime_registry_backed_streamer_forwards_custom_thinking_budgets() {
     });
     created.core.prompt_text("Hi").await.unwrap();
 
-    let seen_options = seen_options.lock().unwrap().clone();
+    let seen_options = seen_options.lock().clone();
     assert_eq!(seen_options.len(), 1);
     assert_eq!(seen_options[0].reasoning_effort.as_deref(), Some("high"));
     assert_eq!(seen_options[0].max_tokens, Some(34_048));
@@ -820,10 +822,7 @@ async fn runtime_uses_async_request_auth_resolution() {
 
     created.core.prompt_text("Hi").await.unwrap();
 
-    assert_eq!(
-        recorded_api_key.lock().unwrap().as_deref(),
-        Some("refreshed-token")
-    );
+    assert_eq!(recorded_api_key.lock().as_deref(), Some("refreshed-token"));
     let state = created.core.state();
     let last = state
         .messages

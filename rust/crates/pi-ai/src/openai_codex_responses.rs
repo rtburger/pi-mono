@@ -13,6 +13,7 @@ use crate::{
 use async_stream::stream;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::{SinkExt, StreamExt};
+use parking_lot::Mutex;
 use pi_events::{
     AssistantEvent, AssistantMessage, Context, Model, StopReason, ToolDefinition, Usage,
 };
@@ -21,7 +22,7 @@ use serde_json::Value;
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -448,13 +449,13 @@ fn codex_websocket_cache() -> &'static Mutex<BTreeMap<String, Arc<CachedCodexWeb
 }
 
 fn abort_idle_task(entry: &CachedCodexWebSocketEntry) {
-    if let Some(handle) = entry.idle_task.lock().unwrap().take() {
+    if let Some(handle) = entry.idle_task.lock().take() {
         handle.abort();
     }
 }
 
 fn remove_cached_websocket_entry_if_same(session_id: &str, entry: &Arc<CachedCodexWebSocketEntry>) {
-    let mut cache = codex_websocket_cache().lock().unwrap();
+    let mut cache = codex_websocket_cache().lock();
     if cache
         .get(session_id)
         .is_some_and(|current| Arc::ptr_eq(current, entry))
@@ -472,7 +473,7 @@ fn schedule_session_websocket_expiry(session_id: String, entry: Arc<CachedCodexW
         tokio::time::sleep(Duration::from_millis(SESSION_WEBSOCKET_CACHE_TTL_MS)).await;
 
         let should_remove = {
-            let cache = codex_websocket_cache().lock().unwrap();
+            let cache = codex_websocket_cache().lock();
             cache
                 .get(&session_id_for_task)
                 .is_some_and(|current| Arc::ptr_eq(current, &entry_for_task))
@@ -489,7 +490,7 @@ fn schedule_session_websocket_expiry(session_id: String, entry: Arc<CachedCodexW
         }
     });
 
-    *entry.idle_task.lock().unwrap() = Some(handle);
+    *entry.idle_task.lock() = Some(handle);
 }
 
 fn stream_openai_codex_connected_websocket(
@@ -628,7 +629,7 @@ async fn acquire_codex_websocket(
 ) -> Result<AcquiredCodexWebSocket, String> {
     if let Some(session_cache_id) = session_cache_id {
         let cached_entry = {
-            let cache = codex_websocket_cache().lock().unwrap();
+            let cache = codex_websocket_cache().lock();
             cache.get(session_cache_id).cloned()
         };
         if let Some(entry) = cached_entry {
@@ -656,7 +657,6 @@ async fn acquire_codex_websocket(
         let entry = Arc::new(CachedCodexWebSocketEntry::new());
         codex_websocket_cache()
             .lock()
-            .unwrap()
             .insert(session_cache_id.to_string(), entry.clone());
         return Ok(AcquiredCodexWebSocket {
             socket: Some(socket),

@@ -1,4 +1,5 @@
 use crate::{KeyHintStyler, StartupHeaderStyler};
+use parking_lot::Mutex;
 use pi_agent::ThinkingLevel;
 use pi_coding_agent_core::{ResourceDiagnostic, SourceInfo};
 use pi_tui::MarkdownTheme;
@@ -7,7 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{Arc, OnceLock, mpsc},
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -388,25 +389,15 @@ pub fn markdown_theme() -> MarkdownTheme {
 }
 
 pub fn current_theme() -> Theme {
-    theme_registry()
-        .lock()
-        .expect("theme registry mutex poisoned")
-        .current
-        .clone()
+    theme_registry().lock().current.clone()
 }
 
 pub fn current_theme_name() -> String {
-    theme_registry()
-        .lock()
-        .expect("theme registry mutex poisoned")
-        .current_name
-        .clone()
+    theme_registry().lock().current_name.clone()
 }
 
 pub fn set_registered_themes(themes: Vec<Theme>) {
-    let mut registry = theme_registry()
-        .lock()
-        .expect("theme registry mutex poisoned");
+    let mut registry = theme_registry().lock();
     registry.registered = themes
         .into_iter()
         .map(|theme| (theme.name().to_owned(), theme))
@@ -414,9 +405,7 @@ pub fn set_registered_themes(themes: Vec<Theme>) {
 }
 
 pub fn get_available_themes() -> Vec<String> {
-    let registry = theme_registry()
-        .lock()
-        .expect("theme registry mutex poisoned");
+    let registry = theme_registry().lock();
     let mut themes = BTreeSet::new();
     themes.extend(built_in_themes().keys().cloned());
     themes.extend(registry.registered.keys().cloned());
@@ -424,9 +413,7 @@ pub fn get_available_themes() -> Vec<String> {
 }
 
 pub fn get_available_themes_with_paths() -> Vec<ThemeInfo> {
-    let registry = theme_registry()
-        .lock()
-        .expect("theme registry mutex poisoned");
+    let registry = theme_registry().lock();
     let mut themes = BTreeMap::<String, ThemeInfo>::new();
 
     for (name, theme) in built_in_themes() {
@@ -450,9 +437,7 @@ pub fn get_available_themes_with_paths() -> Vec<ThemeInfo> {
 }
 
 pub fn get_theme_by_name(name: &str) -> Option<Theme> {
-    let registry = theme_registry()
-        .lock()
-        .expect("theme registry mutex poisoned");
+    let registry = theme_registry().lock();
     registry
         .registered
         .get(name)
@@ -462,9 +447,7 @@ pub fn get_theme_by_name(name: &str) -> Option<Theme> {
 
 pub fn set_theme_instance(theme: Theme) {
     {
-        let mut registry = theme_registry()
-            .lock()
-            .expect("theme registry mutex poisoned");
+        let mut registry = theme_registry().lock();
         registry.current = theme;
         registry.current_name = String::from("<in-memory>");
     }
@@ -483,9 +466,7 @@ pub fn init_theme(theme_name: Option<&str>) -> ThemeSelectionResult {
 pub fn set_theme(theme_name: &str) -> ThemeSelectionResult {
     let fallback = built_in_theme("dark").expect("dark theme must exist");
     let selected_theme = {
-        let mut registry = theme_registry()
-            .lock()
-            .expect("theme registry mutex poisoned");
+        let mut registry = theme_registry().lock();
 
         if let Some(theme) = registry
             .registered
@@ -621,10 +602,7 @@ fn theme_watcher_handle() -> &'static Mutex<Option<ThemeWatcherHandle>> {
 }
 
 fn stop_theme_watcher() {
-    let watcher = theme_watcher_handle()
-        .lock()
-        .expect("theme watcher mutex poisoned")
-        .take();
+    let watcher = theme_watcher_handle().lock().take();
     if let Some(watcher) = watcher {
         let _ = watcher.stop_tx.send(());
         let _ = watcher.thread.join();
@@ -673,9 +651,7 @@ fn restart_theme_watcher(theme_name: &str, theme: &Theme) {
                 continue;
             };
 
-            let mut registry = theme_registry()
-                .lock()
-                .expect("theme registry mutex poisoned");
+            let mut registry = theme_registry().lock();
             if registry.current_name != watched_name {
                 continue;
             }
@@ -686,9 +662,7 @@ fn restart_theme_watcher(theme_name: &str, theme: &Theme) {
         }
     });
 
-    *theme_watcher_handle()
-        .lock()
-        .expect("theme watcher mutex poisoned") = Some(ThemeWatcherHandle { stop_tx, thread });
+    *theme_watcher_handle().lock() = Some(ThemeWatcherHandle { stop_tx, thread });
 }
 
 fn built_in_themes() -> &'static BTreeMap<String, Theme> {

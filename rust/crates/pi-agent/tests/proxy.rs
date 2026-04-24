@@ -1,4 +1,5 @@
 use futures::StreamExt;
+use parking_lot::Mutex;
 use pi_agent::{ProxyStreamConfig, stream_proxy};
 use pi_ai::StreamOptions;
 use pi_events::{
@@ -9,7 +10,7 @@ use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
     net::TcpListener,
-    sync::{Arc, Mutex},
+    sync::Arc,
     thread,
 };
 use tokio::sync::watch;
@@ -131,8 +132,7 @@ fn start_server(response: String, captured_request_body: Arc<Mutex<Option<Value>
             body.extend_from_slice(&buffer[..read]);
         }
 
-        *captured_request_body.lock().unwrap() =
-            Some(serde_json::from_slice::<Value>(&body).unwrap());
+        *captured_request_body.lock() = Some(serde_json::from_slice::<Value>(&body).unwrap());
 
         socket.write_all(response.as_bytes()).unwrap();
     });
@@ -207,7 +207,7 @@ async fn proxy_stream_posts_camel_case_request_and_reconstructs_events() {
         ]
     );
 
-    let body = request_body.lock().unwrap().clone().unwrap();
+    let body = request_body.lock().clone().unwrap();
     assert_eq!(body["model"]["baseUrl"], json!("https://api.example.com"));
     assert!(body["model"].get("base_url").is_none());
     assert_eq!(body["context"]["systemPrompt"], json!("sys"));

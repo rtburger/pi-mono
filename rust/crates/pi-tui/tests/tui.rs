@@ -1,3 +1,4 @@
+use parking_lot::{Mutex, MutexGuard};
 use pi_tui::{
     CURSOR_MARKER, Component, Container, InputListenerResult, OverlayAnchor, OverlayMargin,
     OverlayOptions, SizeValue, Terminal, Tui, TuiError, get_cell_dimensions, set_cell_dimensions,
@@ -7,7 +8,7 @@ use std::{
     cell::Cell,
     ffi::OsString,
     sync::{
-        Arc, LazyLock, Mutex, MutexGuard,
+        Arc, LazyLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -82,16 +83,13 @@ impl Component for ViewportAwareComponent {
     fn invalidate(&mut self) {}
 
     fn set_viewport_size(&self, width: usize, height: usize) {
-        *self.viewport.lock().expect("viewport mutex poisoned") = Some((width, height));
+        *self.viewport.lock() = Some((width, height));
     }
 }
 
 impl Component for DynamicComponent {
     fn render(&self, _width: usize) -> Vec<String> {
-        self.lines
-            .lock()
-            .expect("dynamic lines mutex poisoned")
-            .clone()
+        self.lines.lock().clone()
     }
 
     fn invalidate(&mut self) {}
@@ -107,7 +105,7 @@ struct EnvVarGuard {
 
 impl EnvVarGuard {
     fn set(key: &'static str, value: Option<&str>) -> Self {
-        let lock = ENV_LOCK.lock().expect("env mutex poisoned");
+        let lock = ENV_LOCK.lock();
         let previous = std::env::var_os(key);
         match value {
             Some(value) => {
@@ -155,18 +153,11 @@ struct FocusableProbe {
 
 impl FocusableProbe {
     fn focused(&self) -> bool {
-        self.state
-            .lock()
-            .expect("focusable state mutex poisoned")
-            .focused
+        self.state.lock().focused
     }
 
     fn inputs(&self) -> Vec<String> {
-        self.state
-            .lock()
-            .expect("focusable state mutex poisoned")
-            .inputs
-            .clone()
+        self.state.lock().inputs.clone()
     }
 }
 
@@ -205,11 +196,7 @@ impl Component for FocusableComponent {
     fn invalidate(&mut self) {}
 
     fn handle_input(&mut self, data: &str) {
-        self.state
-            .lock()
-            .expect("focusable state mutex poisoned")
-            .inputs
-            .push(data.to_owned());
+        self.state.lock().inputs.push(data.to_owned());
     }
 
     fn wants_key_release(&self) -> bool {
@@ -217,10 +204,7 @@ impl Component for FocusableComponent {
     }
 
     fn set_focused(&mut self, focused: bool) {
-        self.state
-            .lock()
-            .expect("focusable state mutex poisoned")
-            .focused = focused;
+        self.state.lock().focused = focused;
     }
 }
 
@@ -259,51 +243,34 @@ impl MockTerminal {
     }
 
     fn writes(&self) -> Vec<String> {
-        self.state
-            .lock()
-            .expect("mock terminal mutex poisoned")
-            .writes
-            .clone()
+        self.state.lock().writes.clone()
     }
 
     fn clear_writes(&self) {
-        self.state
-            .lock()
-            .expect("mock terminal mutex poisoned")
-            .writes
-            .clear();
+        self.state.lock().writes.clear();
     }
 
     fn started(&self) -> usize {
-        self.state
-            .lock()
-            .expect("mock terminal mutex poisoned")
-            .started
+        self.state.lock().started
     }
 
     fn stopped(&self) -> usize {
-        self.state
-            .lock()
-            .expect("mock terminal mutex poisoned")
-            .stopped
+        self.state.lock().stopped
     }
 
     fn cursor_hidden(&self) -> bool {
-        self.state
-            .lock()
-            .expect("mock terminal mutex poisoned")
-            .cursor_hidden
+        self.state.lock().cursor_hidden
     }
 
     fn send_input(&self, data: &str) {
-        let mut state = self.state.lock().expect("mock terminal mutex poisoned");
+        let mut state = self.state.lock();
         if let Some(handler) = state.on_input.as_mut() {
             handler(data.to_owned());
         }
     }
 
     fn resize(&self, columns: u16, rows: u16) {
-        let mut state = self.state.lock().expect("mock terminal mutex poisoned");
+        let mut state = self.state.lock();
         state.columns = columns;
         state.rows = rows;
         if let Some(handler) = state.on_resize.as_mut() {
@@ -318,7 +285,7 @@ impl Terminal for MockTerminal {
         on_input: Box<dyn FnMut(String) + Send>,
         on_resize: Box<dyn FnMut() + Send>,
     ) -> Result<(), TuiError> {
-        let mut state = self.state.lock().expect("mock terminal mutex poisoned");
+        let mut state = self.state.lock();
         state.started += 1;
         state.on_input = Some(on_input);
         state.on_resize = Some(on_resize);
@@ -326,7 +293,7 @@ impl Terminal for MockTerminal {
     }
 
     fn stop(&mut self) -> Result<(), TuiError> {
-        let mut state = self.state.lock().expect("mock terminal mutex poisoned");
+        let mut state = self.state.lock();
         state.stopped += 1;
         state.on_input = None;
         state.on_resize = None;
@@ -338,23 +305,17 @@ impl Terminal for MockTerminal {
     }
 
     fn write(&mut self, data: &str) -> Result<(), TuiError> {
-        let mut state = self.state.lock().expect("mock terminal mutex poisoned");
+        let mut state = self.state.lock();
         state.writes.push(data.to_owned());
         Ok(())
     }
 
     fn columns(&self) -> u16 {
-        self.state
-            .lock()
-            .expect("mock terminal mutex poisoned")
-            .columns
+        self.state.lock().columns
     }
 
     fn rows(&self) -> u16 {
-        self.state
-            .lock()
-            .expect("mock terminal mutex poisoned")
-            .rows
+        self.state.lock().rows
     }
 
     fn kitty_protocol_active(&self) -> bool {
@@ -366,13 +327,13 @@ impl Terminal for MockTerminal {
     }
 
     fn hide_cursor(&mut self) -> Result<(), TuiError> {
-        let mut state = self.state.lock().expect("mock terminal mutex poisoned");
+        let mut state = self.state.lock();
         state.cursor_hidden = true;
         Ok(())
     }
 
     fn show_cursor(&mut self) -> Result<(), TuiError> {
-        let mut state = self.state.lock().expect("mock terminal mutex poisoned");
+        let mut state = self.state.lock();
         state.cursor_hidden = false;
         Ok(())
     }
@@ -403,10 +364,7 @@ fn render_for_size_propagates_viewport_size_to_root_children() {
 
     let _ = tui.render_for_size(30, 7);
 
-    assert_eq!(
-        *viewport.lock().expect("viewport mutex poisoned"),
-        Some((30, 7))
-    );
+    assert_eq!(*viewport.lock(), Some((30, 7)));
 }
 
 #[test]
@@ -959,17 +917,12 @@ fn debug_handler_runs_before_focused_component() {
     let debug_count = Arc::new(Mutex::new(0u32));
     let debug_count_for_handler = Arc::clone(&debug_count);
     tui.set_debug_handler(move || {
-        *debug_count_for_handler
-            .lock()
-            .expect("debug counter mutex poisoned") += 1;
+        *debug_count_for_handler.lock() += 1;
     });
 
     tui.handle_input("\x1b[27;6;100~")
         .expect("debug key should be handled");
-    assert_eq!(
-        *debug_count.lock().expect("debug counter mutex poisoned"),
-        1
-    );
+    assert_eq!(*debug_count.lock(), 1);
     assert_eq!(editor_probe.inputs(), Vec::<String>::new());
 
     tui.clear_debug_handler();
@@ -1141,7 +1094,7 @@ fn request_render_updates_only_changed_lines_without_full_clear() {
     tui.start().expect("start should succeed");
     inspector.clear_writes();
 
-    *lines.lock().expect("dynamic lines mutex poisoned") = vec![
+    *lines.lock() = vec![
         "Header".to_owned(),
         "Working |".to_owned(),
         "Footer".to_owned(),
@@ -1172,8 +1125,7 @@ fn render_handle_queues_rerender_until_terminal_events_are_drained() {
     tui.start().expect("start should succeed");
     let writes_before = inspector.writes().len();
 
-    *lines.lock().expect("dynamic lines mutex poisoned") =
-        vec!["hello".to_owned(), "there".to_owned()];
+    *lines.lock() = vec!["hello".to_owned(), "there".to_owned()];
     render_handle.request_render();
 
     assert_eq!(inspector.writes().len(), writes_before);
@@ -1202,8 +1154,7 @@ fn render_handle_coalesces_multiple_pending_redraw_requests() {
     tui.start().expect("start should succeed");
     inspector.clear_writes();
 
-    *lines.lock().expect("dynamic lines mutex poisoned") =
-        vec!["hello".to_owned(), "there".to_owned()];
+    *lines.lock() = vec!["hello".to_owned(), "there".to_owned()];
     render_handle.request_render();
     render_handle.request_render();
     render_handle.request_render();
@@ -1275,8 +1226,7 @@ fn clear_on_shrink_triggers_full_redraw_and_tracks_count() {
     assert_eq!(tui.full_redraws(), 1);
     inspector.clear_writes();
 
-    *lines.lock().expect("dynamic lines mutex poisoned") =
-        vec!["Line 0".to_owned(), "Line 1".to_owned()];
+    *lines.lock() = vec!["Line 0".to_owned(), "Line 1".to_owned()];
     tui.request_render(false)
         .expect("shrink render should succeed");
 
@@ -1303,8 +1253,7 @@ fn viewport_reset_after_shrink_allows_append_without_another_full_redraw() {
     assert_eq!(tui.full_redraws(), 1);
     inspector.clear_writes();
 
-    *lines.lock().expect("dynamic lines mutex poisoned") =
-        vec!["Line 0".to_owned(), "Line 1".to_owned()];
+    *lines.lock() = vec!["Line 0".to_owned(), "Line 1".to_owned()];
     tui.request_render(false)
         .expect("viewport-reset render should succeed");
 
@@ -1317,7 +1266,7 @@ fn viewport_reset_after_shrink_allows_append_without_another_full_redraw() {
     );
 
     inspector.clear_writes();
-    *lines.lock().expect("dynamic lines mutex poisoned") = vec![
+    *lines.lock() = vec![
         "Line 0".to_owned(),
         "Line 1".to_owned(),
         "Line 2".to_owned(),

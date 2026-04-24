@@ -1,14 +1,12 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use parking_lot::{Mutex, MutexGuard};
 use pi_tui::{
     CellDimensions, ImageDimensions, ImageProtocol, ImageRenderOptions, allocate_image_id,
     get_capabilities, get_gif_dimensions, get_image_dimensions, get_jpeg_dimensions,
     get_png_dimensions, get_webp_dimensions, image_fallback, is_image_line, render_image,
     reset_capabilities_cache, set_cell_dimensions,
 };
-use std::{
-    ffi::OsString,
-    sync::{LazyLock, Mutex, MutexGuard},
-};
+use std::{ffi::OsString, sync::LazyLock};
 
 static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 const GUARDED_ENV_VARS: &[&str] = &[
@@ -29,7 +27,7 @@ struct TestGuard {
 
 impl TestGuard {
     fn new() -> Self {
-        let lock = TEST_LOCK.lock().expect("terminal image test lock");
+        let lock = TEST_LOCK.lock();
         let previous_env = GUARDED_ENV_VARS
             .iter()
             .map(|name| (*name, std::env::var_os(name)))

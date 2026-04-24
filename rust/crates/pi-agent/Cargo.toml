@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 async-stream.workspace = true
 futures.workspace = true
+parking_lot.workspace = true
 pi-ai = { path = "../pi-ai" }
 pi-events = { path = "../pi-events" }
 pi-json-utils = { path = "../pi-json-utils" }

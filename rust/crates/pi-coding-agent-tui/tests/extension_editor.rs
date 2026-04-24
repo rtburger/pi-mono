@@ -1,14 +1,10 @@
+use parking_lot::Mutex;
 use pi_coding_agent_tui::{
     ExtensionEditorComponent, ExternalEditorCommandRunner, ExternalEditorHost, KeyId,
     KeybindingsManager,
 };
 use pi_tui::Component;
-use std::{
-    collections::BTreeMap,
-    fs, io,
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::{collections::BTreeMap, fs, io, path::Path, sync::Arc};
 
 fn config(entries: &[(&str, &[&str])]) -> BTreeMap<String, Vec<KeyId>> {
     entries
@@ -29,24 +25,15 @@ struct RecordingHost {
 
 impl ExternalEditorHost for RecordingHost {
     fn stop(&self) {
-        self.events
-            .lock()
-            .expect("host events mutex poisoned")
-            .push(String::from("stop"));
+        self.events.lock().push(String::from("stop"));
     }
 
     fn start(&self) {
-        self.events
-            .lock()
-            .expect("host events mutex poisoned")
-            .push(String::from("start"));
+        self.events.lock().push(String::from("start"));
     }
 
     fn request_render(&self) {
-        self.events
-            .lock()
-            .expect("host events mutex poisoned")
-            .push(String::from("request_render"));
+        self.events.lock().push(String::from("request_render"));
     }
 }
 
@@ -70,10 +57,7 @@ impl RecordingRunner {
 impl ExternalEditorCommandRunner for RecordingRunner {
     fn run(&self, command: &str, file_path: &Path) -> io::Result<Option<i32>> {
         let current_text = fs::read_to_string(file_path)?;
-        self.calls
-            .lock()
-            .expect("runner calls mutex poisoned")
-            .push((command.to_owned(), current_text));
+        self.calls.lock().push((command.to_owned(), current_text));
         if let Some(replacement) = &self.replacement {
             fs::write(file_path, replacement)?;
         }
@@ -112,22 +96,14 @@ fn extension_editor_submit_flows_through_wrapped_editor() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let mut component = ExtensionEditorComponent::new(&keybindings, "Title", None);
     component.set_on_submit(move |value| {
-        *submitted_for_callback
-            .lock()
-            .expect("submitted mutex poisoned") = Some(value);
+        *submitted_for_callback.lock() = Some(value);
     });
 
     component.handle_input("h");
     component.handle_input("i");
     component.handle_input("\r");
 
-    assert_eq!(
-        submitted
-            .lock()
-            .expect("submitted mutex poisoned")
-            .as_deref(),
-        Some("hi")
-    );
+    assert_eq!(submitted.lock().as_deref(), Some("hi"));
     assert_eq!(component.get_text(), "");
 }
 
@@ -139,14 +115,12 @@ fn extension_editor_cancel_binding_uses_callback_and_preserves_text() {
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let mut component = ExtensionEditorComponent::new(&keybindings, "Title", Some("draft"));
     component.set_on_cancel(move || {
-        *cancel_calls_for_callback
-            .lock()
-            .expect("cancel mutex poisoned") += 1;
+        *cancel_calls_for_callback.lock() += 1;
     });
 
     component.handle_input("\x1b");
 
-    assert_eq!(*cancel_calls.lock().expect("cancel mutex poisoned"), 1);
+    assert_eq!(*cancel_calls.lock(), 1);
     assert_eq!(component.get_text(), "draft");
 }
 
@@ -158,14 +132,12 @@ fn extension_editor_external_editor_binding_invokes_callback_and_does_not_mutate
     let keybindings = KeybindingsManager::new(BTreeMap::new(), None);
     let mut component = ExtensionEditorComponent::new(&keybindings, "Title", Some("draft"));
     component.set_on_external_editor(move || {
-        *external_calls_for_callback
-            .lock()
-            .expect("external mutex poisoned") += 1;
+        *external_calls_for_callback.lock() += 1;
     });
 
     component.handle_input("\x07");
 
-    assert_eq!(*external_calls.lock().expect("external mutex poisoned"), 1);
+    assert_eq!(*external_calls.lock(), 1);
     assert_eq!(component.get_text(), "draft");
 }
 
@@ -187,17 +159,11 @@ fn extension_editor_default_external_editor_action_updates_text_and_requests_ren
 
     assert_eq!(component.get_text(), "edited from external");
     assert_eq!(
-        runner_calls
-            .lock()
-            .expect("runner calls mutex poisoned")
-            .as_slice(),
+        runner_calls.lock().as_slice(),
         &[(String::from("mock-editor --wait"), String::from("draft"))]
     );
     assert_eq!(
-        host_events
-            .lock()
-            .expect("host events mutex poisoned")
-            .as_slice(),
+        host_events.lock().as_slice(),
         [
             String::from("stop"),
             String::from("start"),
@@ -231,20 +197,13 @@ fn extension_editor_external_editor_callback_takes_precedence_over_default_actio
     component.set_external_editor_command_runner(runner);
     component.set_external_editor_command("mock-editor --wait");
     component.set_on_external_editor(move || {
-        *external_calls_for_callback
-            .lock()
-            .expect("external mutex poisoned") += 1;
+        *external_calls_for_callback.lock() += 1;
     });
 
     component.handle_input("\x07");
 
-    assert_eq!(*external_calls.lock().expect("external mutex poisoned"), 1);
-    assert!(
-        runner_calls
-            .lock()
-            .expect("runner calls mutex poisoned")
-            .is_empty()
-    );
+    assert_eq!(*external_calls.lock(), 1);
+    assert!(runner_calls.lock().is_empty());
     assert_eq!(component.get_text(), "draft");
 }
 
@@ -276,10 +235,7 @@ fn extension_editor_writes_expanded_large_paste_content_to_the_external_editor_f
     component.handle_input("\x07");
 
     assert_eq!(
-        runner_calls
-            .lock()
-            .expect("runner calls mutex poisoned")
-            .as_slice(),
+        runner_calls.lock().as_slice(),
         &[(String::from("mock-editor --wait"), pasted_text)]
     );
 }
@@ -300,20 +256,16 @@ fn extension_editor_uses_configured_cancel_and_external_editor_keybindings() {
     );
     let mut component = ExtensionEditorComponent::new(&keybindings, "Title", Some("draft"));
     component.set_on_cancel(move || {
-        *cancel_calls_for_callback
-            .lock()
-            .expect("cancel mutex poisoned") += 1;
+        *cancel_calls_for_callback.lock() += 1;
     });
     component.set_on_external_editor(move || {
-        *external_calls_for_callback
-            .lock()
-            .expect("external mutex poisoned") += 1;
+        *external_calls_for_callback.lock() += 1;
     });
 
     component.handle_input("\x18");
     component.handle_input("\x1be");
 
-    assert_eq!(*cancel_calls.lock().expect("cancel mutex poisoned"), 1);
-    assert_eq!(*external_calls.lock().expect("external mutex poisoned"), 1);
+    assert_eq!(*cancel_calls.lock(), 1);
+    assert_eq!(*external_calls.lock(), 1);
     assert_eq!(component.get_text(), "draft");
 }

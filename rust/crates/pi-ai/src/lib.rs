@@ -26,6 +26,7 @@ pub use overflow::{is_context_overflow, overflow_patterns};
 
 use async_stream::stream;
 use futures::{Stream, StreamExt};
+use parking_lot::Mutex;
 use pi_events::{
     AssistantContent, AssistantEvent, AssistantMessage, Context, Message, Model, ModelCost,
     StopReason, Usage, UserContent,
@@ -38,7 +39,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc, Mutex, Once, OnceLock,
+        Arc, Once, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -225,11 +226,11 @@ pub trait AiProvider: Send + Sync {
 }
 
 pub fn register_provider(api: impl Into<String>, provider: Arc<dyn AiProvider>) {
-    registry().lock().unwrap().insert(api.into(), provider);
+    registry().lock().insert(api.into(), provider);
 }
 
 pub fn unregister_provider(api: &str) {
-    registry().lock().unwrap().remove(api);
+    registry().lock().remove(api);
 }
 
 pub fn get_env_api_key(provider: &str) -> Option<String> {
@@ -302,7 +303,6 @@ pub fn stream_response(
     ensure_builtin_providers_registered();
     let provider = registry()
         .lock()
-        .unwrap()
         .get(&model.api)
         .cloned()
         .ok_or_else(|| AiError::UnknownApi(model.api.clone()))?;
@@ -501,16 +501,16 @@ impl FauxRegistration {
     }
 
     pub fn set_responses(&self, responses: Vec<FauxResponse>) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state.pending = responses.into();
     }
 
     pub fn pending_response_count(&self) -> usize {
-        self.state.lock().unwrap().pending.len()
+        self.state.lock().pending.len()
     }
 
     pub fn call_count(&self) -> usize {
-        self.state.lock().unwrap().call_count
+        self.state.lock().call_count
     }
 
     pub fn unregister(&self) {
@@ -585,7 +585,7 @@ impl AiProvider for FauxProvider {
         let chunk_delay = self.chunk_delay;
         Box::pin(stream! {
             let response = {
-                let mut guard = state.lock().unwrap();
+                let mut guard = state.lock();
                 guard.call_count += 1;
                 guard.pending.pop_front()
             };
@@ -755,7 +755,7 @@ fn estimate_usage(
     let cache_retention = options.cache_retention.unwrap_or(CacheRetention::Short);
     if let Some(session_id) = &options.session_id {
         if cache_retention != CacheRetention::None {
-            let mut guard = state.lock().unwrap();
+            let mut guard = state.lock();
             if let Some(previous) = guard.prompt_cache.get(session_id).cloned() {
                 let prefix = common_prefix_len(&previous, &prompt);
                 cache_read = estimate_tokens(&previous[..prefix]);

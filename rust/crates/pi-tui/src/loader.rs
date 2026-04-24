@@ -1,8 +1,9 @@
 use crate::{Component, KeybindingsManager, RenderHandle, Text, matches_key};
+use parking_lot::Mutex;
 use std::{
     boxed::Box as StdBox,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
@@ -95,10 +96,7 @@ impl Loader {
     }
 
     pub fn start(&self) {
-        let mut thread_handle = self
-            .thread_handle
-            .lock()
-            .expect("loader thread mutex poisoned");
+        let mut thread_handle = self.thread_handle.lock();
         if thread_handle.is_some() {
             return;
         }
@@ -122,11 +120,7 @@ impl Loader {
 
     pub fn stop(&self) {
         self.shared.running.store(false, Ordering::SeqCst);
-        let handle = self
-            .thread_handle
-            .lock()
-            .expect("loader thread mutex poisoned")
-            .take();
+        let handle = self.thread_handle.lock().take();
         if let Some(handle) = handle {
             let _ = handle.join();
         }
@@ -137,31 +131,18 @@ impl Loader {
     }
 
     pub fn set_message(&self, message: impl Into<String>) {
-        *self
-            .shared
-            .message
-            .lock()
-            .expect("loader message mutex poisoned") = message.into();
+        *self.shared.message.lock() = message.into();
         self.shared.request_render();
     }
 
     pub fn message(&self) -> String {
-        self.shared
-            .message
-            .lock()
-            .expect("loader message mutex poisoned")
-            .clone()
+        self.shared.message.lock().clone()
     }
 
     fn formatted_text(&self) -> String {
         let frame =
             SPINNER_FRAMES[self.shared.frame_index.load(Ordering::Relaxed) % SPINNER_FRAMES.len()];
-        let message = self
-            .shared
-            .message
-            .lock()
-            .expect("loader message mutex poisoned")
-            .clone();
+        let message = self.shared.message.lock().clone();
         format!(
             "{} {}",
             (self.spinner_color_fn)(frame),

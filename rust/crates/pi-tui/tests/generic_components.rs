@@ -1,12 +1,9 @@
+use parking_lot::Mutex;
 use pi_tui::{
     Box as TuiBox, CancellableLoader, Component, DefaultTextStyle, DynamicBorder, Loader, Markdown,
     MarkdownTheme, Text, visible_width,
 };
-use std::{
-    sync::{Arc, Mutex},
-    thread,
-    time::Duration,
-};
+use std::{sync::Arc, thread, time::Duration};
 
 const KEY_ESCAPE: &str = "\x1b";
 
@@ -100,7 +97,7 @@ fn cancellable_loader_aborts_on_escape() {
     );
     {
         let aborted = Arc::clone(&aborted);
-        loader.set_on_abort(move || *aborted.lock().expect("aborted mutex poisoned") = true);
+        loader.set_on_abort(move || *aborted.lock() = true);
     }
 
     let signal = loader.signal();
@@ -112,7 +109,7 @@ fn cancellable_loader_aborts_on_escape() {
 
     assert!(*loader.signal().borrow());
     assert!(loader.aborted());
-    assert!(*aborted.lock().expect("aborted mutex poisoned"));
+    assert!(*aborted.lock());
 }
 
 #[test]

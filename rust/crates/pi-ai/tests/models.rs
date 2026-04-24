@@ -1,14 +1,11 @@
+use parking_lot::Mutex;
 use pi_ai::{
     BUILT_IN_MODEL_PROVIDERS, built_in_models, calculate_cost, get_env_api_key, get_model,
     get_models, get_providers, models_are_equal, supports_xhigh,
 };
 use pi_events::{Model, ModelCost, Usage, UsageCost};
 use serde::Deserialize;
-use std::{
-    collections::BTreeMap,
-    ffi::OsString,
-    sync::{Mutex, OnceLock},
-};
+use std::{collections::BTreeMap, ffi::OsString, sync::OnceLock};
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -19,7 +16,7 @@ fn with_env_vars<F>(updates: &[(&str, Option<&str>)], test: F)
 where
     F: FnOnce(),
 {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock();
     let snapshot = updates
         .iter()
         .map(|(key, _)| ((*key).to_string(), std::env::var_os(key)))
