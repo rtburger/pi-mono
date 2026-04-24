@@ -8,6 +8,7 @@ license.workspace = true
 async-stream.workspace = true
 base64 = "0.22"
 futures.workspace = true
+httpdate = "1"
 pi-events = { path = "../pi-events" }
 pi-json-utils = { path = "../pi-json-utils" }
 rand = "0.8"

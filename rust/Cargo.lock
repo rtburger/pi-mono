@@ -1475,6 +1475,7 @@ dependencies = [
  "async-stream",
  "base64 0.22.1",
  "futures",
+ "httpdate",
  "httpmock",
  "pi-events",
  "pi-json-utils",

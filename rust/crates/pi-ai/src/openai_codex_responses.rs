@@ -7,6 +7,7 @@ use crate::{
         convert_openai_responses_messages, is_signal_aborted, is_terminal_event, wait_for_abort,
     },
     register_provider,
+    retry::{RetryError, RetryOptions, send_request_with_retry},
     unicode::sanitize_provider_text,
 };
 use async_stream::stream;
@@ -43,8 +44,6 @@ const OPENAI_BETA_RESPONSES_WEBSOCKETS: &str = "responses_websockets=2026-02-06"
 const SESSION_WEBSOCKET_CACHE_TTL_MS: u64 = 50;
 #[cfg(not(test))]
 const SESSION_WEBSOCKET_CACHE_TTL_MS: u64 = 5 * 60 * 1000;
-const MAX_HTTP_RETRIES: u32 = 3;
-const BASE_RETRY_DELAY_MS: u64 = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct OpenAiCodexResponsesRequestOptions {
@@ -789,113 +788,28 @@ where
 {
     let client = reqwest::Client::new();
     let url = resolve_codex_url(&model.base_url);
-    let mut last_error = None;
 
-    for attempt in 0..=MAX_HTTP_RETRIES {
-        if is_signal_aborted(signal) {
-            return Err("Request was aborted".into());
-        }
-
-        let mut request_builder = client.post(&url);
-        for (name, value) in request_headers {
-            request_builder = request_builder.header(name, value);
-        }
-        let send_future = request_builder.json(params).send();
-        tokio::pin!(send_future);
-
-        let response = if let Some(signal) = signal.as_mut() {
-            tokio::select! {
-                response = &mut send_future => response,
-                _ = wait_for_abort(signal) => return Err("Request was aborted".into()),
+    send_request_with_retry(
+        RetryOptions {
+            max_attempts: 4,
+            initial_backoff_ms: 1_000,
+            max_backoff_ms: 8_000,
+            jitter_ratio: 0.0,
+        },
+        signal,
+        || {
+            let mut request_builder = client.post(&url);
+            for (name, value) in request_headers {
+                request_builder = request_builder.header(name, value);
             }
-        } else {
-            send_future.await
-        };
-
-        match response {
-            Ok(response) if response.status().is_success() => return Ok(response),
-            Ok(response) => {
-                let status = response.status();
-                let body = read_codex_http_error_body(response, signal).await?;
-                if attempt < MAX_HTTP_RETRIES
-                    && is_retryable_codex_http_error(status.as_u16(), &body)
-                {
-                    sleep_with_abort(
-                        Duration::from_millis(BASE_RETRY_DELAY_MS * 2u64.pow(attempt)),
-                        signal,
-                    )
-                    .await?;
-                    continue;
-                }
-                let detail = if body.is_empty() {
-                    format!("HTTP request failed with status {status}")
-                } else {
-                    format!("HTTP request failed with status {status}: {body}")
-                };
-                return Err(detail);
-            }
-            Err(error) => {
-                if attempt < MAX_HTTP_RETRIES {
-                    sleep_with_abort(
-                        Duration::from_millis(BASE_RETRY_DELAY_MS * 2u64.pow(attempt)),
-                        signal,
-                    )
-                    .await?;
-                    last_error = Some(format!("HTTP request failed: {error}"));
-                    continue;
-                }
-                return Err(format!("HTTP request failed: {error}"));
-            }
-        }
-    }
-
-    Err(last_error.unwrap_or_else(|| "HTTP request failed after retries".into()))
-}
-
-async fn read_codex_http_error_body(
-    response: reqwest::Response,
-    signal: &mut Option<tokio::sync::watch::Receiver<bool>>,
-) -> Result<String, String> {
-    let body_future = response.text();
-    tokio::pin!(body_future);
-
-    if let Some(signal) = signal.as_mut() {
-        tokio::select! {
-            body = &mut body_future => Ok(body.unwrap_or_default()),
-            _ = wait_for_abort(signal) => Err("Request was aborted".into()),
-        }
-    } else {
-        Ok(body_future.await.unwrap_or_default())
-    }
-}
-
-async fn sleep_with_abort(
-    duration: Duration,
-    signal: &mut Option<tokio::sync::watch::Receiver<bool>>,
-) -> Result<(), String> {
-    if let Some(signal) = signal.as_mut() {
-        tokio::select! {
-            _ = tokio::time::sleep(duration) => Ok(()),
-            _ = wait_for_abort(signal) => Err("Request was aborted".into()),
-        }
-    } else {
-        tokio::time::sleep(duration).await;
-        Ok(())
-    }
-}
-
-fn is_retryable_codex_http_error(status: u16, error_text: &str) -> bool {
-    if matches!(status, 429 | 500 | 502 | 503 | 504) {
-        return true;
-    }
-
-    let error_text = error_text.to_ascii_lowercase();
-    error_text.contains("rate limit")
-        || error_text.contains("ratelimit")
-        || error_text.contains("overloaded")
-        || error_text.contains("service unavailable")
-        || error_text.contains("upstream connect")
-        || error_text.contains("connection refused")
+            async { request_builder.json(params).send().await }
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        RetryError::Aborted => "Request was aborted".into(),
+        RetryError::Message(message) => message,
+    })
 }
 
 pub fn register_openai_codex_responses_provider() {

@@ -6,6 +6,7 @@ pub mod openai_completions;
 pub mod openai_responses;
 pub mod overflow;
 mod partial_json;
+mod retry;
 mod unicode;
 
 pub use models::{

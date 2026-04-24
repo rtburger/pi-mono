@@ -1,0 +1,1 @@
+- Pre-existing clippy warnings remain in `rust/crates/pi-ai/src/anthropic_messages.rs`, `rust/crates/pi-ai/src/openai_completions.rs`, `rust/crates/pi-ai/src/oauth.rs`, and `rust/crates/pi-ai/src/lib.rs`; not addressed in the retry/backoff task.
